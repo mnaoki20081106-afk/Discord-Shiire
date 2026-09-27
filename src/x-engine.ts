@@ -10,6 +10,7 @@ import {
   pendingPurchaseOrders,
   readyInventoryCount,
   recordFundingEvent,
+  updateFundingEventByProviderReference,
   setCircuitBreaker,
   storeDeliveredAccounts,
   successfulPurchaseCountForProduct,
@@ -21,6 +22,7 @@ import { loadXSettings, saveXSettings } from "./x-settings";
 import { calculateFundingAllowance } from "./x-risk";
 import {
   getBinanceBalance,
+  getBinanceOrder,
   getLtcJpyMarketStatus,
   placeLtcJpyMarketBuy
 } from "./providers/binance";
@@ -458,17 +460,21 @@ async function handleHstoraFundingNeed(
   }
 
   const clientOrderId=("shiirex_"+randomId()).slice(0,36);
+  await recordFundingEvent(env,{
+    provider:"binance_japan",
+    kind:"LTC_PURCHASE",
+    amountJpy:Math.floor(desired),
+    asset:"LTC",
+    status:"INTENT",
+    providerReference:clientOrderId,
+    metadata:{clientOrderId}
+  });
   try{
     const order=await placeLtcJpyMarketBuy(env,{quoteJpy:Math.floor(desired),clientOrderId,live:true});
-    await recordFundingEvent(env,{
-      provider:"binance_japan",
-      kind:"LTC_PURCHASE",
-      amountJpy:Math.floor(desired),
-      asset:"LTC",
-      assetAmount:Number(order.executedQty??0),
+    await updateFundingEventByProviderReference(env,"binance_japan",clientOrderId,{
       status:String(order.status??"SUBMITTED").toUpperCase(),
-      providerReference:String(order.orderId),
-      metadata:{clientOrderId}
+      assetAmount:Number(order.executedQty??0),
+      metadata:{clientOrderId,orderId:order.orderId}
     });
     await notifyDiscord(env,{
       title:"LTC購入",
@@ -477,13 +483,36 @@ async function handleHstoraFundingNeed(
     }).catch(()=>undefined);
     return {action:"LTC_PURCHASE_SUBMITTED",dryRun:false,details:{orderId:order.orderId,status:order.status}};
   }catch(error){
+    try{
+      const recovered=await getBinanceOrder(env,{origClientOrderId:clientOrderId});
+      await updateFundingEventByProviderReference(env,"binance_japan",clientOrderId,{
+        status:String(recovered.status??"SUBMITTED").toUpperCase(),
+        assetAmount:Number(recovered.executedQty??0),
+        metadata:{clientOrderId,orderId:recovered.orderId,recovered:true}
+      });
+      await auditX(env,{
+        kind:"BINANCE_ORDER_RECOVERED",
+        message:"Binance order was recovered by clientOrderId after an ambiguous submission result.",
+        details:{clientOrderId,orderId:recovered.orderId,status:recovered.status}
+      });
+      return {
+        action:"LTC_PURCHASE_RECOVERED",
+        dryRun:false,
+        details:{orderId:recovered.orderId,status:recovered.status}
+      };
+    }catch{}
+    await updateFundingEventByProviderReference(env,"binance_japan",clientOrderId,{
+      status:"UNKNOWN",
+      metadata:{clientOrderId}
+    });
     await setCircuitBreaker(env,"binance_purchase","OPEN",error instanceof Error?error.message:String(error));
     await notifyDiscord(env,{
       title:"Circuit Breaker: LTC購入",
-      message:"LTC購入処理に失敗したため停止しました。",
-      level:"error"
+      message:"LTC購入結果をclientOrderIdでも照合できなかったため停止しました。手動確認が必要です。",
+      level:"error",
+      details:{clientOrderId}
     }).catch(()=>undefined);
-    return {action:"LTC_PURCHASE_FAILED",dryRun:false};
+    return {action:"LTC_PURCHASE_UNKNOWN",dryRun:false,details:{clientOrderId}};
   }
 }
 
