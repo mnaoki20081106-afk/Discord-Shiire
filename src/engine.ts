@@ -29,6 +29,160 @@ function retryDelay(attempt:number){
   return minutes*60_000;
 }
 
+function isOutOfStock(error:unknown):boolean{
+  return error instanceof SupplierError&&error.code==="OUT_OF_STOCK";
+}
+
+async function acquireJob(
+  env:Env,
+  product:ProductRow,
+  job:JobRow
+):Promise<JobRow>{
+  const existingRaw=await rawJobItems(env,job.id);
+  if(existingRaw.length>0){
+    return await getJob(env,job.id)??job;
+  }
+
+  const supplier=await getSupplier(env,product.supplier_id);
+  if(!supplier||!supplier.enabled){
+    await updateJob(env,job.id,{
+      status:"failed",
+      error:"SUPPLIER_NOT_FOUND_OR_DISABLED",
+      nextRetryAt:null
+    });
+    throw new Error("SUPPLIER_NOT_FOUND_OR_DISABLED");
+  }
+
+  const attempt=job.attempt_count+1;
+  try{
+    const raw=await acquireFromSupplier(
+      env,
+      supplier,
+      product.supplier_sku,
+      job.requested_qty,
+      "shiire-acquire:"+job.id
+    );
+    if(raw.length===0) throw new SupplierError("OUT_OF_STOCK",true);
+    await storeRawJobItems(env,job.id,raw);
+    return await getJob(env,job.id)??job;
+  }catch(error){
+    const supplierError=error instanceof SupplierError?error:null;
+    const out=supplierError?.code==="OUT_OF_STOCK";
+    const retryable=Boolean(supplierError?.retryable);
+    const message=error instanceof Error?error.message:String(error);
+    await updateJob(env,job.id,{
+      status:out
+        ?"out_of_stock"
+        :retryable
+          ?"acquisition_failed"
+          :"failed",
+      attemptCount:attempt,
+      nextRetryAt:out
+        ?Date.now()+OUT_OF_STOCK_RETRY_MS
+        :retryable
+          ?Date.now()+retryDelay(attempt)
+          :null,
+      error:message
+    });
+    await logEvent(env,{
+      level:out?"warn":"error",
+      kind:out?"out_of_stock":"acquire_failed",
+      productId:product.id,
+      jobId:job.id,
+      message
+    });
+    throw error;
+  }
+}
+
+async function processJob(
+  env:Env,
+  product:ProductRow,
+  job:JobRow
+):Promise<JobRow>{
+  const existingFinal=await jobItems(env,job.id);
+  if(existingFinal.length>0){
+    const updated=await updateJob(env,job.id,{
+      status:"acquired",
+      acquiredQty:existingFinal.length,
+      nextRetryAt:null,
+      error:null
+    });
+    if(!updated) throw new Error("JOB_NOT_FOUND");
+    return updated;
+  }
+
+  const raw=await rawJobItems(env,job.id);
+  if(raw.length===0){
+    await updateJob(env,job.id,{
+      status:"failed",
+      error:"RAW_ITEMS_MISSING",
+      nextRetryAt:null
+    });
+    throw new Error("RAW_ITEMS_MISSING");
+  }
+
+  try{
+    const processed=await processItems(
+      env,
+      product.processor_kind,
+      product.processor_config_json,
+      raw
+    );
+    if(processed.length===0){
+      throw new ProcessorError("PROCESSOR_RETURNED_NO_ITEMS",true);
+    }
+    const stored=await storeJobItems(env,job.id,product.id,processed);
+    if(stored===0){
+      const already=await jobItems(env,job.id);
+      if(already.length>0){
+        const recovered=await updateJob(env,job.id,{
+          status:"acquired",
+          acquiredQty:already.length,
+          nextRetryAt:null,
+          error:null
+        });
+        if(!recovered) throw new Error("JOB_NOT_FOUND");
+        return recovered;
+      }
+      await updateJob(env,job.id,{
+        status:"failed",
+        acquiredQty:0,
+        error:"ALL_ITEMS_DUPLICATE",
+        nextRetryAt:null
+      });
+      throw new Error("ALL_ITEMS_DUPLICATE");
+    }
+    const updated=await updateJob(env,job.id,{
+      status:"acquired",
+      acquiredQty:stored,
+      nextRetryAt:null,
+      error:null
+    });
+    if(!updated) throw new Error("JOB_NOT_FOUND");
+    return updated;
+  }catch(error){
+    if(error instanceof Error&&error.message==="ALL_ITEMS_DUPLICATE") throw error;
+    const retryable=error instanceof ProcessorError?error.retryable:true;
+    const attempt=job.attempt_count+1;
+    const message=error instanceof Error?error.message:String(error);
+    await updateJob(env,job.id,{
+      status:retryable?"processing_failed":"failed",
+      attemptCount:attempt,
+      nextRetryAt:retryable?Date.now()+retryDelay(attempt):null,
+      error:message
+    });
+    await logEvent(env,{
+      level:"error",
+      kind:"processing_failed",
+      productId:product.id,
+      jobId:job.id,
+      message
+    });
+    throw error;
+  }
+}
+
 async function deliverJob(
   env:Env,
   product:ProductRow,
@@ -43,6 +197,7 @@ async function deliverJob(
     });
     throw new Error("NO_ACQUIRED_ITEMS");
   }
+
   const attempt=job.attempt_count+1;
   try{
     const result=await deliverToMain(env,{
@@ -84,87 +239,22 @@ async function deliverJob(
   }
 }
 
-async function processJob(
-  env:Env,
-  product:ProductRow,
-  job:JobRow
-){
-  const existingFinal=await jobItems(env,job.id);
-  if(existingFinal.length>0){
-    return updateJob(env,job.id,{
-      status:"acquired",
-      acquiredQty:existingFinal.length,
-      nextRetryAt:null,
-      error:null
-    });
-  }
-  const raw=await rawJobItems(env,job.id);
-  if(raw.length===0){
-    await updateJob(env,job.id,{
-      status:"failed",
-      error:"RAW_ITEMS_MISSING",
-      nextRetryAt:null
-    });
-    throw new Error("RAW_ITEMS_MISSING");
-  }
-  try{
-    const processed=await processItems(
-      env,
-      product.processor_kind,
-      product.processor_config_json,
-      raw
-    );
-    if(processed.length===0){
-      throw new ProcessorError("PROCESSOR_RETURNED_NO_ITEMS",true);
-    }
-    const stored=await storeJobItems(env,job.id,product.id,processed);
-    if(stored===0){
-      await updateJob(env,job.id,{
-        status:"failed",
-        acquiredQty:0,
-        error:"ALL_ITEMS_DUPLICATE",
-        nextRetryAt:null
-      });
-      throw new Error("ALL_ITEMS_DUPLICATE");
-    }
-    return await updateJob(env,job.id,{
-      status:"acquired",
-      acquiredQty:stored,
-      nextRetryAt:null,
-      error:null
-    });
-  }catch(error){
-    const retryable=error instanceof ProcessorError?error.retryable:true;
-    const attempt=job.attempt_count+1;
-    const message=error instanceof Error?error.message:String(error);
-    await updateJob(env,job.id,{
-      status:retryable?"processing_failed":"failed",
-      attemptCount:attempt,
-      nextRetryAt:retryable?Date.now()+retryDelay(attempt):null,
-      error:message
-    });
-    await logEvent(env,{
-      level:"error",
-      kind:"processing_failed",
-      productId:product.id,
-      jobId:job.id,
-      message
-    });
-    throw error;
-  }
-}
-
 async function recoverJob(
   env:Env,
   product:ProductRow,
   job:JobRow
 ){
-  if(job.status==="processing_failed"){
-    const processed=await processJob(env,product,job);
-    if(!processed) return null;
-    return deliverJob(env,product,processed);
+  let current=job;
+  if(current.status==="acquiring"||current.status==="acquisition_failed"){
+    current=await acquireJob(env,product,current);
+    current=await processJob(env,product,current);
+    return deliverJob(env,product,current);
   }
-  return deliverJob(env,product,job);
+  if(current.status==="processing_failed"){
+    current=await processJob(env,product,current);
+    return deliverJob(env,product,current);
+  }
+  return deliverJob(env,product,current);
 }
 
 export type RunResult={
@@ -194,13 +284,25 @@ export async function runProduct(
   try{
     const recoverable=await findRecoverableJob(env,product.id);
     if(recoverable){
-      const result=await recoverJob(env,product,recoverable);
-      return {
-        productId:product.id,
-        action:"recovered",
-        delivered:result?.added??0,
-        jobId:recoverable.id
-      };
+      try{
+        const result=await recoverJob(env,product,recoverable);
+        return {
+          productId:product.id,
+          action:"recovered",
+          delivered:result.added,
+          jobId:recoverable.id
+        };
+      }catch(error){
+        if(isOutOfStock(error)){
+          return {
+            productId:product.id,
+            action:"out_of_stock",
+            requested:recoverable.requested_qty,
+            jobId:recoverable.id
+          };
+        }
+        throw error;
+      }
     }
 
     if(await hasBlockedJob(env,product.id)){
@@ -228,39 +330,19 @@ export async function runProduct(
       };
     }
 
-    const supplier=await getSupplier(env,product.supplier_id);
-    if(!supplier||!supplier.enabled) throw new Error("SUPPLIER_NOT_FOUND_OR_DISABLED");
-
     const job=await createJob(env,product.id,requested);
-    let raw:string[];
     try{
-      raw=await acquireFromSupplier(
-        env,
-        supplier,
-        product.supplier_sku,
-        requested
-      );
-      if(raw.length===0) throw new SupplierError("OUT_OF_STOCK",true);
-    }catch(error){
-      const supplierError=error instanceof SupplierError?error:null;
-      const out=supplierError?.code==="OUT_OF_STOCK";
-      const message=error instanceof Error?error.message:String(error);
-      await updateJob(env,job.id,{
-        status:out?"out_of_stock":"failed",
-        attemptCount:1,
-        nextRetryAt:out||supplierError?.retryable
-          ?Date.now()+(out?OUT_OF_STOCK_RETRY_MS:retryDelay(1))
-          :null,
-        error:message
-      });
-      await logEvent(env,{
-        level:out?"warn":"error",
-        kind:out?"out_of_stock":"acquire_failed",
+      const result=await recoverJob(env,product,job);
+      return {
         productId:product.id,
-        jobId:job.id,
-        message
-      });
-      if(out){
+        action:"restocked",
+        available:result.available,
+        requested,
+        delivered:result.added,
+        jobId:job.id
+      };
+    }catch(error){
+      if(isOutOfStock(error)){
         return {
           productId:product.id,
           action:"out_of_stock",
@@ -271,19 +353,6 @@ export async function runProduct(
       }
       throw error;
     }
-
-    await storeRawJobItems(env,job.id,raw);
-    const processed=await processJob(env,product,await getJob(env,job.id)??job);
-    if(!processed) throw new Error("PROCESSING_FAILED");
-    const result=await deliverJob(env,product,processed);
-    return {
-      productId:product.id,
-      action:"restocked",
-      available:result.available,
-      requested,
-      delivered:result.added,
-      jobId:job.id
-    };
   }finally{
     await releaseProductLock(env,product.id,lock).catch(()=>undefined);
   }
