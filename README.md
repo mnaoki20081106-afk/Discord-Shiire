@@ -212,7 +212,9 @@ PayPay (manual official-UI boundary)
   -> HStora official API purchase
   -> encrypted D1 inventory
   -> READY_FOR_DELIVERY
-  -> future Xaccount-Bot DeliveryProvider
+  -> Discord-Shiire vending reservation
+  -> buyer DM delivery
+  -> DELIVERED
 ```
 
 The admin page is available at:
@@ -336,7 +338,7 @@ HStora delivery data is never stored in plaintext.
 - duplicate fingerprint: keyed HMAC
 - DB state after purchase: `READY_FOR_DELIVERY`
 
-The future Xaccount-Bot delivery contract is intentionally not called yet.
+X-account credentials stay encrypted while they are in stock. Discord-Shiire's own vending flow reserves encrypted records, decrypts only for the final buyer DM, and then changes the account state to `DELIVERED`. The main Xaccount-Bot does not receive or store these X-account credentials.
 
 ### Required Worker Secrets for X procurement
 
@@ -356,7 +358,6 @@ Optional / feature-specific:
 ```text
 BINANCE_TRAVEL_RULE_QUESTIONNAIRE
 DISCORD_NOTIFY_WEBHOOK_URL
-HSTORA_WEBHOOK_SECRET
 ```
 
 For live withdrawal support, use a **separate** Binance API key rather than expanding the trading key:
@@ -430,3 +431,79 @@ HSTORA_WEBHOOK_SECRET
 The receiver verifies the official HStora v1 signature headers and canonical body hash. It never logs the webhook payload. `X-HStore-Delivery-Id` is stored for idempotency so webhook retries cannot process the same delivery twice.
 
 Order events trigger reconciliation through the official HStora Order Lookup API. `order.refunded` and `order.disputed` open a circuit breaker and stop further automatic procurement until an admin explicitly resets it.
+
+
+### Discord-Shiire vending
+
+X-account inventory can now be sold directly by Discord-Shiire instead of being copied into the main bot's plaintext vending stock.
+
+State flow:
+
+```text
+READY_FOR_DELIVERY
+  -> VENDING_RESERVED
+  -> payment_pending
+  -> paid
+  -> delivering
+  -> delivery_sent
+  -> DELIVERED
+```
+
+Important properties:
+
+- X-account credentials remain AES-GCM encrypted while in stock or reserved.
+- A buyer receives plaintext credentials only in the final Discord DM.
+- Public/private purchase logs never contain the purchased credentials.
+- Order reservations count toward the procurement stock target, so temporary checkout reservations do not trigger unnecessary additional HStora purchases.
+- A submitted payment link changes the order to `payment_pending`; the 10-minute unpaid-order expiry no longer releases stock while payment receipt is unresolved.
+- Delivery uses Discord message `nonce` + `enforce_nonce` and also persists `delivery_sent` before final stock state changes.
+- Final delivery state changes are grouped through D1 batch execution.
+- Stock-arrival notifications are sent only when newly procured accounts are actually inserted.
+- Panel images are uploaded to Discord-Shiire and can be managed from the main dashboard.
+
+The main Xaccount-Bot dashboard exposes this as the completely separate **仕入れbot** tab. Its existing **自販機** tab is unchanged.
+
+The main bot is used only for:
+
+- dashboard authentication / management proxy
+- the existing seller PayPay/Kyash payment profiles
+
+Payment credentials are **not copied** into Discord-Shiire. Payment receipt is delegated through the existing HMAC bridge.
+
+### Main dashboard bridge for vending
+
+Set the same strong value on both Workers:
+
+```text
+SHIIRE_BRIDGE_SECRET
+```
+
+On Xaccount-Bot, also set:
+
+```text
+SHIIRE_API_BASE_URL=https://<actual-discord-shiire-worker-origin>
+```
+
+Use the real deployed Discord-Shiire Worker origin. The dashboard intentionally fails closed when this value is missing; it does not guess a workers.dev hostname.
+
+For the Discord-Shiire vending panel and buyer delivery, configure these Worker secrets:
+
+```text
+DISCORD_APPLICATION_ID
+DISCORD_PUBLIC_KEY
+DISCORD_BOT_TOKEN
+CREDENTIALS_ENCRYPTION_KEY
+```
+
+The main dashboard can then manage:
+
+- Shiire vending machines
+- HStora source-product mapping
+- PayPay/Kyash sales prices
+- panel title / description / uploaded image
+- Discord panel deployment / update
+- buyer role
+- public/private purchase logs
+- stock-arrival channel + mention role
+- coupons
+- order history
