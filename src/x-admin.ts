@@ -8,9 +8,11 @@ import {
   todayPurchaseStats,
   ensureXSchema,
   auditX,
-  listOpenCircuitBreakers
+  listOpenCircuitBreakers,
+  setCircuitBreaker
 } from "./x-db";
 import { getFundingPlan, jstPeriodStarts } from "./x-funding";
+import { runXProcurement } from "./x-engine";
 import {
   getBinanceApiRestrictions,
   getBinanceBalance,
@@ -89,23 +91,6 @@ export async function handleXAdminApi(
       const settings=await saveXSettings(env,patch);
       return json({ok:true,settings:publicSettings(settings)});
     }
-  }
-
-  if(url.pathname==="/api/x/funding/paypay-observation"&&request.method==="POST"){
-    const raw=await requestJson(request);
-    const balance=Number(raw?.balanceJpy);
-    if(!Number.isFinite(balance)||balance<0){
-      return json({error:"INVALID_PAYPAY_BALANCE"},400);
-    }
-    const settings=await saveXSettings(env,{
-      observed_paypay_balance_jpy:Math.floor(balance),
-      observed_paypay_balance_at:Date.now()
-    });
-    return json({
-      ok:true,
-      observedPayPayBalanceJpy:settings.observed_paypay_balance_jpy,
-      observedAt:settings.observed_paypay_balance_at
-    });
   }
 
   if(url.pathname==="/api/x/run"&&request.method==="POST"){
@@ -355,7 +340,10 @@ async function observeFx(){
 async function saveSettings(){
  const area=document.querySelector("#settingsJson");
  let value; try{value=JSON.parse(area.value)}catch{throw new Error("設定JSONが不正です")}
- await api("/api/x/settings",{method:"PATCH",body:JSON.stringify(value)});
+ const turningLive=value.dry_run===false;
+ const confirmed=!turningLive||window.confirm("Dry RunをOFFにすると実資金が動く可能性があります。LIVEモードへ切り替えますか？");
+ if(!confirmed) return;
+ await api("/api/x/settings",{method:"PATCH",body:JSON.stringify({settings:value,confirmLive:turningLive})});
  await load();
 }
 async function load(){
