@@ -20,6 +20,7 @@ import { handleHstoraWebhook } from "./x-webhooks";
 import {
   handleShiireVendingInteraction,
   handleShiireMainBridge,
+  handleShiireVendingMedia,
   shiireVendingSweep,
   ShiireVendingError
 } from "./shiire-vending";
@@ -396,6 +397,10 @@ export default {
       }
       if(url.pathname==="/webhooks/hstora"){
         return handleHstoraWebhook(request,env);
+      }
+      if(url.pathname.startsWith("/media/shiire-vending/")){
+        const media=await handleShiireVendingMedia(request,env,url);
+        if(media) return media;
       }
       if(url.pathname.startsWith("/bridge/main/")){
         const bridge=await handleShiireMainBridge(request,env,url);
