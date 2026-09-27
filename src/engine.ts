@@ -89,6 +89,15 @@ async function processJob(
   product:ProductRow,
   job:JobRow
 ){
+  const existingFinal=await jobItems(env,job.id);
+  if(existingFinal.length>0){
+    return updateJob(env,job.id,{
+      status:"acquired",
+      acquiredQty:existingFinal.length,
+      nextRetryAt:null,
+      error:null
+    });
+  }
   const raw=await rawJobItems(env,job.id);
   if(raw.length===0){
     await updateJob(env,job.id,{
