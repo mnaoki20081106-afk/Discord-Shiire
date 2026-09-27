@@ -547,3 +547,71 @@ export function newBinanceClientOrderId(){
 export function newBinanceWithdrawOrderId(){
   return "xw"+randomId().slice(0,28);
 }
+
+
+export async function getBinanceWithdrawalSafetyStatus(env:Env){
+  const configured=Boolean(
+    env.BINANCE_WITHDRAW_API_KEY?.trim()&&
+    env.BINANCE_WITHDRAW_API_SECRET?.trim()
+  );
+  const fixedEgressConfirmed=
+    (env.BINANCE_FIXED_EGRESS_CONFIRMED??"").trim().toLowerCase()==="true";
+  if(!configured){
+    return {
+      configured:false,
+      fixedEgressConfirmed,
+      readyForLiveWithdrawal:false,
+      reason:"WITHDRAWAL_KEY_NOT_CONFIGURED"
+    };
+  }
+
+  const [restrictions,coinInfo,addresses,quota,travelRule]=await Promise.all([
+    getBinanceApiRestrictions(env,"withdraw"),
+    getBinanceLtcCoinInfo(env,"withdraw"),
+    getBinanceWithdrawAddresses(env),
+    getBinanceWithdrawQuota(env),
+    getTravelRuleRequirement(env)
+  ]);
+  const network=coinInfo.networkList.find(row=>row.network==="LTC")??null;
+  const travelCode=(travelRule.questionnaireCountryCode??"NIL").toUpperCase();
+  const travelRuleRequired=travelCode!=="NIL";
+  const questionnaireConfigured=Boolean(
+    env.BINANCE_TRAVEL_RULE_QUESTIONNAIRE?.trim()
+  );
+  const allowlistedLtcAddressCount=addresses.filter(
+    row=>row.coin==="LTC"&&row.network==="LTC"&&row.whiteStatus===true
+  ).length;
+  const readyForLiveWithdrawal=Boolean(
+    restrictions.ipRestrict&&
+    restrictions.enableReading&&
+    restrictions.enableWithdrawals&&
+    fixedEgressConfirmed&&
+    network?.withdrawEnable&&
+    !network?.busy&&
+    allowlistedLtcAddressCount>0&&
+    (!travelRuleRequired||questionnaireConfigured)
+  );
+
+  return {
+    configured:true,
+    fixedEgressConfirmed,
+    readyForLiveWithdrawal,
+    restrictions,
+    network:network?{
+      network:network.network,
+      withdrawEnable:network.withdrawEnable,
+      busy:network.busy,
+      withdrawFee:network.withdrawFee,
+      withdrawMin:network.withdrawMin,
+      withdrawMax:network.withdrawMax,
+      withdrawTag:network.withdrawTag??false
+    }:null,
+    quota,
+    allowlistedLtcAddressCount,
+    travelRule:{
+      required:travelRuleRequired,
+      questionnaireCountryCode:travelCode,
+      questionnaireConfigured
+    }
+  };
+}
