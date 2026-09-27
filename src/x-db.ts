@@ -118,7 +118,7 @@ const SCHEMA=[
   event_type TEXT NOT NULL,
   received_at INTEGER NOT NULL
 )`,
-`CREATE UNIQUE INDEX IF NOT EXISTS idx_hstora_webhook_event ON hstora_webhook_deliveries(event_id)`,
+`CREATE INDEX IF NOT EXISTS idx_hstora_webhook_event ON hstora_webhook_deliveries(event_id)`,
 `CREATE TABLE IF NOT EXISTS circuit_breakers (
   key TEXT PRIMARY KEY,
   state TEXT NOT NULL,
@@ -544,6 +544,12 @@ export async function claimHstoraWebhookDelivery(
   eventType:string
 ):Promise<boolean>{
   await ensureXSchema(env);
+  const existing=await env.DB.prepare(
+    "SELECT delivery_id FROM hstora_webhook_deliveries "+
+    "WHERE delivery_id=? OR event_id=? LIMIT 1"
+  ).bind(deliveryId,eventId).first<{delivery_id:string}>();
+  if(existing) return false;
+
   const result=await env.DB.prepare(
     "INSERT OR IGNORE INTO hstora_webhook_deliveries(delivery_id,event_id,event_type,received_at) VALUES(?,?,?,?)"
   ).bind(deliveryId,eventId,eventType,Date.now()).run();
