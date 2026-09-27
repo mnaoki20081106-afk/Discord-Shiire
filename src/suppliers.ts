@@ -17,6 +17,8 @@ type HttpJsonSupplierConfig={
   authScheme?:string;
   headers?:Record<string,string>;
   responseItemsPath?:string;
+  idempotencyHeader?:string|null;
+  idempotencyBodyField?:string|null;
 };
 
 function parseConfig<T>(raw:string):T{
@@ -49,7 +51,8 @@ async function acquireHttpJson(
   env:Env,
   supplier:SupplierRow,
   sku:string,
-  quantity:number
+  quantity:number,
+  idempotencyKey:string
 ):Promise<string[]>{
   const config=parseConfig<HttpJsonSupplierConfig>(supplier.config_json);
   if(!config.baseUrl) throw new SupplierError("SUPPLIER_CONFIG_INVALID",false);
@@ -62,6 +65,10 @@ async function acquireHttpJson(
   }
   const url=new URL(config.acquirePath??"/acquire",base);
   const headers=new Headers({"Content-Type":"application/json",...(config.headers??{})});
+  const idempotencyHeader=config.idempotencyHeader===null
+    ?null
+    :(config.idempotencyHeader??"Idempotency-Key");
+  if(idempotencyHeader) headers.set(idempotencyHeader,idempotencyKey);
   if(config.tokenBinding){
     const token=secretBinding(env,config.tokenBinding);
     if(!token) throw new SupplierError("SUPPLIER_SECRET_MISSING",false);
@@ -73,10 +80,14 @@ async function acquireHttpJson(
 
   let response:Response;
   try{
+    const requestBody:Record<string,unknown>={sku,quantity};
+    if(config.idempotencyBodyField){
+      requestBody[config.idempotencyBodyField]=idempotencyKey;
+    }
     response=await fetchWithTimeout(url.toString(),{
       method:"POST",
       headers,
-      body:JSON.stringify({sku,quantity})
+      body:JSON.stringify(requestBody)
     });
   }catch(error){
     throw new SupplierError(
@@ -117,17 +128,18 @@ export async function acquireFromSupplier(
   env:Env,
   supplier:SupplierRow,
   sku:string,
-  quantity:number
+  quantity:number,
+  idempotencyKey:string
 ):Promise<string[]>{
   if(!supplier.enabled) throw new SupplierError("SUPPLIER_DISABLED",false);
   if(quantity<=0) return [];
   if(supplier.kind==="pool"){
-    const items=await takePoolItems(env,supplier.id,sku,quantity);
+    const items=await takePoolItems(env,supplier.id,sku,quantity,idempotencyKey);
     if(items.length===0) throw new SupplierError("OUT_OF_STOCK",true);
     return items;
   }
   if(supplier.kind==="http_json"){
-    return acquireHttpJson(env,supplier,sku,quantity);
+    return acquireHttpJson(env,supplier,sku,quantity,idempotencyKey);
   }
   throw new SupplierError("SUPPLIER_KIND_UNSUPPORTED",false);
 }
