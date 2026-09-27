@@ -431,15 +431,18 @@ export async function getShiireOrder(env:Env,id:string){
 
 export async function attachShiirePaymentLink(env:Env,orderId:string,link:string){
   const encrypted=await encryptSensitive(env,link);
-  await env.DB.prepare(
-    "UPDATE shiire_vending_orders SET payment_link_ciphertext=?,updated_at=? WHERE id=? AND status='awaiting_payment'"
-  ).bind(JSON.stringify(encrypted),Date.now(),orderId).run();
+  const now=Date.now();
+  const result=await env.DB.prepare(
+    "UPDATE shiire_vending_orders SET payment_link_ciphertext=?,status='payment_pending',reserved_until=NULL,updated_at=? WHERE id=? AND status='awaiting_payment'"
+  ).bind(JSON.stringify(encrypted),now,orderId).run();
+  if(Number(result.meta.changes??0)!==1) throw new Error("PAYMENT_ORDER_NOT_AVAILABLE");
 }
 
 export async function clearShiirePaymentLink(env:Env,orderId:string){
+  const now=Date.now();
   await env.DB.prepare(
-    "UPDATE shiire_vending_orders SET payment_link_ciphertext=NULL,updated_at=? WHERE id=? AND status='awaiting_payment'"
-  ).bind(Date.now(),orderId).run();
+    "UPDATE shiire_vending_orders SET payment_link_ciphertext=NULL,status='awaiting_payment',reserved_until=?,updated_at=? WHERE id=? AND status='payment_pending'"
+  ).bind(now+10*60_000,now,orderId).run();
 }
 
 export async function readShiirePaymentLink(
@@ -460,7 +463,7 @@ export async function readShiirePaymentLink(
 export async function markShiirePaid(env:Env,orderId:string){
   const now=Date.now();
   await env.DB.prepare(
-    "UPDATE shiire_vending_orders SET status='paid',paid_at=?,updated_at=? WHERE id=? AND status='awaiting_payment'"
+    "UPDATE shiire_vending_orders SET status='paid',paid_at=?,reserved_until=NULL,updated_at=? WHERE id=? AND status IN ('awaiting_payment','payment_pending')"
   ).bind(now,now,orderId).run();
 }
 
@@ -607,7 +610,7 @@ export async function listPendingShiirePayments(env:Env,limit=8){
   await ensureShiireVendingSchema(env);
   const safe=Math.max(1,Math.min(20,Math.floor(limit)));
   return (await env.DB.prepare(
-    "SELECT * FROM shiire_vending_orders WHERE status='awaiting_payment' AND payment_link_ciphertext IS NOT NULL ORDER BY updated_at ASC LIMIT ?"
+    "SELECT * FROM shiire_vending_orders WHERE status='payment_pending' AND payment_link_ciphertext IS NOT NULL ORDER BY updated_at ASC LIMIT ?"
   ).bind(safe).all<ShiireVendingOrder>()).results;
 }
 
