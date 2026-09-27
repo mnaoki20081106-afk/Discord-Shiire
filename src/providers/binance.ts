@@ -72,15 +72,43 @@ function validateOrder(value:unknown):BinanceOrderView{
   return value as unknown as BinanceOrderView;
 }
 
-function apiKey(env:Env){
-  const key=env.BINANCE_API_KEY?.trim()??"";
-  if(!key) throw new BinanceApiError(503,"BINANCE_API_KEY_NOT_CONFIGURED",false,"Binance API key is not configured");
+type CredentialPurpose="trade"|"withdraw";
+
+function apiKey(env:Env,purpose:CredentialPurpose="trade"){
+  const key=(purpose==="withdraw"
+    ?env.BINANCE_WITHDRAW_API_KEY
+    :env.BINANCE_API_KEY)?.trim()??"";
+  if(!key){
+    throw new BinanceApiError(
+      503,
+      purpose==="withdraw"
+        ?"BINANCE_WITHDRAW_API_KEY_NOT_CONFIGURED"
+        :"BINANCE_API_KEY_NOT_CONFIGURED",
+      false,
+      purpose==="withdraw"
+        ?"Binance withdrawal API key is not configured"
+        :"Binance API key is not configured"
+    );
+  }
   return key;
 }
 
-function apiSecret(env:Env){
-  const secret=env.BINANCE_API_SECRET?.trim()??"";
-  if(!secret) throw new BinanceApiError(503,"BINANCE_API_SECRET_NOT_CONFIGURED",false,"Binance API secret is not configured");
+function apiSecret(env:Env,purpose:CredentialPurpose="trade"){
+  const secret=(purpose==="withdraw"
+    ?env.BINANCE_WITHDRAW_API_SECRET
+    :env.BINANCE_API_SECRET)?.trim()??"";
+  if(!secret){
+    throw new BinanceApiError(
+      503,
+      purpose==="withdraw"
+        ?"BINANCE_WITHDRAW_API_SECRET_NOT_CONFIGURED"
+        :"BINANCE_API_SECRET_NOT_CONFIGURED",
+      false,
+      purpose==="withdraw"
+        ?"Binance withdrawal API secret is not configured"
+        :"Binance API secret is not configured"
+    );
+  }
   return secret;
 }
 
@@ -121,7 +149,8 @@ async function signedRequest<T>(
   env:Env,
   method:"GET"|"POST",
   path:string,
-  params:Record<string,string|number|boolean|undefined>
+  params:Record<string,string|number|boolean|undefined>,
+  purpose:CredentialPurpose="trade"
 ):Promise<T>{
   const values=new URLSearchParams();
   for(const [key,value] of Object.entries(params)){
@@ -130,11 +159,11 @@ async function signedRequest<T>(
   if(!values.has("timestamp")) values.set("timestamp",String(Date.now()));
   if(!values.has("recvWindow")) values.set("recvWindow","5000");
   const unsigned=values.toString();
-  const signature=await hmacHex(apiSecret(env),unsigned);
+  const signature=await hmacHex(apiSecret(env,purpose),unsigned);
   values.set("signature",signature);
 
   const headers:Record<string,string>={
-    "X-MBX-APIKEY":apiKey(env),
+    "X-MBX-APIKEY":apiKey(env,purpose),
     "Accept":"application/json"
   };
   const controller=new AbortController();
