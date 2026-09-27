@@ -98,10 +98,10 @@ async function signedRequest<T>(
   const signature=await hmacHex(apiSecret(env),unsigned);
   values.set("signature",signature);
 
-  const headers=new Headers({
+  const headers:Record<string,string>={
     "X-MBX-APIKEY":apiKey(env),
     "Accept":"application/json"
-  });
+  };
   const controller=new AbortController();
   const timer=setTimeout(()=>controller.abort(),20_000);
   try{
@@ -109,7 +109,7 @@ async function signedRequest<T>(
       ?await fetch(BASE_URL+path+"?"+values.toString(),{method,headers,signal:controller.signal})
       :await fetch(BASE_URL+path,{
           method,
-          headers:new Headers({...Object.fromEntries(headers.entries()),"Content-Type":"application/x-www-form-urlencoded"}),
+          headers:{...headers,"Content-Type":"application/x-www-form-urlencoded"},
           body:values.toString(),
           signal:controller.signal
         });
