@@ -245,7 +245,7 @@ The defaults are intentionally non-live:
 dry_run = true
 auto_purchase_enabled = false
 auto_procurement_enabled = false
-auto_ltc_withdraw_enabled = false
+dedicated_ltc_wallet = disabled (no signer connected)
 emergency_stop = false
 seller_quality_mode = strict_api
 ```
