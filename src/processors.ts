@@ -16,6 +16,8 @@ type HttpProcessorConfig={
   authScheme?:string;
   headers?:Record<string,string>;
   responseItemsPath?:string;
+  idempotencyHeader?:string|null;
+  idempotencyBodyField?:string|null;
 };
 
 function parseConfig<T>(raw:string):T{
@@ -41,7 +43,8 @@ export async function processItems(
   env:Env,
   kind:ProcessorKind,
   rawConfig:string,
-  items:string[]
+  items:string[],
+  idempotencyKey:string
 ):Promise<string[]>{
   if(kind==="identity") return items;
   if(kind!=="http_json") throw new ProcessorError("PROCESSOR_UNSUPPORTED",false);
@@ -57,6 +60,10 @@ export async function processItems(
   }
   const url=new URL(config.path??"/process",base);
   const headers=new Headers({"Content-Type":"application/json",...(config.headers??{})});
+  const idempotencyHeader=config.idempotencyHeader===null
+    ?null
+    :(config.idempotencyHeader??"Idempotency-Key");
+  if(idempotencyHeader) headers.set(idempotencyHeader,idempotencyKey);
   if(config.tokenBinding){
     const token=envSecret(env,config.tokenBinding);
     if(!token) throw new ProcessorError("PROCESSOR_SECRET_MISSING",false);
@@ -70,10 +77,14 @@ export async function processItems(
   const timer=setTimeout(()=>controller.abort(),20_000);
   let response:Response;
   try{
+    const requestBody:Record<string,unknown>={items};
+    if(config.idempotencyBodyField){
+      requestBody[config.idempotencyBodyField]=idempotencyKey;
+    }
     response=await fetch(url.toString(),{
       method:"POST",
       headers,
-      body:JSON.stringify({items}),
+      body:JSON.stringify(requestBody),
       signal:controller.signal
     });
   }catch(error){
