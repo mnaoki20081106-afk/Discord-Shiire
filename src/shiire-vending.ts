@@ -8,6 +8,9 @@ import {
   createShiireMachine,
   updateShiireMachine,
   deleteShiireMachine,
+  saveShiirePanelImage,
+  deleteShiirePanelImage,
+  getShiirePanelImage,
   listShiireSourceProducts,
   listShiireProducts,
   getShiireProduct,
@@ -219,7 +222,8 @@ function machineEmbed(
     description:
       (machine.panel_description||"購入したい商品を下のボタンから選択してください。")+
       (lines.length?"\n\n"+lines.join("\n\n"):"\n\n現在販売中の商品はありません。"),
-    color:5763719
+    color:5763719,
+    ...(machine.panel_image_url?{image:{url:machine.panel_image_url}}:{})
   };
 }
 
@@ -747,6 +751,41 @@ export async function handleShiireVendingInteraction(
   }
 
   return null;
+}
+
+function decodeBase64(value:string){
+  const raw=atob(value);
+  const bytes=new Uint8Array(raw.length);
+  for(let i=0;i<raw.length;i++) bytes[i]=raw.charCodeAt(i);
+  return bytes;
+}
+
+function parsePanelDataUrl(dataUrl:string){
+  const match=dataUrl.match(/^data:(image\/(?:webp|png|jpeg|gif));base64,([A-Za-z0-9+/=]+)$/);
+  if(!match) throw new ShiireVendingError(400,"INVALID_PANEL_IMAGE");
+  if(dataUrl.length>1_250_000) throw new ShiireVendingError(413,"PANEL_IMAGE_TOO_LARGE");
+  return {mime:match[1]!,base64:match[2]!};
+}
+
+export async function handleShiireVendingMedia(
+  request:Request,
+  env:Env,
+  url:URL
+):Promise<Response|null>{
+  const match=url.pathname.match(/^\/media\/shiire-vending\/([^/]+)\/panel-image$/);
+  if(!match) return null;
+  if(request.method!=="GET") return responseJson({error:"METHOD_NOT_ALLOWED"},405);
+  const image=await getShiirePanelImage(env,match[1]!);
+  if(!image?.panel_image_mime||!image.panel_image_base64){
+    return responseJson({error:"NOT_FOUND"},404);
+  }
+  return new Response(decodeBase64(image.panel_image_base64),{
+    headers:{
+      "Content-Type":image.panel_image_mime,
+      "Cache-Control":"public, max-age=3600",
+      "X-Content-Type-Options":"nosniff"
+    }
+  });
 }
 
 async function parseBridgeJson(rawBody:string){
