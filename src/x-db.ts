@@ -408,3 +408,47 @@ export async function listPurchaseOrders(env:Env,limit=100){
   ).bind(safe).all();
   return result.results;
 }
+
+
+export async function readyInventoryCount(env:Env):Promise<number>{
+  await ensureXSchema(env);
+  const row=await env.DB.prepare(
+    "SELECT COALESCE(SUM(quantity),0) AS quantity FROM inventory WHERE status='READY_FOR_DELIVERY'"
+  ).first<{quantity:number}>();
+  return Math.max(0,Number(row?.quantity??0));
+}
+
+export async function successfulPurchaseCountForProduct(
+  env:Env,
+  supplierProductId:string
+):Promise<number>{
+  await ensureXSchema(env);
+  const row=await env.DB.prepare(
+    "SELECT COALESCE(SUM(quantity),0) AS quantity FROM purchase_orders "+
+    "WHERE supplier='hstora' AND supplier_product_id=? "+
+    "AND dry_run=0 AND status IN ('DELIVERED','COMPLETED')"
+  ).bind(supplierProductId).first<{quantity:number}>();
+  return Math.max(0,Number(row?.quantity??0));
+}
+
+export async function pendingPurchaseOrders(env:Env){
+  await ensureXSchema(env);
+  const result=await env.DB.prepare(
+    "SELECT * FROM purchase_orders WHERE supplier='hstora' AND dry_run=0 "+
+    "AND status IN ('CREATED','SUBMITTED','PROCESSING','PENDING') "+
+    "ORDER BY created_at ASC LIMIT 50"
+  ).all<any>();
+  return result.results;
+}
+
+export async function getPurchaseOrderRecord(env:Env,id:string){
+  await ensureXSchema(env);
+  return env.DB.prepare("SELECT * FROM purchase_orders WHERE id=?").bind(id).first<any>();
+}
+
+export async function getSupplierProductRecord(env:Env,supplierProductId:string){
+  await ensureXSchema(env);
+  return env.DB.prepare(
+    "SELECT * FROM supplier_products WHERE supplier='hstora' AND supplier_product_id=?"
+  ).bind(supplierProductId).first<any>();
+}
