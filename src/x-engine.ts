@@ -508,6 +508,9 @@ async function handleHstoraFundingNeed(
   });
   try{
     const order=await placeLtcJpyMarketBuy(env,{quoteJpy:Math.floor(desired),clientOrderId,live:true});
+    if("dryRun" in order){
+      throw new Error("BINANCE_LIVE_ORDER_RETURNED_DRY_RUN");
+    }
     await updateFundingEventByProviderReference(env,"binance_japan",clientOrderId,{
       status:String(order.status??"SUBMITTED").toUpperCase(),
       assetAmount:Number(order.executedQty??0),
