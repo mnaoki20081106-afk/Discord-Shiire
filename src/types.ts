@@ -11,6 +11,7 @@ export interface Env {
   BINANCE_API_KEY?: string;
   BINANCE_API_SECRET?: string;
   BINANCE_TRAVEL_RULE_QUESTIONNAIRE?: string;
+  BINANCE_FIXED_EGRESS_CONFIRMED?: string;
   HSTORA_API_KEY?: string;
   HSTORA_API_SECRET?: string;
   HSTORA_WEBHOOK_SECRET?: string;
