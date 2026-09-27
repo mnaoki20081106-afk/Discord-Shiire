@@ -1,4 +1,4 @@
-import type { HStoraProduct } from "./x-hstora";
+import type { HstoraProduct } from "./providers/hstora";
 import type { XSettings } from "./x-settings";
 
 export type ProductQualification={
@@ -20,12 +20,12 @@ const VISIBILITY_RULES:Array<{label:string;patterns:RegExp[]}>= [
   {label:"Search Visible",patterns:[/\bsearch\s+visible\b/i,/\bvisible\s+in\s+search\b/i]}
 ];
 
-function productText(product:HStoraProduct):string{
+function productText(product:HstoraProduct):string{
   return [product.name,product.short_description??"",product.description??""]
     .join("\n").replace(/\s+/g," ").trim();
 }
 
-export function detectSearchVisibility(product:HStoraProduct){
+export function detectSearchVisibility(product:HstoraProduct){
   const text=productText(product);
   const labels:string[]=[];
   const evidence:string[]=[];
@@ -38,7 +38,7 @@ export function detectSearchVisibility(product:HStoraProduct){
   return {labels,evidence,text};
 }
 
-export function tierUnitPrice(product:HStoraProduct,quantity:number):number{
+export function tierUnitPrice(product:HstoraProduct,quantity:number):number{
   const base=Number(product.price);
   let best=base;
   const qty=Math.max(1,Math.floor(quantity));
@@ -52,8 +52,8 @@ export function tierUnitPrice(product:HStoraProduct,quantity:number):number{
   return best;
 }
 
-export function qualifyHStoraProduct(
-  product:HStoraProduct,
+export function qualifyHstoraProduct(
+  product:HstoraProduct,
   settings:XSettings,
   quantity=1,
   now=Date.now()
