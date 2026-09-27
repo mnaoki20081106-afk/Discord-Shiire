@@ -1,5 +1,5 @@
 import type { Env } from "./types";
-import { sha256Hex, randomId } from "./crypto";
+import { hmacHex, randomId } from "./crypto";
 import { encryptSensitive } from "./x-crypto";
 
 let schemaReady=false;
@@ -391,7 +391,12 @@ export async function storeDeliveredAccounts(env:Env,input:{
   const now=Date.now();
   for(const item of items){
     const raw=typeof item==="string"?item:JSON.stringify(item);
-    const fingerprint=await sha256Hex(raw);
+    const fingerprintSecret=env.CREDENTIALS_ENCRYPTION_KEY?.trim()??"";
+    if(!fingerprintSecret) throw new Error("CREDENTIALS_ENCRYPTION_KEY_NOT_CONFIGURED");
+    const fingerprint=await hmacHex(
+      fingerprintSecret,
+      "credential-fingerprint\n"+raw
+    );
     const encrypted=await encryptSensitive(env,raw);
     const id=randomId();
     const result=await env.DB.prepare(`INSERT OR IGNORE INTO purchased_accounts(
