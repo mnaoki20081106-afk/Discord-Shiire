@@ -154,6 +154,21 @@ export async function handleXAdminApi(
     return json({ok:true,approvedUntil:settings.bulk_approval_until});
   }
 
+  if(url.pathname==="/api/x/funding/pending/cancel"&&request.method==="POST"){
+    const current=await loadXSettings(env);
+    const settings=await saveXSettings(env,{
+      pending_paypay_funding_jpy:0,
+      pending_paypay_binance_jpy_baseline:0,
+      pending_paypay_requested_at:0
+    });
+    await auditX(env,{
+      kind:"PAYPAY_FUNDING_CANCELLED",
+      message:"Pending manual PayPay funding request was cancelled by admin.",
+      details:{cancelledAmountJpy:current.pending_paypay_funding_jpy}
+    });
+    return json({ok:true,settings:publicSettings(settings)});
+  }
+
   if(url.pathname==="/api/x/emergency-stop"&&request.method==="POST"){
     const settings=await saveXSettings(env,{
       emergency_stop:true,
@@ -318,6 +333,10 @@ function drawNav(){
  tabs.forEach(t=>{const b=document.createElement("button");b.textContent=t;b.className=t===current?"active":"";b.onclick=()=>{current=t;drawNav();load()};nav.appendChild(b)});
 }
 function card(title,data){return '<section class="card"><strong>'+esc(title)+'</strong><pre>'+esc(JSON.stringify(data,null,2))+'</pre></section>'}
+async function runNow(){const d=await api("/api/x/run",{method:"POST",body:"{}"});alert(JSON.stringify(d,null,2));await load()}
+async function cancelPendingFunding(){await api("/api/x/funding/pending/cancel",{method:"POST",body:"{}"});await load()}
+async function approveBulk(){await api("/api/x/bulk-approval",{method:"POST",body:JSON.stringify({minutes:10})});await load()}
+async function resetEmergency(){await api("/api/x/emergency-stop/reset",{method:"POST",body:"{}"});await load()}
 function metrics(data){
  const f=data.funding?.data?.allowance;
  return '<div class="grid">'+
@@ -354,7 +373,10 @@ async function load(){
     const s=data.settings||{};
     document.querySelector("#mode").textContent=s.dry_run?"DRY RUN":"LIVE";
     document.querySelector("#mode").className="status "+(s.dry_run?"good":"bad");
-    main.innerHTML=metrics(data)+card(current,data);
+    main.innerHTML=metrics(data)+
+      '<section class="card"><strong>手動実行</strong><p class="hint">Dry Run中は購入POSTを行いません。</p><button id="runNow">仕入れ判定を実行</button></section>'+
+      card(current,data);
+    document.querySelector("#runNow").onclick=()=>runNow().catch(e=>alert(e.message));
   }else if(current==="Funding"){
     data=await api("/api/x/dashboard");
     const s=data.settings||{};
@@ -366,7 +388,12 @@ async function load(){
       '<section class="card"><strong>USD/JPY（手動観測）</strong>'+
       '<p class="hint">HStoraのUSD建て価格をJPY上限と比較するための換算値です。期限切れなら価格判定を停止します。</p>'+
       '<div class="formrow"><input id="usdJpy" inputmode="decimal" type="number" min="0" step="0.001" value="'+esc(s.usd_jpy_rate??0)+'"><button id="saveFx">換算値を保存</button></div>'+
-      '</section>'+card("Funding detail",data.funding);
+      '</section>'+
+      (s.pending_paypay_funding_jpy>0
+        ?'<section class="card"><strong>手動入金待ち</strong><p class="hint">要求額: '+esc(s.pending_paypay_funding_jpy)+'円 / Binance基準残高: '+esc(s.pending_paypay_binance_jpy_baseline)+'円</p><button id="cancelPending" class="danger">この入金要求を取消</button></section>'
+        :'')+
+      card("Funding detail",data.funding);
+    const cancel=document.querySelector("#cancelPending"); if(cancel) cancel.onclick=()=>cancelPendingFunding().catch(e=>alert(e.message));
     document.querySelector("#savePayPay").onclick=()=>observePayPay().catch(e=>alert(e.message));
     document.querySelector("#saveFx").onclick=()=>observeFx().catch(e=>alert(e.message));
   }else if(current==="Binance"){data=await api("/api/x/binance");main.innerHTML=card(current,data)}
@@ -378,9 +405,11 @@ async function load(){
     main.innerHTML='<section class="card"><strong>LTC Wallet</strong><p class="status">専用ホットウォレットは現在無効です。秘密鍵をCloudflare Workerへ保存しません。</p></section>';
   }else{
     data=await api("/api/x/settings");
-    main.innerHTML='<section class="card"><strong>Settings</strong><p class="hint">初期状態は dry_run=true / 自動購入OFF / 自動仕入れOFFです。設定変更だけでは秘密鍵やAPI Secretは保存されません。</p><textarea id="settingsJson"></textarea><div class="formrow"><button id="saveSettings">設定を保存</button></div></section>';
+    main.innerHTML='<section class="card"><strong>Settings</strong><p class="hint">初期状態は dry_run=true / 自動購入OFF / 自動仕入れOFFです。設定変更だけでは秘密鍵やAPI Secretは保存されません。</p><textarea id="settingsJson"></textarea><div class="formrow"><button id="saveSettings">設定を保存</button></div><div class="formrow"><button id="approveBulk">大量購入を10分間承認</button><button id="resetEmergency">Emergency Stop解除</button></div></section>';
     document.querySelector("#settingsJson").value=JSON.stringify(data.settings,null,2);
     document.querySelector("#saveSettings").onclick=()=>saveSettings().catch(e=>alert(e.message));
+    document.querySelector("#approveBulk").onclick=()=>approveBulk().catch(e=>alert(e.message));
+    document.querySelector("#resetEmergency").onclick=()=>resetEmergency().catch(e=>alert(e.message));
   }
  }catch(e){main.innerHTML='<section class="card bad">'+esc(e.message)+'</section>'}
 }
