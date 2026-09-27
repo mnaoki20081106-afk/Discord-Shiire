@@ -14,6 +14,8 @@ const schema=[
   "CREATE INDEX IF NOT EXISTS supply_jobs_retry_idx ON supply_jobs(status,next_retry_at)",
   "CREATE TABLE IF NOT EXISTS supply_items (id TEXT PRIMARY KEY,job_id TEXT NOT NULL,product_id TEXT NOT NULL,fingerprint TEXT NOT NULL,content TEXT NOT NULL,state TEXT NOT NULL DEFAULT 'acquired',created_at INTEGER NOT NULL,delivered_at INTEGER,UNIQUE(product_id,fingerprint))",
   "CREATE INDEX IF NOT EXISTS supply_items_job_idx ON supply_items(job_id,state)",
+  "CREATE TABLE IF NOT EXISTS supply_raw_items (id TEXT PRIMARY KEY,job_id TEXT NOT NULL,content TEXT NOT NULL,created_at INTEGER NOT NULL)",
+  "CREATE INDEX IF NOT EXISTS supply_raw_items_job_idx ON supply_raw_items(job_id,created_at)",
   "CREATE TABLE IF NOT EXISTS supplier_pool (id TEXT PRIMARY KEY,supplier_id TEXT NOT NULL,sku TEXT NOT NULL,fingerprint TEXT NOT NULL,content TEXT NOT NULL,state TEXT NOT NULL DEFAULT 'available',created_at INTEGER NOT NULL,taken_at INTEGER,UNIQUE(supplier_id,sku,fingerprint))",
   "CREATE INDEX IF NOT EXISTS supplier_pool_lookup_idx ON supplier_pool(supplier_id,sku,state,created_at)",
   "CREATE TABLE IF NOT EXISTS supply_events (id TEXT PRIMARY KEY,level TEXT NOT NULL,kind TEXT NOT NULL,product_id TEXT,job_id TEXT,message TEXT NOT NULL,created_at INTEGER NOT NULL)",
@@ -151,13 +153,13 @@ export async function getJob(env:Env,id:string){
 
 export async function findRecoverableJob(env:Env,productId:string){
   return await env.DB.prepare(
-    "SELECT * FROM supply_jobs WHERE product_id=? AND status IN ('acquired','delivery_failed') AND (next_retry_at IS NULL OR next_retry_at<=?) ORDER BY created_at ASC LIMIT 1"
+    "SELECT * FROM supply_jobs WHERE product_id=? AND status IN ('processing_failed','acquired','delivery_failed') AND (next_retry_at IS NULL OR next_retry_at<=?) ORDER BY created_at ASC LIMIT 1"
   ).bind(productId,Date.now()).first<JobRow>()??null;
 }
 
 export async function hasBlockedJob(env:Env,productId:string){
   return Boolean(await env.DB.prepare(
-    "SELECT id FROM supply_jobs WHERE product_id=? AND status IN ('acquiring','out_of_stock','failed','delivery_failed') AND next_retry_at>? ORDER BY created_at DESC LIMIT 1"
+    "SELECT id FROM supply_jobs WHERE product_id=? AND status IN ('acquiring','processing_failed','out_of_stock','failed','delivery_failed') AND next_retry_at>? ORDER BY created_at DESC LIMIT 1"
   ).bind(productId,Date.now()).first<{id:string}>());
 }
 
@@ -259,6 +261,29 @@ export async function takePoolItems(
     if((result.meta.changes??0)>0) taken.push(row.content);
   }
   return taken;
+}
+
+export async function storeRawJobItems(
+  env:Env,
+  jobId:string,
+  contents:string[]
+){
+  const clean=contents.map(v=>v.trim()).filter(Boolean);
+  const now=Date.now();
+  for(let i=0;i<clean.length;i+=50){
+    await env.DB.batch(clean.slice(i,i+50).map(content=>
+      env.DB.prepare(
+        "INSERT INTO supply_raw_items(id,job_id,content,created_at) VALUES (?,?,?,?)"
+      ).bind(randomId(),jobId,content,now)
+    ));
+  }
+  return clean.length;
+}
+
+export async function rawJobItems(env:Env,jobId:string){
+  return (await env.DB.prepare(
+    "SELECT content FROM supply_raw_items WHERE job_id=? ORDER BY created_at ASC"
+  ).bind(jobId).all<{content:string}>()).results.map(row=>row.content);
 }
 
 export async function storeJobItems(
