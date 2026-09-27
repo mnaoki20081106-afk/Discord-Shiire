@@ -76,7 +76,7 @@ export async function ensureShiireVendingSchema(env:Env){
   if(ready) return;
   await ensureXSchema(env);
   for(const sql of SCHEMA) await env.DB.prepare(sql).run();
-  const columns=(await env.DB.prepare(
+  const machineColumns=(await env.DB.prepare(
     "PRAGMA table_info(shiire_vending_machines)"
   ).all<{name:string}>()).results.map(row=>row.name);
   for(const [name,type] of [
@@ -84,9 +84,23 @@ export async function ensureShiireVendingSchema(env:Env){
     ["panel_image_mime","TEXT"],
     ["panel_image_base64","TEXT"]
   ] as const){
-    if(!columns.includes(name)){
+    if(!machineColumns.includes(name)){
       await env.DB.prepare(
         "ALTER TABLE shiire_vending_machines ADD COLUMN "+name+" "+type
+      ).run();
+    }
+  }
+
+  const orderColumns=(await env.DB.prepare(
+    "PRAGMA table_info(shiire_vending_orders)"
+  ).all<{name:string}>()).results.map(row=>row.name);
+  for(const [name,type] of [
+    ["delivery_channel_id","TEXT"],
+    ["delivery_message_id","TEXT"]
+  ] as const){
+    if(!orderColumns.includes(name)){
+      await env.DB.prepare(
+        "ALTER TABLE shiire_vending_orders ADD COLUMN "+name+" "+type
       ).run();
     }
   }
