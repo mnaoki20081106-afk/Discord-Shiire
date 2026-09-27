@@ -419,6 +419,12 @@ export async function attachShiirePaymentLink(env:Env,orderId:string,link:string
   ).bind(JSON.stringify(encrypted),Date.now(),orderId).run();
 }
 
+export async function clearShiirePaymentLink(env:Env,orderId:string){
+  await env.DB.prepare(
+    "UPDATE shiire_vending_orders SET payment_link_ciphertext=NULL,updated_at=? WHERE id=? AND status='awaiting_payment'"
+  ).bind(Date.now(),orderId).run();
+}
+
 export async function readShiirePaymentLink(
   env:Env,
   order:ShiireVendingOrder
