@@ -327,17 +327,7 @@ export async function requestLtcWithdrawal(env:Env,input:{
     throw new BinanceApiError(409,"WITHDRAW_ADDRESS_NOT_WHITELISTED",false,"Destination LTC address is not an enabled withdrawal whitelist entry");
   }
 
-  // Binance's official Capital docs require switching to the Travel Rule SAPI
-  // whenever this endpoint returns anything other than NIL. We deliberately do
-  // not fabricate jurisdiction-specific questionnaire answers.
-  if((travelRule.questionnaireCountryCode??"NIL").toUpperCase()!=="NIL"){
-    throw new BinanceApiError(
-      409,
-      "MANUAL_TRAVEL_RULE_REQUIRED",
-      false,
-      "Travel Rule questionnaire is required; automatic withdrawal is blocked until accurate questionnaire data is supplied through an approved flow"
-    );
-  }
+  const travelRequired=(travelRule.questionnaireCountryCode??"NIL").toUpperCase()!=="NIL";
 
   if(!input.live){
     return {
@@ -347,8 +337,34 @@ export async function requestLtcWithdrawal(env:Env,input:{
       amount,
       network,
       withdrawOrderId:input.withdrawOrderId,
-      dynamicFeeLtc:Number(configured.withdrawFee)
+      dynamicFeeLtc:Number(configured.withdrawFee),
+      travelRuleRequired:travelRequired
     };
+  }
+
+  if(travelRequired){
+    const questionnaire=env.BINANCE_TRAVEL_RULE_QUESTIONNAIRE?.trim()??"";
+    if(!questionnaire){
+      throw new BinanceApiError(
+        409,
+        "BINANCE_TRAVEL_RULE_QUESTIONNAIRE_REQUIRED",
+        false,
+        "Travel Rule questionnaire is required. Store the accurate questionnaire JSON as a Worker Secret; it is never logged."
+      );
+    }
+    return signedRequest<{trId?:number|string;id?:string}>(
+      env,
+      "POST",
+      "/sapi/v1/localentity/withdraw/apply",
+      {
+        coin:"LTC",
+        address,
+        amount,
+        questionnaire,
+        withdrawOrderId:input.withdrawOrderId,
+        network
+      }
+    );
   }
 
   return signedRequest<{id:string}>(env,"POST","/sapi/v1/capital/withdraw/apply",{
