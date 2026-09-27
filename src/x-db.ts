@@ -489,8 +489,10 @@ export async function pendingPurchaseOrders(env:Env){
   await ensureXSchema(env);
   const result=await env.DB.prepare(
     "SELECT * FROM purchase_orders WHERE supplier='hstora' AND dry_run=0 "+
-    "AND status IN ('CREATED','SUBMITTED','PROCESSING','PENDING') "+
-    "ORDER BY created_at ASC LIMIT 50"
+    "AND status NOT IN ("+
+      "'DELIVERED','COMPLETED','FAILED','REFUNDED','DISPUTED',"+
+      "'CANCELLED','CANCELED','DELIVERY_INTEGRITY_FAILED'"+
+    ") ORDER BY created_at ASC LIMIT 50"
   ).all<any>();
   return result.results;
 }
