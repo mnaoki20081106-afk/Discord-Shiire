@@ -37,6 +37,41 @@ export type BinanceMarketStatus={
 
 export type BinanceBalance={asset:string;free:number;locked:number};
 
+export type BinanceOrderView={
+  symbol:string;
+  orderId:number;
+  clientOrderId:string;
+  status:string;
+  executedQty:string;
+  cummulativeQuoteQty?:string;
+  origQuoteOrderQty?:string;
+};
+
+function object(value:unknown):value is Record<string,unknown>{
+  return Boolean(value)&&typeof value==="object"&&!Array.isArray(value);
+}
+
+function schemaError(context:string):never{
+  throw new BinanceApiError(
+    502,
+    "BINANCE_SCHEMA_CHANGED",
+    false,
+    "Unexpected Binance "+context+" response structure"
+  );
+}
+
+function validateOrder(value:unknown):BinanceOrderView{
+  if(
+    !object(value)||
+    typeof value.symbol!=="string"||
+    !Number.isFinite(Number(value.orderId))||
+    typeof value.clientOrderId!=="string"||
+    typeof value.status!=="string"||
+    typeof value.executedQty!=="string"
+  ) schemaError("order");
+  return value as unknown as BinanceOrderView;
+}
+
 function apiKey(env:Env){
   const key=env.BINANCE_API_KEY?.trim()??"";
   if(!key) throw new BinanceApiError(503,"BINANCE_API_KEY_NOT_CONFIGURED",false,"Binance API key is not configured");
@@ -125,8 +160,16 @@ export async function getLtcJpyMarketStatus():Promise<BinanceMarketStatus>{
     publicGet<ExchangeInfo>("/api/v3/exchangeInfo",{symbol:SYMBOL}),
     publicGet<{symbol:string;price:string}>("/api/v3/ticker/price",{symbol:SYMBOL})
   ]);
-  const symbol=exchange.symbols?.find(s=>s.symbol===SYMBOL);
+  if(!Array.isArray(exchange?.symbols)||typeof price?.symbol!=="string"||typeof price?.price!=="string"){
+    schemaError("market");
+  }
+  const symbol=exchange.symbols.find(s=>s.symbol===SYMBOL);
   if(!symbol) throw new BinanceApiError(409,"LTCJPY_NOT_LISTED",false,"LTCJPY is not present in exchangeInfo");
+  if(
+    typeof symbol.status!=="string"||
+    typeof symbol.baseAsset!=="string"||
+    typeof symbol.quoteAsset!=="string"
+  ) schemaError("exchangeInfo symbol");
   if(symbol.baseAsset!=="LTC"||symbol.quoteAsset!=="JPY"){
     throw new BinanceApiError(409,"LTCJPY_SCHEMA_MISMATCH",false,"Unexpected LTCJPY asset mapping");
   }
@@ -144,32 +187,59 @@ export async function getLtcJpyMarketStatus():Promise<BinanceMarketStatus>{
 }
 
 export async function getBinanceAccount(env:Env){
-  return signedRequest<{
+  const account=await signedRequest<unknown>(env,"GET","/api/v3/account",{});
+  if(!object(account)||!Array.isArray(account.balances)) schemaError("account");
+  for(const row of account.balances){
+    if(
+      !object(row)||
+      typeof row.asset!=="string"||
+      typeof row.free!=="string"||
+      typeof row.locked!=="string"||
+      !Number.isFinite(Number(row.free))||
+      !Number.isFinite(Number(row.locked))
+    ) schemaError("account balance");
+  }
+  return account as unknown as {
     balances:Array<{asset:string;free:string;locked:string}>;
     canTrade?:boolean;
     canWithdraw?:boolean;
     permissions?:string[];
-  }>(env,"GET","/api/v3/account",{});
+  };
 }
 
 export async function getBinanceBalance(env:Env,asset:string):Promise<BinanceBalance>{
   const wanted=asset.trim().toUpperCase();
   const account=await getBinanceAccount(env);
-  const row=account.balances?.find(b=>b.asset===wanted);
-  return {
-    asset:wanted,
-    free:Number(row?.free??0),
-    locked:Number(row?.locked??0)
-  };
+  const row=account.balances.find(b=>b.asset===wanted);
+  if(!row){
+    throw new BinanceApiError(
+      409,
+      "BINANCE_ASSET_BALANCE_MISSING",
+      false,
+      wanted+" is missing from Binance account balances"
+    );
+  }
+  const free=Number(row.free);
+  const locked=Number(row.locked);
+  if(!Number.isFinite(free)||!Number.isFinite(locked)) schemaError("balance");
+  return {asset:wanted,free,locked};
 }
 
 export async function getBinanceApiRestrictions(env:Env){
-  return signedRequest<{
+  const value=await signedRequest<unknown>(env,"GET","/sapi/v1/account/apiRestrictions",{});
+  if(
+    !object(value)||
+    typeof value.ipRestrict!=="boolean"||
+    typeof value.enableReading!=="boolean"||
+    typeof value.enableWithdrawals!=="boolean"||
+    typeof value.enableSpotAndMarginTrading!=="boolean"
+  ) schemaError("API restrictions");
+  return value as {
     ipRestrict:boolean;
     enableReading:boolean;
     enableWithdrawals:boolean;
     enableSpotAndMarginTrading:boolean;
-  }>(env,"GET","/sapi/v1/account/apiRestrictions",{});
+  };
 }
 
 export async function placeLtcJpyMarketBuy(env:Env,input:{
@@ -196,25 +266,25 @@ export async function placeLtcJpyMarketBuy(env:Env,input:{
       newClientOrderId:input.clientOrderId
     };
   }
-  return signedRequest<any>(env,"POST","/api/v3/order",{
+  return validateOrder(await signedRequest<unknown>(env,"POST","/api/v3/order",{
     symbol:SYMBOL,
     side:"BUY",
     type:"MARKET",
     quoteOrderQty:amount,
     newClientOrderId:input.clientOrderId,
     newOrderRespType:"FULL"
-  });
+  }));
 }
 
 export async function getBinanceOrder(env:Env,input:{orderId?:number;origClientOrderId?:string}){
   if(!input.orderId&&!input.origClientOrderId){
     throw new BinanceApiError(400,"ORDER_IDENTIFIER_REQUIRED",false,"orderId or origClientOrderId is required");
   }
-  return signedRequest<any>(env,"GET","/api/v3/order",{
+  return validateOrder(await signedRequest<unknown>(env,"GET","/api/v3/order",{
     symbol:SYMBOL,
     orderId:input.orderId,
     origClientOrderId:input.origClientOrderId
-  });
+  }));
 }
 
 export type BinanceNetworkInfo={
@@ -231,40 +301,83 @@ export type BinanceNetworkInfo={
 };
 
 export async function getBinanceLtcCoinInfo(env:Env){
-  const all=await signedRequest<Array<{
+  const all=await signedRequest<unknown>(env,"GET","/sapi/v1/capital/config/getall",{});
+  if(!Array.isArray(all)) schemaError("coin configuration");
+  const ltc=all.find(item=>object(item)&&item.coin==="LTC");
+  if(!object(ltc)||!Array.isArray(ltc.networkList)) schemaError("LTC coin configuration");
+  for(const network of ltc.networkList){
+    if(
+      !object(network)||
+      typeof network.network!=="string"||
+      typeof network.coin!=="string"||
+      typeof network.withdrawEnable!=="boolean"||
+      typeof network.withdrawFee!=="string"||
+      typeof network.withdrawMin!=="string"||
+      typeof network.withdrawMax!=="string"||
+      typeof network.busy!=="boolean"
+    ) schemaError("LTC network configuration");
+  }
+  const typed=ltc as unknown as {
     coin:string;
     free:string;
     withdrawAllEnable:boolean;
     networkList:BinanceNetworkInfo[];
-  }>>(env,"GET","/sapi/v1/capital/config/getall",{});
-  const ltc=all.find(c=>c.coin==="LTC");
-  if(!ltc) throw new BinanceApiError(409,"LTC_COIN_INFO_MISSING",false,"LTC is missing from Binance capital configuration");
-  return ltc;
+  };
+  const ltcFound=typed;
+  if(!ltcFound) throw new BinanceApiError(409,"LTC_COIN_INFO_MISSING",false,"LTC is missing from Binance capital configuration");
+  return ltcFound;
 }
 
 export async function getBinanceWithdrawAddresses(env:Env){
-  return signedRequest<Array<{
+  const value=await signedRequest<unknown>(env,"GET","/sapi/v1/capital/withdraw/address/list",{});
+  if(!Array.isArray(value)) schemaError("withdraw address list");
+  for(const row of value){
+    if(
+      !object(row)||
+      typeof row.address!=="string"||
+      typeof row.coin!=="string"||
+      typeof row.network!=="string"||
+      typeof row.whiteStatus!=="boolean"
+    ) schemaError("withdraw address");
+  }
+  return value as Array<{
     address:string;
-    addressTag:string;
+    addressTag?:string;
     coin:string;
-    name:string;
+    name?:string;
     network:string;
-    origin:string;
-    originType:string;
+    origin?:string;
+    originType?:string;
     whiteStatus:boolean;
-  }>>(env,"GET","/sapi/v1/capital/withdraw/address/list",{});
+  }>;
 }
 
 export async function getBinanceWithdrawQuota(env:Env){
-  return signedRequest<{wdQuota:string;usedWdQuota:string}>(
+  const value=await signedRequest<unknown>(
     env,"GET","/sapi/v1/capital/withdraw/quota",{}
   );
+  if(
+    !object(value)||
+    typeof value.wdQuota!=="string"||
+    typeof value.usedWdQuota!=="string"||
+    !Number.isFinite(Number(value.wdQuota))||
+    !Number.isFinite(Number(value.usedWdQuota))
+  ) schemaError("withdraw quota");
+  return value as {wdQuota:string;usedWdQuota:string};
 }
 
 export async function getTravelRuleRequirement(env:Env){
-  return signedRequest<{questionnaireCountryCode?:string}>(
+  const value=await signedRequest<unknown>(
     env,"GET","/sapi/v1/localentity/questionnaire-requirements",{}
   );
+  if(
+    !object(value)||
+    (
+      value.questionnaireCountryCode!==undefined&&
+      typeof value.questionnaireCountryCode!=="string"
+    )
+  ) schemaError("Travel Rule requirement");
+  return value as {questionnaireCountryCode?:string};
 }
 
 export async function getBinanceWithdrawHistory(env:Env,input?:{
