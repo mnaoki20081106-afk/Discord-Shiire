@@ -343,29 +343,6 @@ export async function deleteShiireStockNotification(env:Env,machineId:string){
   ).bind(machineId).run();
 }
 
-async function moveInventory(
-  env:Env,
-  supplierProductId:string,
-  from:string,
-  to:string|null,
-  quantity:number
-){
-  const q=Math.max(0,Math.floor(quantity));
-  if(q===0) return;
-  const now=Date.now();
-  const source=await env.DB.prepare(
-    "UPDATE inventory SET quantity=MAX(0,quantity-?),updated_at=? WHERE supplier_product_id=? AND status=?"
-  ).bind(q,now,supplierProductId,from).run();
-  if(Number(source.meta.changes??0)!==1){
-    throw new Error("INVENTORY_AGGREGATE_MISSING");
-  }
-  if(to){
-    await env.DB.prepare(
-      "INSERT INTO inventory(id,supplier_product_id,status,quantity,updated_at) VALUES (?,?,?,?,?) ON CONFLICT(supplier_product_id,status) DO UPDATE SET quantity=quantity+excluded.quantity,updated_at=excluded.updated_at"
-    ).bind(randomId(),supplierProductId,to,q,now).run();
-  }
-}
-
 async function reserveAccounts(
   env:Env,
   orderId:string,
@@ -389,7 +366,6 @@ async function reserveAccounts(
       ).bind(row.id,orderId,product.id,Date.now()).run();
       reserved.push(row.id);
     }
-    await moveInventory(env,product.supplier_product_id,"READY_FOR_DELIVERY","VENDING_RESERVED",reserved.length);
     return reserved;
   }catch(error){
     for(const accountId of reserved){
@@ -399,9 +375,6 @@ async function reserveAccounts(
       await env.DB.prepare(
         "DELETE FROM shiire_vending_reservations WHERE account_id=? AND order_id=?"
       ).bind(accountId,orderId).run().catch(()=>undefined);
-    }
-    if(reserved.length){
-      await moveInventory(env,product.supplier_product_id,"VENDING_RESERVED","READY_FOR_DELIVERY",reserved.length).catch(()=>undefined);
     }
     throw error;
   }
@@ -557,22 +530,10 @@ export async function finishShiireDelivery(env:Env,order:ShiireVendingOrder){
   if(rows.length!==order.quantity) throw new Error("RESERVED_STOCK_MISSING");
   const now=Date.now();
 
-  for(const row of rows){
-    const result=await env.DB.prepare(
+  const statements=[
+    ...rows.map(row=>env.DB.prepare(
       "UPDATE purchased_accounts SET status='DELIVERED',delivered_at=? WHERE id=? AND status='VENDING_RESERVED'"
-    ).bind(now,row.id).run();
-    if(Number(result.meta.changes??0)!==1) throw new Error("DELIVERY_STATE_RACE");
-  }
-
-  await moveInventory(
-    env,
-    product.supplier_product_id,
-    "VENDING_RESERVED",
-    null,
-    order.quantity
-  );
-
-  await env.DB.batch([
+    ).bind(now,row.id)),
     env.DB.prepare(
       "DELETE FROM shiire_vending_reservations WHERE order_id=?"
     ).bind(order.id),
@@ -582,36 +543,34 @@ export async function finishShiireDelivery(env:Env,order:ShiireVendingOrder){
     env.DB.prepare(
       "UPDATE shiire_vending_products SET sales_count=sales_count+?,updated_at=? WHERE id=?"
     ).bind(order.quantity,now,order.product_id)
-  ]);
+  ];
+  const results=await env.DB.batch(statements);
+  for(let i=0;i<rows.length;i++){
+    if(Number(results[i]?.meta?.changes??0)!==1){
+      throw new Error("DELIVERY_STATE_RACE");
+    }
+  }
 }
 
 export async function releaseShiireOrder(env:Env,orderId:string){
   const order=await getShiireOrder(env,orderId);
-  if(!order) return 0;
-  const product=await getShiireProduct(env,order.product_id);
-  if(!product) return 0;
+  if(!order||!["awaiting_payment","reserving","failed"].includes(order.status)) return 0;
   const rows=(await env.DB.prepare(
     "SELECT account_id FROM shiire_vending_reservations WHERE order_id=?"
   ).bind(orderId).all<{account_id:string}>()).results;
+  if(!rows.length) return 0;
 
-  let released=0;
-  for(const row of rows){
-    const result=await env.DB.prepare(
+  const results=await env.DB.batch([
+    ...rows.map(row=>env.DB.prepare(
       "UPDATE purchased_accounts SET status='READY_FOR_DELIVERY' WHERE id=? AND status='VENDING_RESERVED'"
-    ).bind(row.account_id).run();
-    if(Number(result.meta.changes??0)===1) released++;
-  }
-  await env.DB.prepare(
-    "DELETE FROM shiire_vending_reservations WHERE order_id=?"
-  ).bind(orderId).run();
-  if(released){
-    await moveInventory(
-      env,
-      product.supplier_product_id,
-      "VENDING_RESERVED",
-      "READY_FOR_DELIVERY",
-      released
-    );
+    ).bind(row.account_id)),
+    env.DB.prepare(
+      "DELETE FROM shiire_vending_reservations WHERE order_id=?"
+    ).bind(orderId)
+  ]);
+  let released=0;
+  for(let i=0;i<rows.length;i++){
+    if(Number(results[i]?.meta?.changes??0)===1) released++;
   }
   return released;
 }
@@ -628,6 +587,17 @@ export async function cleanShiireVendingExpired(env:Env){
       "UPDATE shiire_vending_orders SET status='expired',updated_at=? WHERE id=? AND status='awaiting_payment'"
     ).bind(now,row.id).run();
   }
+
+  const abandoned=(await env.DB.prepare(
+    "SELECT id FROM shiire_vending_orders WHERE status IN ('reserving','failed') AND updated_at<? ORDER BY updated_at ASC LIMIT 50"
+  ).bind(now-5*60_000).all<{id:string}>()).results;
+  for(const row of abandoned){
+    await releaseShiireOrder(env,row.id);
+    await env.DB.prepare(
+      "UPDATE shiire_vending_orders SET status='failed',updated_at=? WHERE id=? AND status IN ('reserving','failed')"
+    ).bind(now,row.id).run();
+  }
+
   await env.DB.prepare(
     "UPDATE shiire_vending_orders SET status='paid',updated_at=? WHERE status='delivering' AND delivered_at IS NULL AND updated_at<?"
   ).bind(now,now-5*60_000).run();
