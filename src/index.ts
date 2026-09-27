@@ -17,6 +17,12 @@ import { handleXAdminApi, xAdminPage } from "./x-admin";
 import { runXProcurement } from "./x-engine";
 import { loadXSettings } from "./x-settings";
 import { handleHstoraWebhook } from "./x-webhooks";
+import {
+  handleShiireVendingInteraction,
+  handleShiireMainBridge,
+  shiireVendingSweep,
+  ShiireVendingError
+} from "./shiire-vending";
 
 class HttpError extends Error{
   constructor(public status:number,message:string){super(message);}
@@ -145,6 +151,11 @@ async function handleInteraction(
   }
   const interaction=JSON.parse(raw);
   if(interaction.type===1) return json({type:1});
+  if(interaction.type===3||interaction.type===5){
+    const vending=await handleShiireVendingInteraction(interaction,env);
+    if(vending) return vending;
+    return interactionResponse("未対応の操作です。");
+  }
   if(interaction.type!==2) return interactionResponse("未対応の操作です。");
   if(!canManage(interaction)){
     return interactionResponse("このコマンドには「サーバー管理」権限が必要です。");
@@ -386,6 +397,10 @@ export default {
       if(url.pathname==="/webhooks/hstora"){
         return handleHstoraWebhook(request,env);
       }
+      if(url.pathname.startsWith("/bridge/main/")){
+        const bridge=await handleShiireMainBridge(request,env,url);
+        if(bridge) return bridge;
+      }
       if(url.pathname==="/interactions"&&request.method==="POST"){
         return handleInteraction(request,env,ctx);
       }
@@ -397,7 +412,10 @@ export default {
       }
       throw new HttpError(404,"NOT_FOUND");
     }catch(error){
-      const status=error instanceof HttpError?error.status:500;
+      const status=
+        error instanceof HttpError?error.status:
+        error instanceof ShiireVendingError?error.status:
+        500;
       const message=error instanceof Error?error.message:String(error);
       console.error(error);
       return json({error:status>=500?"server_error":"request_error",message},status);
@@ -411,6 +429,7 @@ export default {
       if(settings.auto_procurement_enabled){
         await runXProcurement(env);
       }
+      await shiireVendingSweep(env);
     })());
   }
 } satisfies ExportedHandler<Env>;
