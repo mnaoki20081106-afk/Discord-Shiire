@@ -118,7 +118,7 @@ async function catalogProducts(env:Env,approvedIds:number[]):Promise<HstoraCatal
     return out;
   }
 
-  const out:HstoraProduct[]=[];
+  const out:HstoraCatalogItem[]=[];
   let page=1;
   let pages=1;
   do{
