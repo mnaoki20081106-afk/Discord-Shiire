@@ -17,6 +17,7 @@ import {
   getBinanceApiRestrictions,
   getBinanceBalance,
   getBinanceLtcCoinInfo,
+  getBinanceWithdrawalSafetyStatus,
   getLtcJpyMarketStatus
 } from "./providers/binance";
 import {
@@ -240,14 +241,21 @@ export async function handleXAdminApi(
   }
 
   if(url.pathname==="/api/x/binance"&&request.method==="GET"){
-    const [market,restrictions,ltc,jpy,coinInfo]=await Promise.all([
+    const [market,restrictions,ltc,jpy,coinInfo,withdrawalSafety]=await Promise.all([
       settled(()=>getLtcJpyMarketStatus()),
       settled(()=>getBinanceApiRestrictions(env)),
       settled(()=>getBinanceBalance(env,"LTC")),
       settled(()=>getBinanceBalance(env,"JPY")),
-      settled(()=>getBinanceLtcCoinInfo(env))
+      settled(()=>getBinanceLtcCoinInfo(env)),
+      settled(()=>getBinanceWithdrawalSafetyStatus(env))
     ]);
-    return json({market,restrictions,balances:{ltc,jpy},coinInfo});
+    return json({
+      market,
+      tradeApi:{restrictions},
+      balances:{ltc,jpy},
+      coinInfo,
+      withdrawalSafety
+    });
   }
 
   if(url.pathname==="/api/x/hstora"&&request.method==="GET"){
