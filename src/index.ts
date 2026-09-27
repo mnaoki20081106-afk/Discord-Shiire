@@ -11,7 +11,7 @@ import {
   listProducts,
   listSuppliers
 } from "./db";
-import { getMainStock } from "./main-bot";
+import { getMainCatalog, getMainStock } from "./main-bot";
 import { runAllProducts, runProduct } from "./engine";
 
 class HttpError extends Error{
@@ -194,6 +194,10 @@ async function handleApi(request:Request,env:Env,url:URL):Promise<Response>{
 
   if(url.pathname==="/api/state"&&request.method==="GET"){
     return json(await dashboardSnapshot(env));
+  }
+
+  if(url.pathname==="/api/main-catalog"&&request.method==="GET"){
+    return json(await getMainCatalog(env));
   }
 
   if(url.pathname==="/api/suppliers"){
