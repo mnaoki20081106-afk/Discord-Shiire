@@ -225,3 +225,62 @@ export function newHstoraPurchaseIds(){
     idempotencyKey:"xproc-idem-"+id
   };
 }
+
+
+export type HstoraWebhookVerification={
+  deliveryId:string;
+  eventId:string;
+  eventType:string;
+  timestamp:string;
+};
+
+function safeHexEqual(left:string,right:string){
+  const a=left.toLowerCase();
+  const b=right.toLowerCase();
+  if(!/^[0-9a-f]+$/.test(a)||a.length!==b.length) return false;
+  let diff=0;
+  for(let i=0;i<a.length;i++) diff|=a.charCodeAt(i)^b.charCodeAt(i);
+  return diff===0;
+}
+
+export async function verifyHstoraWebhook(
+  env:Env,
+  request:Request,
+  rawBody:string
+):Promise<HstoraWebhookVerification>{
+  const secret=env.HSTORA_WEBHOOK_SECRET?.trim()??"";
+  if(!secret){
+    throw new HstoraApiError(
+      503,
+      "HSTORA_WEBHOOK_SECRET_NOT_CONFIGURED",
+      false,
+      "HStora webhook secret is not configured"
+    );
+  }
+
+  const timestamp=request.headers.get("X-HStore-Webhook-Timestamp")??"";
+  const deliveryId=request.headers.get("X-HStore-Delivery-Id")??"";
+  const eventId=request.headers.get("X-HStore-Event-Id")??"";
+  const eventType=request.headers.get("X-HStore-Webhook-Event")??"";
+  const version=request.headers.get("X-HStore-Signature-Version")??"";
+  const signature=(request.headers.get("X-HStore-Webhook-Signature")??"").toLowerCase();
+
+  if(!timestamp||!deliveryId||!eventId||!eventType||!signature){
+    throw new HstoraApiError(401,"HSTORA_WEBHOOK_HEADERS_MISSING",false,"Missing HStora webhook headers");
+  }
+  if(version&&version!=="v1"){
+    throw new HstoraApiError(401,"HSTORA_WEBHOOK_VERSION_UNSUPPORTED",false,"Unsupported HStora webhook signature version");
+  }
+  if(!/^\d+$/.test(timestamp)){
+    throw new HstoraApiError(401,"HSTORA_WEBHOOK_TIMESTAMP_INVALID",false,"Invalid HStora webhook timestamp");
+  }
+
+  const bodyHash=await sha256Hex(rawBody);
+  const canonical=[timestamp,deliveryId,eventId,eventType,bodyHash].join("\n");
+  const expected=await hmacHex(secret,canonical);
+  if(!safeHexEqual(expected,signature)){
+    throw new HstoraApiError(401,"HSTORA_WEBHOOK_SIGNATURE_INVALID",false,"Invalid HStora webhook signature");
+  }
+
+  return {deliveryId,eventId,eventType,timestamp};
+}
