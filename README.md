@@ -199,3 +199,196 @@ DB
 
 Main Bot URLは `wrangler.jsonc` の `MAIN_BOT_BASE_URL` で設定します。
 
+
+## X account procurement
+
+The X account procurement flow is implemented as a separate, fail-closed pipeline inside Discord-Shiire.
+
+```text
+PayPay (manual funding boundary)
+  -> Binance Japan JPY
+  -> LTC/JPY Spot
+  -> HStora Main Wallet funding boundary
+  -> HStora official API purchase
+  -> encrypted D1 inventory
+  -> READY_FOR_DELIVERY
+  -> future Xaccount-Bot DeliveryProvider
+```
+
+The admin page is available at:
+
+```text
+/x-admin
+```
+
+and contains:
+
+```text
+Dashboard
+Funding
+Binance
+LTC Wallet
+HStora
+Inventory
+Orders
+Logs
+Settings
+```
+
+All `/api/x/*` endpoints require the existing `ADMIN_TOKEN`.
+
+### Safety defaults
+
+The defaults are intentionally non-live:
+
+```text
+dry_run = true
+auto_purchase_enabled = false
+auto_procurement_enabled = false
+auto_ltc_withdraw_enabled = false
+emergency_stop = false
+seller_quality_mode = strict_api
+```
+
+Turning Dry Run off through the admin API requires an explicit live-mode confirmation.
+Emergency Stop disables both automatic purchase and automatic procurement.
+
+Funding limits are calculated fail-closed. The actual JPY purchase ceiling is the minimum of:
+
+- observed PayPay balance minus `reserve_jpy`
+- `max_purchase_jpy`
+- remaining daily limit
+- remaining weekly limit
+- remaining monthly limit
+- remaining LTC target balance capacity
+- remaining LTC maximum balance capacity
+
+A stale PayPay observation makes the allowable automated purchase amount zero.
+
+### PayPay boundary
+
+No browser automation, login bypass, or guessed PayPay/Binance funding endpoint is used.
+
+PayPay funding is a manual boundary:
+
+1. Discord-Shiire calculates the required JPY amount.
+2. It creates one pending manual funding request.
+3. The user performs the PayPay -> Binance Japan operation using the supported UI.
+4. Discord-Shiire checks Binance JPY balance using the official Binance API.
+5. When the required balance increase is observed, the pipeline resumes automatically.
+
+The pending request is persisted so the one-minute Cron does not repeatedly create the same funding request.
+
+### Binance Japan
+
+The Binance adapter uses documented Binance Spot/Wallet endpoints only, including:
+
+- `GET /api/v3/exchangeInfo`
+- `GET /api/v3/ticker/price`
+- `GET /api/v3/account`
+- `POST /api/v3/order`
+- `GET /api/v3/order`
+- `GET /sapi/v1/account/apiRestrictions`
+- `GET /sapi/v1/capital/config/getall`
+- `GET /sapi/v1/capital/withdraw/address/list`
+- `GET /sapi/v1/capital/withdraw/quota`
+- `GET /sapi/v1/localentity/questionnaire-requirements`
+- `POST /sapi/v1/capital/withdraw/apply`
+- `POST /sapi/v1/localentity/withdraw/apply` when Travel Rule data is required
+
+Before live withdrawals, the adapter requires:
+
+- IP restriction enabled on the Binance API key
+- withdrawal permission enabled
+- destination address present in the Binance withdrawal allowlist
+- LTC network withdrawal enabled and not busy
+- amount within the current network minimum/maximum
+- accurate Travel Rule questionnaire data when required
+
+An ambiguous LTC order submission is reconciled with the same `clientOrderId` before any retry decision.
+
+### HStora
+
+The HStora adapter uses the documented v1 catalog/product/balance/order APIs.
+Purchase calls use both an external order ID and an idempotency key.
+If an order POST has an ambiguous result, Discord-Shiire performs the official external-order lookup instead of blindly submitting another purchase.
+
+The current HStora product schema does not expose the requested seller rating, review count, sales count, and dispute-rate fields. Therefore:
+
+- `seller_quality_mode = strict_api` blocks automatic purchasing.
+- `seller_quality_mode = manual_product_approval` only allows explicitly approved HStora product IDs.
+
+No seller quality value is fabricated.
+
+HStora wallet deposit-address automation is not guessed. If the official API does not expose the required deposit operation, the pipeline stops at the manual HStora LTC deposit boundary and detects the HStora balance increase afterward.
+
+### Credential storage
+
+HStora delivery data is never stored in plaintext.
+
+- payload encryption: AES-GCM
+- key source: `CREDENTIALS_ENCRYPTION_KEY` Worker Secret
+- duplicate fingerprint: keyed HMAC
+- DB state after purchase: `READY_FOR_DELIVERY`
+
+The future Xaccount-Bot delivery contract is intentionally not called yet.
+
+### Required Worker Secrets for X procurement
+
+Store these with Cloudflare Worker Secret management, never in GitHub or `wrangler.jsonc`:
+
+```text
+BINANCE_API_KEY
+BINANCE_API_SECRET
+HSTORA_API_KEY
+HSTORA_API_SECRET
+CREDENTIALS_ENCRYPTION_KEY
+```
+
+Optional:
+
+```text
+BINANCE_TRAVEL_RULE_QUESTIONNAIRE
+DISCORD_NOTIFY_WEBHOOK_URL
+```
+
+`BINANCE_TRAVEL_RULE_QUESTIONNAIRE` is only used when Binance reports that the API key/entity requires the Travel Rule questionnaire. Do not generate or guess its contents.
+
+`CREDENTIALS_ENCRYPTION_KEY` must decode to exactly 32 bytes. One way to create a suitable value locally is:
+
+```bash
+openssl rand -base64 32
+```
+
+### Circuit breakers
+
+Automatic processing stops on conditions including:
+
+- HStora API/order ambiguity that cannot be reconciled
+- Binance API/order ambiguity that cannot be reconciled
+- HStora product price jump beyond the configured threshold
+- LTC/JPY price jump beyond the configured threshold
+- unexpected HStora balance decrease beyond known bot purchases
+- delivery-count mismatch
+- authentication/API failures
+
+Circuit breakers are visible from the X admin dashboard and require an explicit admin reset.
+
+### Tests
+
+CI runs both TypeScript build/typecheck and the procurement safety tests.
+The tests include the funding-cap example:
+
+```text
+PayPay balance: 50,000 JPY
+reserve_jpy: 20,000 JPY
+max_purchase_jpy: 10,000 JPY
+remaining daily allowance: 7,000 JPY
+=> maximum automated purchase: 7,000 JPY
+```
+
+and verifies that 42 requested accounts with `max_batch_purchase = 20` split as:
+
+```text
+20, 20, 2
+```
