@@ -19,7 +19,8 @@ const schema=[
   "CREATE TABLE IF NOT EXISTS supplier_pool (id TEXT PRIMARY KEY,supplier_id TEXT NOT NULL,sku TEXT NOT NULL,fingerprint TEXT NOT NULL,content TEXT NOT NULL,state TEXT NOT NULL DEFAULT 'available',created_at INTEGER NOT NULL,taken_at INTEGER,UNIQUE(supplier_id,sku,fingerprint))",
   "CREATE INDEX IF NOT EXISTS supplier_pool_lookup_idx ON supplier_pool(supplier_id,sku,state,created_at)",
   "CREATE TABLE IF NOT EXISTS supply_events (id TEXT PRIMARY KEY,level TEXT NOT NULL,kind TEXT NOT NULL,product_id TEXT,job_id TEXT,message TEXT NOT NULL,created_at INTEGER NOT NULL)",
-  "CREATE INDEX IF NOT EXISTS supply_events_recent_idx ON supply_events(created_at DESC)"
+  "CREATE INDEX IF NOT EXISTS supply_events_recent_idx ON supply_events(created_at DESC)",
+  "CREATE TABLE IF NOT EXISTS product_locks (product_id TEXT PRIMARY KEY,token TEXT NOT NULL,expires_at INTEGER NOT NULL)"
 ];
 
 export async function ensureSchema(env:Env){
@@ -322,6 +323,36 @@ export async function markJobItemsDelivered(env:Env,jobId:string){
   await env.DB.prepare(
     "UPDATE supply_items SET state='delivered',delivered_at=? WHERE job_id=? AND state='acquired'"
   ).bind(Date.now(),jobId).run();
+}
+
+export async function acquireProductLock(
+  env:Env,
+  productId:string,
+  ttlMs=60_000
+):Promise<string|null>{
+  const now=Date.now();
+  await env.DB.prepare(
+    "DELETE FROM product_locks WHERE product_id=? AND expires_at<?"
+  ).bind(productId,now).run();
+  const token=randomId();
+  try{
+    await env.DB.prepare(
+      "INSERT INTO product_locks(product_id,token,expires_at) VALUES (?,?,?)"
+    ).bind(productId,token,now+ttlMs).run();
+    return token;
+  }catch{
+    return null;
+  }
+}
+
+export async function releaseProductLock(
+  env:Env,
+  productId:string,
+  token:string
+){
+  await env.DB.prepare(
+    "DELETE FROM product_locks WHERE product_id=? AND token=?"
+  ).bind(productId,token).run();
 }
 
 export async function dashboardSnapshot(env:Env){
