@@ -485,7 +485,8 @@ export async function listPurchaseOrders(env:Env,limit=100){
 export async function readyInventoryCount(env:Env):Promise<number>{
   await ensureXSchema(env);
   const row=await env.DB.prepare(
-    "SELECT COALESCE(SUM(quantity),0) AS quantity FROM inventory WHERE status='READY_FOR_DELIVERY'"
+    "SELECT COALESCE(SUM(quantity),0) AS quantity FROM inventory "+
+    "WHERE status IN ('READY_FOR_DELIVERY','VENDING_RESERVED')"
   ).first<{quantity:number}>();
   return Math.max(0,Number(row?.quantity??0));
 }
