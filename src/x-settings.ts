@@ -44,19 +44,12 @@ export type XSettings={
   max_fx_age_ms:number;
   max_fx_jump_percent:number;
 
-  auto_ltc_withdraw_enabled:boolean;
-  max_single_withdraw_ltc:number;
-
   max_price_jump_percent:number;
   max_ltc_price_jump_percent:number;
-  max_consecutive_failures:number;
-
   require_bulk_confirmation:boolean;
   bulk_confirmation_threshold:number;
   bulk_approval_until:number;
 
-  hstora_ltc_deposit_address:string;
-  hstora_ltc_network:string;
 };
 
 export const DEFAULT_X_SETTINGS:XSettings={
@@ -102,24 +95,17 @@ export const DEFAULT_X_SETTINGS:XSettings={
   max_fx_age_ms:6*60*60*1000,
   max_fx_jump_percent:10,
 
-  auto_ltc_withdraw_enabled:false,
-  max_single_withdraw_ltc:0,
-
   max_price_jump_percent:25,
   max_ltc_price_jump_percent:15,
-  max_consecutive_failures:3,
-
   require_bulk_confirmation:true,
   bulk_confirmation_threshold:20,
   bulk_approval_until:0,
 
-  hstora_ltc_deposit_address:"",
-  hstora_ltc_network:"LTC"
 };
 
 const BOOLEAN_KEYS=new Set<keyof XSettings>([
   "dry_run","emergency_stop","auto_purchase_enabled","auto_procurement_enabled",
-  "auto_ltc_withdraw_enabled","require_bulk_confirmation"
+  "require_bulk_confirmation"
 ]);
 
 const INTEGER_KEYS=new Set<keyof XSettings>([
@@ -130,14 +116,14 @@ const INTEGER_KEYS=new Set<keyof XSettings>([
   "observed_paypay_balance_jpy","observed_paypay_balance_at",
   "max_paypay_balance_age_ms","pending_paypay_funding_jpy",
   "pending_paypay_binance_jpy_baseline","pending_paypay_requested_at",
-  "usd_jpy_rate_updated_at","max_fx_age_ms","max_consecutive_failures",
+  "usd_jpy_rate_updated_at","max_fx_age_ms",
   "bulk_confirmation_threshold","bulk_approval_until"
 ]);
 
 const NUMBER_KEYS=new Set<keyof XSettings>([
   "target_ltc_balance","max_ltc_balance","wallet_target_ltc","wallet_max_ltc",
   "max_unit_price_jpy","min_seller_rating","max_dispute_rate","usd_jpy_rate",
-  "max_fx_jump_percent","max_single_withdraw_ltc","max_price_jump_percent","max_ltc_price_jump_percent"
+  "max_fx_jump_percent","max_price_jump_percent","max_ltc_price_jump_percent"
 ]);
 
 function sanitizeStoredSettings(value:unknown):Partial<XSettings>{
@@ -171,9 +157,6 @@ function sanitizeStoredSettings(value:unknown):Partial<XSettings>{
         ))];
       }
       continue;
-    }
-    if(key==="hstora_ltc_deposit_address"||key==="hstora_ltc_network"){
-      if(typeof v==="string") out[key]=v.trim().slice(0,256);
     }
   }
   return out as Partial<XSettings>;
@@ -217,7 +200,6 @@ export async function saveXSettings(env:Env,patch:Partial<XSettings>):Promise<XS
   if(next.max_price_jump_percent<=0||next.max_ltc_price_jump_percent<=0){
     throw new Error("PRICE_JUMP_LIMIT_INVALID");
   }
-  if(next.max_consecutive_failures<1) throw new Error("MAX_CONSECUTIVE_FAILURES_INVALID");
   if(next.bulk_confirmation_threshold<1) throw new Error("BULK_CONFIRMATION_THRESHOLD_INVALID");
   if(next.max_paypay_balance_age_ms<60_000) throw new Error("PAYPAY_BALANCE_AGE_INVALID");
   if(next.max_fx_age_ms<60_000) throw new Error("FX_AGE_INVALID");
@@ -228,7 +210,6 @@ export async function saveXSettings(env:Env,patch:Partial<XSettings>):Promise<XS
   if(next.wallet_target_ltc<0||next.wallet_max_ltc<0||next.wallet_target_ltc>next.wallet_max_ltc){
     throw new Error("WALLET_BALANCE_LIMIT_INVALID");
   }
-  if(next.max_single_withdraw_ltc<0) throw new Error("MAX_SINGLE_WITHDRAW_INVALID");
   if(
     next.pending_paypay_funding_jpy<0||
     next.pending_paypay_binance_jpy_baseline<0||
