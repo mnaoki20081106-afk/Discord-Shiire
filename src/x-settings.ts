@@ -36,10 +36,12 @@ export type XSettings={
   observed_paypay_balance_jpy:number;
   observed_paypay_balance_at:number;
   max_paypay_balance_age_ms:number;
+  pending_paypay_funding_jpy:number;
+  pending_paypay_binance_jpy_baseline:number;
+  pending_paypay_requested_at:number;
   usd_jpy_rate:number;
   usd_jpy_rate_updated_at:number;
   max_fx_age_ms:number;
-  max_paypay_observation_age_ms:number;
 
   auto_ltc_withdraw_enabled:boolean;
   max_single_withdraw_ltc:number;
@@ -91,10 +93,12 @@ export const DEFAULT_X_SETTINGS:XSettings={
   observed_paypay_balance_jpy:0,
   observed_paypay_balance_at:0,
   max_paypay_balance_age_ms:24*60*60*1000,
+  pending_paypay_funding_jpy:0,
+  pending_paypay_binance_jpy_baseline:0,
+  pending_paypay_requested_at:0,
   usd_jpy_rate:0,
   usd_jpy_rate_updated_at:0,
   max_fx_age_ms:6*60*60*1000,
-  max_paypay_observation_age_ms:60*60*1000,
 
   auto_ltc_withdraw_enabled:false,
   max_single_withdraw_ltc:0,
@@ -122,8 +126,9 @@ const INTEGER_KEYS=new Set<keyof XSettings>([
   "reorder_point","target_stock","max_batch_purchase","min_product_reviews",
   "min_sales_count","minimum_stock","trial_purchase_count",
   "observed_paypay_balance_jpy","observed_paypay_balance_at",
-  "max_paypay_balance_age_ms","usd_jpy_rate_updated_at","max_fx_age_ms",
-  "max_paypay_observation_age_ms","max_consecutive_failures",
+  "max_paypay_balance_age_ms","pending_paypay_funding_jpy",
+  "pending_paypay_binance_jpy_baseline","pending_paypay_requested_at",
+  "usd_jpy_rate_updated_at","max_fx_age_ms","max_consecutive_failures",
   "bulk_confirmation_threshold","bulk_approval_until"
 ]);
 
@@ -221,7 +226,11 @@ export async function saveXSettings(env:Env,patch:Partial<XSettings>):Promise<XS
     throw new Error("WALLET_BALANCE_LIMIT_INVALID");
   }
   if(next.max_single_withdraw_ltc<0) throw new Error("MAX_SINGLE_WITHDRAW_INVALID");
-  if(next.max_paypay_observation_age_ms<60_000) throw new Error("PAYPAY_OBSERVATION_AGE_INVALID");
+  if(
+    next.pending_paypay_funding_jpy<0||
+    next.pending_paypay_binance_jpy_baseline<0||
+    next.pending_paypay_requested_at<0
+  ) throw new Error("PENDING_PAYPAY_STATE_INVALID");
   next.approved_hstora_product_ids=[...new Set(
     (next.approved_hstora_product_ids??[])
       .map(Number)
