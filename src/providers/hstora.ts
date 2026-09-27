@@ -1,5 +1,5 @@
 import type { Env } from "../types";
-import { hmacHex, randomId, sha256Hex } from "../crypto";
+import { hmacHex, randomId, sha256Hex } from "../crypto.ts";
 
 const BASE_URL="https://hstora.com";
 
