@@ -12,6 +12,7 @@ export type ShiireVendingMachine={
   role_id:string|null;
   panel_title:string|null;
   panel_description:string|null;
+  panel_image_url:string|null;
   active:number;
   created_at:number;
   updated_at:number;
@@ -57,7 +58,7 @@ export type ShiireVendingOrder={
 let ready=false;
 
 const SCHEMA=[
-  "CREATE TABLE IF NOT EXISTS shiire_vending_machines (id TEXT PRIMARY KEY,guild_id TEXT NOT NULL,name TEXT NOT NULL,public_log_channel_id TEXT,private_log_channel_id TEXT,role_id TEXT,panel_title TEXT,panel_description TEXT,active INTEGER NOT NULL DEFAULT 1,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL)",
+  "CREATE TABLE IF NOT EXISTS shiire_vending_machines (id TEXT PRIMARY KEY,guild_id TEXT NOT NULL,name TEXT NOT NULL,public_log_channel_id TEXT,private_log_channel_id TEXT,role_id TEXT,panel_title TEXT,panel_description TEXT,panel_image_url TEXT,panel_image_mime TEXT,panel_image_base64 TEXT,active INTEGER NOT NULL DEFAULT 1,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL)",
   "CREATE INDEX IF NOT EXISTS shiire_vending_machines_guild_idx ON shiire_vending_machines(guild_id,active)",
   "CREATE TABLE IF NOT EXISTS shiire_vending_products (id TEXT PRIMARY KEY,vending_machine_id TEXT NOT NULL,supplier_product_id TEXT NOT NULL,name TEXT NOT NULL,description TEXT NOT NULL DEFAULT '',price_paypay INTEGER NOT NULL DEFAULT 0,price_kyash INTEGER NOT NULL DEFAULT 0,emoji TEXT,sales_count INTEGER NOT NULL DEFAULT 0,active INTEGER NOT NULL DEFAULT 1,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL)",
   "CREATE INDEX IF NOT EXISTS shiire_vending_products_vm_idx ON shiire_vending_products(vending_machine_id,active)",
@@ -75,6 +76,20 @@ export async function ensureShiireVendingSchema(env:Env){
   if(ready) return;
   await ensureXSchema(env);
   for(const sql of SCHEMA) await env.DB.prepare(sql).run();
+  const columns=(await env.DB.prepare(
+    "PRAGMA table_info(shiire_vending_machines)"
+  ).all<{name:string}>()).results.map(row=>row.name);
+  for(const [name,type] of [
+    ["panel_image_url","TEXT"],
+    ["panel_image_mime","TEXT"],
+    ["panel_image_base64","TEXT"]
+  ] as const){
+    if(!columns.includes(name)){
+      await env.DB.prepare(
+        "ALTER TABLE shiire_vending_machines ADD COLUMN "+name+" "+type
+      ).run();
+    }
+  }
   ready=true;
 }
 
@@ -127,6 +142,35 @@ export async function updateShiireMachine(
     Date.now(),id
   ).run();
   return Number(result.meta.changes??0)>0;
+}
+
+export async function saveShiirePanelImage(
+  env:Env,
+  machineId:string,
+  url:string,
+  mime:string,
+  base64:string
+){
+  await ensureShiireVendingSchema(env);
+  const result=await env.DB.prepare(
+    "UPDATE shiire_vending_machines SET panel_image_url=?,panel_image_mime=?,panel_image_base64=?,updated_at=? WHERE id=? AND active=1"
+  ).bind(url,mime,base64,Date.now(),machineId).run();
+  return Number(result.meta.changes??0)===1;
+}
+
+export async function deleteShiirePanelImage(env:Env,machineId:string){
+  await ensureShiireVendingSchema(env);
+  const result=await env.DB.prepare(
+    "UPDATE shiire_vending_machines SET panel_image_url=NULL,panel_image_mime=NULL,panel_image_base64=NULL,updated_at=? WHERE id=? AND active=1"
+  ).bind(Date.now(),machineId).run();
+  return Number(result.meta.changes??0)===1;
+}
+
+export async function getShiirePanelImage(env:Env,machineId:string){
+  await ensureShiireVendingSchema(env);
+  return await env.DB.prepare(
+    "SELECT panel_image_mime,panel_image_base64 FROM shiire_vending_machines WHERE id=? AND active=1"
+  ).bind(machineId).first<{panel_image_mime:string|null;panel_image_base64:string|null}>()??null;
 }
 
 export async function deleteShiireMachine(env:Env,id:string){
