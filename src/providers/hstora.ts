@@ -58,12 +58,22 @@ type ApiEnvelope<T>={
 };
 
 export class HstoraApiError extends Error{
+  status:number;
+  code:string;
+  retryable:boolean;
+
   constructor(
-    public status:number,
-    public code:string,
-    public retryable:boolean,
+    status:number,
+    code:string,
+    retryable:boolean,
     message:string
-  ){super(message);}
+  ){
+    super(message);
+    this.name="HstoraApiError";
+    this.status=status;
+    this.code=code;
+    this.retryable=retryable;
+  }
 }
 
 function credentials(env:Env){
