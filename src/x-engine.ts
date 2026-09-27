@@ -521,7 +521,7 @@ export async function runXProcurement(env:Env):Promise<XRunResult>{
       };
     }catch{}
     if(!recovered){
-      const code=error instanceof Error?error.code:"HSTORA_PURCHASE_FAILED";
+      const code=error instanceof Error?error.message.slice(0,120):"HSTORA_PURCHASE_FAILED";
       await updatePurchaseOrderRecord(env,recordId,{status:"FAILED",errorCode:code});
       await setCircuitBreaker(env,"hstora","OPEN",code);
       await notifyDiscord(env,{
