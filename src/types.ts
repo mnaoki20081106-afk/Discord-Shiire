@@ -10,6 +10,7 @@ export interface Env {
   // X account procurement integrations. All of these are Worker Secrets.
   BINANCE_API_KEY?: string;
   BINANCE_API_SECRET?: string;
+  BINANCE_TRAVEL_RULE_QUESTIONNAIRE?: string;
   HSTORA_API_KEY?: string;
   HSTORA_API_SECRET?: string;
   HSTORA_WEBHOOK_SECRET?: string;
