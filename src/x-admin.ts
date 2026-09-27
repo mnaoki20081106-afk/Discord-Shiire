@@ -6,7 +6,9 @@ import {
   listPurchaseOrders,
   listSupplierProducts,
   todayPurchaseStats,
-  ensureXSchema
+  ensureXSchema,
+  auditX,
+  listOpenCircuitBreakers
 } from "./x-db";
 import { getFundingPlan, jstPeriodStarts } from "./x-funding";
 import {
@@ -78,6 +80,42 @@ export async function handleXAdminApi(
     }
   }
 
+  if(url.pathname==="/api/x/funding/paypay-observation"&&request.method==="POST"){
+    const raw=await requestJson(request);
+    const balanceJpy=Number(raw?.balanceJpy);
+    if(!Number.isFinite(balanceJpy)||balanceJpy<0){
+      return json({error:"INVALID_PAYPAY_BALANCE"},400);
+    }
+    const settings=await saveXSettings(env,{
+      observed_paypay_balance_jpy:Math.floor(balanceJpy),
+      observed_paypay_balance_at:Date.now()
+    });
+    await auditX(env,{
+      kind:"paypay_balance_observed",
+      message:"PayPay balance observation updated manually.",
+      details:{balanceJpy:Math.floor(balanceJpy)}
+    });
+    return json({ok:true,settings:publicSettings(settings)});
+  }
+
+  if(url.pathname==="/api/x/funding/usd-jpy-observation"&&request.method==="POST"){
+    const raw=await requestJson(request);
+    const rate=Number(raw?.rate);
+    if(!Number.isFinite(rate)||rate<=0){
+      return json({error:"INVALID_USD_JPY_RATE"},400);
+    }
+    const settings=await saveXSettings(env,{
+      usd_jpy_rate:rate,
+      usd_jpy_rate_updated_at:Date.now()
+    });
+    await auditX(env,{
+      kind:"usd_jpy_rate_observed",
+      message:"USD/JPY observation updated manually.",
+      details:{rate}
+    });
+    return json({ok:true,settings:publicSettings(settings)});
+  }
+
   if(url.pathname==="/api/x/emergency-stop"&&request.method==="POST"){
     const settings=await saveXSettings(env,{
       emergency_stop:true,
@@ -101,7 +139,7 @@ export async function handleXAdminApi(
   if(url.pathname==="/api/x/dashboard"&&request.method==="GET"){
     const now=Date.now();
     const dayStart=jstPeriodStarts(now).day;
-    const [settings,inventory,today,funding,hstora,market,ltc,jpy]=await Promise.all([
+    const [settings,inventory,today,funding,hstora,market,ltc,jpy,circuitBreakers]=await Promise.all([
       loadXSettings(env),
       inventorySummary(env),
       todayPurchaseStats(env,dayStart),
@@ -109,7 +147,8 @@ export async function handleXAdminApi(
       settled(()=>getHstoraBalance(env)),
       settled(()=>getLtcJpyMarketStatus()),
       settled(()=>getBinanceBalance(env,"LTC")),
-      settled(()=>getBinanceBalance(env,"JPY"))
+      settled(()=>getBinanceBalance(env,"JPY")),
+      listOpenCircuitBreakers(env)
     ]);
     return json({
       generatedAt:now,
@@ -117,6 +156,7 @@ export async function handleXAdminApi(
       funding,
       balances:{hstora,binanceLtc:ltc,binanceJpy:jpy},
       market,
+      circuitBreakers,
       inventory,
       today,
       safety:{
