@@ -50,6 +50,8 @@ export type ShiireVendingOrder={
   updated_at:number;
   paid_at:number|null;
   delivered_at:number|null;
+  delivery_channel_id:string|null;
+  delivery_message_id:string|null;
 };
 
 let ready=false;
@@ -62,7 +64,7 @@ const SCHEMA=[
   "CREATE INDEX IF NOT EXISTS shiire_vending_products_supplier_idx ON shiire_vending_products(supplier_product_id,active)",
   "CREATE TABLE IF NOT EXISTS shiire_vending_coupons (code TEXT NOT NULL,vending_machine_id TEXT NOT NULL,discount INTEGER NOT NULL,active INTEGER NOT NULL DEFAULT 1,created_at INTEGER NOT NULL,PRIMARY KEY(vending_machine_id,code))",
   "CREATE TABLE IF NOT EXISTS shiire_vending_stock_notifications (vending_machine_id TEXT PRIMARY KEY,guild_id TEXT NOT NULL,channel_id TEXT NOT NULL,role_id TEXT NOT NULL,enabled INTEGER NOT NULL DEFAULT 0,updated_at INTEGER NOT NULL)",
-  "CREATE TABLE IF NOT EXISTS shiire_vending_orders (id TEXT PRIMARY KEY,vending_machine_id TEXT NOT NULL,product_id TEXT NOT NULL,guild_id TEXT NOT NULL,user_id TEXT NOT NULL,payment_method TEXT NOT NULL,quantity INTEGER NOT NULL,unit_price INTEGER NOT NULL,discount_each INTEGER NOT NULL DEFAULT 0,total_amount INTEGER NOT NULL,status TEXT NOT NULL,payment_link_ciphertext TEXT,reserved_until INTEGER,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL,paid_at INTEGER,delivered_at INTEGER)",
+  "CREATE TABLE IF NOT EXISTS shiire_vending_orders (id TEXT PRIMARY KEY,vending_machine_id TEXT NOT NULL,product_id TEXT NOT NULL,guild_id TEXT NOT NULL,user_id TEXT NOT NULL,payment_method TEXT NOT NULL,quantity INTEGER NOT NULL,unit_price INTEGER NOT NULL,discount_each INTEGER NOT NULL DEFAULT 0,total_amount INTEGER NOT NULL,status TEXT NOT NULL,payment_link_ciphertext TEXT,reserved_until INTEGER,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL,paid_at INTEGER,delivered_at INTEGER,delivery_channel_id TEXT,delivery_message_id TEXT)",
   "CREATE INDEX IF NOT EXISTS shiire_vending_orders_status_idx ON shiire_vending_orders(status,reserved_until,created_at)",
   "CREATE TABLE IF NOT EXISTS shiire_vending_reservations (account_id TEXT PRIMARY KEY,order_id TEXT NOT NULL,product_id TEXT NOT NULL,reserved_at INTEGER NOT NULL)",
   "CREATE INDEX IF NOT EXISTS shiire_vending_reservations_order_idx ON shiire_vending_reservations(order_id)",
@@ -452,6 +454,31 @@ export async function resetShiireDelivery(env:Env,orderId:string){
   ).bind(Date.now(),orderId).run();
 }
 
+export async function markShiireDeliverySent(
+  env:Env,
+  orderId:string,
+  channelId:string,
+  messageId:string
+){
+  const result=await env.DB.prepare(
+    "UPDATE shiire_vending_orders SET status='delivery_sent',delivery_channel_id=?,delivery_message_id=?,updated_at=? WHERE id=? AND status='delivering' AND delivered_at IS NULL"
+  ).bind(channelId,messageId,Date.now(),orderId).run();
+  if(Number(result.meta.changes??0)!==1){
+    const current=await getShiireOrder(env,orderId);
+    if(current?.status!=="delivery_sent"&&current?.status!=="delivered"){
+      throw new Error("DELIVERY_SENT_STATE_WRITE_FAILED");
+    }
+  }
+}
+
+export async function listShiireDeliverySent(env:Env,limit=20){
+  await ensureShiireVendingSchema(env);
+  const safe=Math.max(1,Math.min(50,Math.floor(limit)));
+  return (await env.DB.prepare(
+    "SELECT * FROM shiire_vending_orders WHERE status='delivery_sent' AND delivered_at IS NULL ORDER BY updated_at ASC LIMIT ?"
+  ).bind(safe).all<ShiireVendingOrder>()).results;
+}
+
 export async function reservedShiireAccounts(env:Env,orderId:string){
   await ensureShiireVendingSchema(env);
   return (await env.DB.prepare(
@@ -500,7 +527,7 @@ export async function finishShiireDelivery(env:Env,order:ShiireVendingOrder){
       "DELETE FROM shiire_vending_reservations WHERE order_id=?"
     ).bind(order.id),
     env.DB.prepare(
-      "UPDATE shiire_vending_orders SET status='delivered',delivered_at=?,updated_at=? WHERE id=? AND status='delivering'"
+      "UPDATE shiire_vending_orders SET status='delivered',delivered_at=?,updated_at=? WHERE id=? AND status IN ('delivering','delivery_sent')"
     ).bind(now,now,order.id),
     env.DB.prepare(
       "UPDATE shiire_vending_products SET sales_count=sales_count+?,updated_at=? WHERE id=?"
