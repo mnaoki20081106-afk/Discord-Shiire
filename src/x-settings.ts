@@ -111,18 +111,106 @@ export const DEFAULT_X_SETTINGS:XSettings={
   hstora_ltc_network:"LTC"
 };
 
+const BOOLEAN_KEYS=new Set<keyof XSettings>([
+  "dry_run","emergency_stop","auto_purchase_enabled","auto_procurement_enabled",
+  "auto_ltc_withdraw_enabled","require_bulk_confirmation"
+]);
+
+const INTEGER_KEYS=new Set<keyof XSettings>([
+  "reserve_jpy","max_purchase_jpy","daily_purchase_limit_jpy",
+  "weekly_purchase_limit_jpy","monthly_purchase_limit_jpy","min_purchase_jpy",
+  "reorder_point","target_stock","max_batch_purchase","min_product_reviews",
+  "min_sales_count","minimum_stock","trial_purchase_count",
+  "observed_paypay_balance_jpy","observed_paypay_balance_at",
+  "max_paypay_balance_age_ms","usd_jpy_rate_updated_at","max_fx_age_ms",
+  "max_paypay_observation_age_ms","max_consecutive_failures",
+  "bulk_confirmation_threshold","bulk_approval_until"
+]);
+
+const NUMBER_KEYS=new Set<keyof XSettings>([
+  "target_ltc_balance","max_ltc_balance","wallet_target_ltc","wallet_max_ltc",
+  "max_unit_price_jpy","min_seller_rating","max_dispute_rate","usd_jpy_rate",
+  "max_single_withdraw_ltc","max_price_jump_percent","max_ltc_price_jump_percent"
+]);
+
+function sanitizeStoredSettings(value:unknown):Partial<XSettings>{
+  if(!value||typeof value!=="object"||Array.isArray(value)) return {};
+  const input=value as Record<string,unknown>;
+  const out:Record<string,unknown>={};
+
+  for(const key of Object.keys(DEFAULT_X_SETTINGS) as Array<keyof XSettings>){
+    const v=input[key];
+    if(v===undefined) continue;
+    if(BOOLEAN_KEYS.has(key)){
+      if(typeof v==="boolean") out[key]=v;
+      continue;
+    }
+    if(INTEGER_KEYS.has(key)){
+      if(typeof v==="number"&&Number.isSafeInteger(v)&&v>=0) out[key]=v;
+      continue;
+    }
+    if(NUMBER_KEYS.has(key)){
+      if(typeof v==="number"&&Number.isFinite(v)&&v>=0) out[key]=v;
+      continue;
+    }
+    if(key==="seller_quality_mode"){
+      if(v==="strict_api"||v==="manual_product_approval") out[key]=v;
+      continue;
+    }
+    if(key==="approved_hstora_product_ids"){
+      if(Array.isArray(v)){
+        out[key]=[...new Set(v.filter(
+          item=>typeof item==="number"&&Number.isSafeInteger(item)&&item>0
+        ))];
+      }
+      continue;
+    }
+    if(key==="hstora_ltc_deposit_address"||key==="hstora_ltc_network"){
+      if(typeof v==="string") out[key]=v.trim().slice(0,256);
+    }
+  }
+  return out as Partial<XSettings>;
+}
+
+function validatePatch(patch:Partial<XSettings>):Partial<XSettings>{
+  if(!patch||typeof patch!=="object"||Array.isArray(patch)){
+    throw new Error("SETTINGS_PATCH_INVALID");
+  }
+  const input=patch as Record<string,unknown>;
+  const allowed=new Set(Object.keys(DEFAULT_X_SETTINGS));
+  for(const key of Object.keys(input)){
+    if(!allowed.has(key)) throw new Error("UNKNOWN_SETTING_"+key.toUpperCase());
+  }
+  const normalized=sanitizeStoredSettings(input);
+  for(const key of Object.keys(input)){
+    if(!(key in normalized)) throw new Error("INVALID_SETTING_TYPE_"+key.toUpperCase());
+  }
+  return normalized;
+}
+
+
 export async function loadXSettings(env:Env):Promise<XSettings>{
-  const stored=await getXSetting<Partial<XSettings>>(env,"x_procurement");
-  return {...DEFAULT_X_SETTINGS,...(stored??{})};
+  const stored=await getXSetting<unknown>(env,"x_procurement");
+  return {...DEFAULT_X_SETTINGS,...sanitizeStoredSettings(stored)};
 }
 
 export async function saveXSettings(env:Env,patch:Partial<XSettings>):Promise<XSettings>{
   const current=await loadXSettings(env);
-  const next={...current,...patch};
+  const normalized=validatePatch(patch);
+  const next={...current,...normalized};
   if(next.target_stock<next.reorder_point) throw new Error("TARGET_STOCK_BELOW_REORDER_POINT");
   if(next.max_batch_purchase<1) throw new Error("MAX_BATCH_PURCHASE_INVALID");
-  if(next.reserve_jpy<0||next.max_purchase_jpy<0) throw new Error("FUNDING_LIMIT_INVALID");
+  if(
+    next.reserve_jpy<0||next.max_purchase_jpy<0||
+    next.daily_purchase_limit_jpy<0||next.weekly_purchase_limit_jpy<0||
+    next.monthly_purchase_limit_jpy<0||next.min_purchase_jpy<0
+  ) throw new Error("FUNDING_LIMIT_INVALID");
   if(next.max_unit_price_jpy<=0) throw new Error("MAX_UNIT_PRICE_INVALID");
+  if(next.min_seller_rating<0||next.max_dispute_rate<0) throw new Error("SELLER_FILTER_INVALID");
+  if(next.max_price_jump_percent<=0||next.max_ltc_price_jump_percent<=0){
+    throw new Error("PRICE_JUMP_LIMIT_INVALID");
+  }
+  if(next.max_consecutive_failures<1) throw new Error("MAX_CONSECUTIVE_FAILURES_INVALID");
   if(next.bulk_confirmation_threshold<1) throw new Error("BULK_CONFIRMATION_THRESHOLD_INVALID");
   if(next.max_paypay_balance_age_ms<60_000) throw new Error("PAYPAY_BALANCE_AGE_INVALID");
   if(next.max_fx_age_ms<60_000) throw new Error("FX_AGE_INVALID");
