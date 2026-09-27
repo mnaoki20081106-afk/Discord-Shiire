@@ -15,7 +15,7 @@ import {
   updatePurchaseOrderRecord,
   upsertSupplierProduct
 } from "./x-db";
-import { loadXSettings } from "./x-settings";
+import { loadXSettings, saveXSettings } from "./x-settings";
 import { calculateFundingAllowance } from "./x-risk";
 import {
   getBinanceBalance,
@@ -206,7 +206,7 @@ async function handleHstoraFundingNeed(
   env:Env,
   neededUsd:number
 ):Promise<XRunResult>{
-  const settings=await loadXSettings(env);
+  let settings=await loadXSettings(env);
   if(settings.usd_jpy_rate<=0||Date.now()-settings.usd_jpy_rate_updated_at>settings.max_fx_age_ms){
     return {
       action:"MANUAL_FX_RATE_REQUIRED",
@@ -232,6 +232,47 @@ async function handleHstoraFundingNeed(
       level:"error"
     }).catch(()=>undefined);
     return {action:"BINANCE_API_BLOCKED",dryRun:settings.dry_run};
+  }
+
+  if(settings.pending_paypay_funding_jpy>0){
+    const expectedJpy=
+      settings.pending_paypay_binance_jpy_baseline+
+      settings.pending_paypay_funding_jpy;
+    if(jpyFree>=expectedJpy){
+      const confirmedSpend=settings.pending_paypay_funding_jpy;
+      settings=await saveXSettings(env,{
+        observed_paypay_balance_jpy:Math.max(
+          0,
+          settings.observed_paypay_balance_jpy-confirmedSpend
+        ),
+        pending_paypay_funding_jpy:0,
+        pending_paypay_binance_jpy_baseline:0,
+        pending_paypay_requested_at:0
+      });
+      await recordFundingEvent(env,{
+        provider:"paypay_manual",
+        kind:"JPY_DEPOSIT_DETECTED",
+        amountJpy:confirmedSpend,
+        status:"COMPLETED",
+        metadata:{binanceJpyFree:jpyFree}
+      });
+      await auditX(env,{
+        kind:"PAYPAY_FUNDING_CONFIRMED",
+        message:"Binance JPY balance increase satisfied the pending manual funding request.",
+        details:{confirmedSpendJpy:confirmedSpend,binanceJpyFree:jpyFree}
+      });
+    }else{
+      return {
+        action:"WAITING_MANUAL_PAYPAY_DEPOSIT",
+        dryRun:settings.dry_run,
+        details:{
+          requiredDepositJpy:settings.pending_paypay_funding_jpy,
+          binanceJpyBaseline:settings.pending_paypay_binance_jpy_baseline,
+          currentBinanceJpy:jpyFree,
+          requestedAt:settings.pending_paypay_requested_at
+        }
+      };
+    }
   }
 
   const requiredJpy=Math.ceil(neededUsd*settings.usd_jpy_rate);
@@ -301,22 +342,28 @@ async function handleHstoraFundingNeed(
   }
 
   if(jpyFree<desired){
+    const requiredDepositJpy=Math.ceil(desired-jpyFree);
+    settings=await saveXSettings(env,{
+      pending_paypay_funding_jpy:requiredDepositJpy,
+      pending_paypay_binance_jpy_baseline:Math.floor(jpyFree),
+      pending_paypay_requested_at:Date.now()
+    });
     await recordFundingEvent(env,{
       provider:"paypay_manual",
       kind:"JPY_DEPOSIT_REQUIRED",
-      amountJpy:desired-jpyFree,
+      amountJpy:requiredDepositJpy,
       status:"REQUIRED",
       metadata:{desired,jpyFree}
     });
     await notifyDiscord(env,{
       title:"LTC購入資金が必要",
-      message:"Binance JapanへPayPayからJPYを手動入金してください。入金後はBinance残高増加を公式APIで検知します。",
-      details:{requiredDepositJpy:Math.ceil(desired-jpyFree),purchaseCeilingJpy:desired}
+      message:"Binance JapanへPayPayからJPYを手動入金してください。入金後はBinance JPY残高の増加を公式APIで検知し、同じ要求を重複発行せず処理を再開します。",
+      details:{requiredDepositJpy,purchaseCeilingJpy:desired}
     }).catch(()=>undefined);
     return {
       action:"MANUAL_PAYPAY_TO_BINANCE_REQUIRED",
       dryRun:settings.dry_run,
-      details:{requiredDepositJpy:Math.ceil(desired-jpyFree),allowance}
+      details:{requiredDepositJpy,allowance}
     };
   }
 
