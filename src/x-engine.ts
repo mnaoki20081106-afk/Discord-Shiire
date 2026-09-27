@@ -228,7 +228,7 @@ async function handleHstoraFundingNeed(
 
   const observedFresh=
     settings.observed_paypay_balance_at>0&&
-    Date.now()-settings.observed_paypay_balance_at<=settings.max_paypay_observation_age_ms;
+    Date.now()-settings.observed_paypay_balance_at<=settings.max_paypay_balance_age_ms;
 
   if(!observedFresh){
     await notifyDiscord(env,{
