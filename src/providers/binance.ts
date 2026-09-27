@@ -455,6 +455,15 @@ export async function requestLtcWithdrawal(env:Env,input:{
     };
   }
 
+  if((env.BINANCE_FIXED_EGRESS_CONFIRMED??"").trim().toLowerCase()!=="true"){
+    throw new BinanceApiError(
+      409,
+      "BINANCE_FIXED_EGRESS_NOT_CONFIRMED",
+      false,
+      "Live Binance withdrawal is disabled until the deployment has a fixed allowlisted egress IP."
+    );
+  }
+
   if(travelRequired){
     const questionnaire=env.BINANCE_TRAVEL_RULE_QUESTIONNAIRE?.trim()??"";
     if(!questionnaire){
