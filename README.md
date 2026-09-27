@@ -484,7 +484,15 @@ On Xaccount-Bot, also set:
 SHIIRE_API_BASE_URL=https://<actual-discord-shiire-worker-origin>
 ```
 
-Use the real deployed Discord-Shiire Worker origin. The dashboard intentionally fails closed when this value is missing; it does not guess a workers.dev hostname.
+On Discord-Shiire, set the actual current Xaccount-Bot Worker origin separately:
+
+```text
+XACCOUNT_BOT_BASE_URL=https://<actual-xaccount-bot-worker-origin>
+```
+
+`XACCOUNT_BOT_BASE_URL` is used only for Shiire vending payment delegation. The older `MAIN_BOT_BASE_URL` remains separate so existing legacy supply-bridge behavior is not silently redirected.
+
+Use real deployed Worker origins. Both sides fail closed when their required URL is missing; neither side guesses a workers.dev hostname.
 
 For the Discord-Shiire vending panel and buyer delivery, configure these Worker secrets:
 
