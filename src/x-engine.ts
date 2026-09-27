@@ -564,7 +564,8 @@ export async function runXProcurement(env:Env):Promise<XRunResult>{
     circuitState(env,"product_price"),
     circuitState(env,"ltc_price"),
     circuitState(env,"unexpected_balance"),
-    circuitState(env,"delivery_integrity")
+    circuitState(env,"delivery_integrity"),
+    circuitState(env,"hstora_order_alert")
   ]);
   if(breakers.some(value=>String(value?.state??"")==="OPEN")){
     return {action:"CIRCUIT_BREAKER_OPEN",dryRun:settings.dry_run};
