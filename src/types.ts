@@ -39,6 +39,7 @@ export type ProductRow = {
 
 export type JobStatus =
   | "acquiring"
+  | "acquisition_failed"
   | "acquired"
   | "processing_failed"
   | "delivery_failed"
