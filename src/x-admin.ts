@@ -134,9 +134,38 @@ export async function handleXAdminApi(
     if(!Number.isFinite(rate)||rate<=0){
       return json({error:"INVALID_USD_JPY_RATE"},400);
     }
+    const current=await loadXSettings(env);
+    const now=Date.now();
+    const previousFresh=
+      current.usd_jpy_rate>0&&
+      current.usd_jpy_rate_updated_at>0&&
+      now-current.usd_jpy_rate_updated_at<=current.max_fx_age_ms;
+    if(previousFresh){
+      const jump=Math.abs(rate-current.usd_jpy_rate)/current.usd_jpy_rate*100;
+      if(jump>current.max_fx_jump_percent){
+        await setCircuitBreaker(
+          env,
+          "fx_rate",
+          "OPEN",
+          "USDJPY_JUMP:"+jump.toFixed(2)+"%"
+        );
+        await auditX(env,{
+          level:"error",
+          kind:"FX_RATE_JUMP",
+          message:"USD/JPY observation changed beyond configured threshold.",
+          details:{previous:current.usd_jpy_rate,attempted:rate,jumpPercent:jump}
+        });
+        return json({
+          error:"FX_RATE_CIRCUIT_BREAKER",
+          previous:current.usd_jpy_rate,
+          attempted:rate,
+          jumpPercent:jump
+        },409);
+      }
+    }
     const settings=await saveXSettings(env,{
       usd_jpy_rate:rate,
-      usd_jpy_rate_updated_at:Date.now()
+      usd_jpy_rate_updated_at:now
     });
     await auditX(env,{
       kind:"usd_jpy_rate_observed",
