@@ -205,9 +205,9 @@ Main Bot URLは `wrangler.jsonc` の `MAIN_BOT_BASE_URL` で設定します。
 The X account procurement flow is implemented as a separate, fail-closed pipeline inside Discord-Shiire.
 
 ```text
-PayPay (manual funding boundary)
-  -> Binance Japan JPY
-  -> LTC/JPY Spot
+PayPay (manual official-UI boundary)
+  -> Binance Japan JPY instant funding OR direct LTC purchase when offered
+  -> LTC/JPY Spot when JPY funding was used
   -> HStora Main Wallet funding boundary
   -> HStora official API purchase
   -> encrypted D1 inventory
@@ -271,11 +271,16 @@ No browser automation, login bypass, or guessed PayPay/Binance funding endpoint 
 
 PayPay funding is a manual boundary:
 
-1. Discord-Shiire calculates the required JPY amount.
-2. It creates one pending manual funding request.
-3. The user performs the PayPay -> Binance Japan operation using the supported UI.
-4. Discord-Shiire checks Binance JPY balance using the official Binance API.
-5. When the required balance increase is observed, the pipeline resumes automatically.
+1. Discord-Shiire calculates the maximum permitted JPY spend.
+2. It creates one pending manual PayPay action.
+3. The user uses Binance Japan's official UI to either:
+   - fund Binance JPY from PayPay, or
+   - buy LTC directly with PayPay when LTC is shown as an eligible PayPay purchase asset.
+4. Discord-Shiire checks official Binance account balances.
+5. A sufficient JPY increase causes the bot to continue with the LTC/JPY Spot purchase path.
+6. A sufficient LTC increase means the manual direct-LTC purchase already satisfied the requirement, so the bot does not submit a duplicate LTC order.
+
+The pending request is persisted so the one-minute Cron does not repeatedly create the same funding request.
 
 The pending request is persisted so the one-minute Cron does not repeatedly create the same funding request.
 
@@ -346,11 +351,12 @@ HSTORA_WEBHOOK_SECRET
 CREDENTIALS_ENCRYPTION_KEY
 ```
 
-Optional:
+Optional / feature-specific:
 
 ```text
 BINANCE_TRAVEL_RULE_QUESTIONNAIRE
 DISCORD_NOTIFY_WEBHOOK_URL
+HSTORA_WEBHOOK_SECRET
 ```
 
 `BINANCE_TRAVEL_RULE_QUESTIONNAIRE` is only used when Binance reports that the API key/entity requires the Travel Rule questionnaire. Do not generate or guess its contents.
