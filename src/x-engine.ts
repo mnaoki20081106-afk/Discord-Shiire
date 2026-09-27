@@ -6,12 +6,14 @@ import {
   createPurchaseOrderRecord,
   fundingSpendSince,
   getSupplierProductRecord,
+  getXSetting,
   pendingPurchaseOrders,
   readyInventoryCount,
   recordFundingEvent,
   setCircuitBreaker,
   storeDeliveredAccounts,
   successfulPurchaseCountForProduct,
+  setXSetting,
   updatePurchaseOrderRecord,
   upsertSupplierProduct
 } from "./x-db";
@@ -202,6 +204,74 @@ async function fundingWindowRemaining(env:Env,limit:number,since:number){
   return Math.max(0,limit-spent);
 }
 
+type MarketGuard={ltcJpy:number;updatedAt:number};
+async function checkLtcPriceGuard(env:Env,current:number,maxJumpPercent:number){
+  const previous=await getXSetting<MarketGuard>(env,"x_ltc_market_guard");
+  if(previous&&previous.ltcJpy>0&&current>0){
+    const jump=Math.abs(current-previous.ltcJpy)/previous.ltcJpy*100;
+    if(jump>maxJumpPercent){
+      await setCircuitBreaker(
+        env,
+        "ltc_price",
+        "OPEN",
+        "LTCJPY_PRICE_JUMP:"+jump.toFixed(2)+"%"
+      );
+      await auditX(env,{
+        level:"error",
+        kind:"LTC_PRICE_JUMP",
+        message:"LTC/JPY moved beyond configured threshold.",
+        details:{previous:previous.ltcJpy,current,jumpPercent:jump}
+      });
+      return false;
+    }
+  }
+  await setXSetting(env,"x_ltc_market_guard",{ltcJpy:current,updatedAt:Date.now()});
+  return true;
+}
+
+type BalanceGuard={hstoraUsd:number;allowedDecreaseUsd:number;updatedAt:number};
+async function checkHstoraBalanceGuard(env:Env,current:number){
+  const previous=await getXSetting<BalanceGuard>(env,"x_hstora_balance_guard");
+  if(previous&&Number.isFinite(previous.hstoraUsd)){
+    const floor=previous.hstoraUsd-Math.max(0,previous.allowedDecreaseUsd)-0.01;
+    if(current<floor){
+      await setCircuitBreaker(
+        env,
+        "unexpected_balance",
+        "OPEN",
+        "HSTORA_BALANCE_DECREASE"
+      );
+      await auditX(env,{
+        level:"error",
+        kind:"UNEXPECTED_HSTORA_BALANCE_DECREASE",
+        message:"HStora balance decreased beyond the amount expected from bot purchases.",
+        details:{
+          previous:previous.hstoraUsd,
+          current,
+          allowedDecreaseUsd:previous.allowedDecreaseUsd
+        }
+      });
+      return false;
+    }
+  }
+  await setXSetting(env,"x_hstora_balance_guard",{
+    hstoraUsd:current,
+    allowedDecreaseUsd:0,
+    updatedAt:Date.now()
+  });
+  return true;
+}
+
+async function allowExpectedHstoraDecrease(env:Env,amountUsd:number){
+  const current=await getXSetting<BalanceGuard>(env,"x_hstora_balance_guard");
+  if(!current) return;
+  await setXSetting(env,"x_hstora_balance_guard",{
+    ...current,
+    allowedDecreaseUsd:Math.max(0,current.allowedDecreaseUsd)+Math.max(0,amountUsd),
+    updatedAt:Date.now()
+  });
+}
+
 async function handleHstoraFundingNeed(
   env:Env,
   neededUsd:number
@@ -273,6 +343,10 @@ async function handleHstoraFundingNeed(
         }
       };
     }
+  }
+
+  if(!await checkLtcPriceGuard(env,ltcJpy,settings.max_ltc_price_jump_percent)){
+    return {action:"LTC_PRICE_CIRCUIT_BREAKER",dryRun:settings.dry_run};
   }
 
   const requiredJpy=Math.ceil(neededUsd*settings.usd_jpy_rate);
@@ -421,7 +495,9 @@ export async function runXProcurement(env:Env):Promise<XRunResult>{
     circuitState(env,"hstora"),
     circuitState(env,"binance"),
     circuitState(env,"binance_purchase"),
-    circuitState(env,"product_price")
+    circuitState(env,"product_price"),
+    circuitState(env,"ltc_price"),
+    circuitState(env,"unexpected_balance")
   ]);
   if(breakers.some(value=>String(value?.state??"")==="OPEN")){
     return {action:"CIRCUIT_BREAKER_OPEN",dryRun:settings.dry_run};
@@ -505,6 +581,13 @@ export async function runXProcurement(env:Env):Promise<XRunResult>{
     return {action:"HSTORA_BALANCE_ERROR",dryRun:settings.dry_run,inventory};
   }
 
+  if(
+    String(supplierBalance.currency).toUpperCase()==="USD"&&
+    !await checkHstoraBalanceGuard(env,Number(supplierBalance.balance))
+  ){
+    return {action:"UNEXPECTED_BALANCE_CIRCUIT_BREAKER",dryRun:settings.dry_run,inventory};
+  }
+
   if(String(supplierBalance.currency).toUpperCase()!=="USD"||String(fresh.currency).toUpperCase()!=="USD"){
     return {
       action:"HSTORA_CURRENCY_UNSUPPORTED",
@@ -566,6 +649,7 @@ export async function runXProcurement(env:Env):Promise<XRunResult>{
       idempotencyKey
     });
     const status=String(order.status??"SUBMITTED").toUpperCase();
+    await allowExpectedHstoraDecrease(env,totalSource);
     const added=order.delivery?.available
       ?await storeDeliveredAccounts(env,{
         purchaseOrderId:recordId,
@@ -602,6 +686,7 @@ export async function runXProcurement(env:Env):Promise<XRunResult>{
       const order=await lookupHstoraOrder(env,externalOrderId);
       recovered=true;
       const status=String(order.status??"PROCESSING").toUpperCase();
+      await allowExpectedHstoraDecrease(env,totalSource);
       const added=order.delivery?.available
         ?await storeDeliveredAccounts(env,{
           purchaseOrderId:recordId,
