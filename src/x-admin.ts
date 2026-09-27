@@ -230,6 +230,8 @@ h1{font-size:18px;margin:0 0 10px}
 .auth{display:flex;gap:8px}
 input,button,select{font:inherit}
 input{min-width:0;flex:1;border:1px solid #353b49;border-radius:10px;padding:10px;background:#151922;color:#fff}
+textarea{width:100%;min-height:48vh;border:1px solid #353b49;border-radius:10px;padding:10px;background:#0e1218;color:#e7ebf2;font:12px ui-monospace,SFMono-Regular,Menlo,monospace}
+.formrow{display:flex;gap:8px;margin-top:10px}.formrow input{flex:1}.hint{color:#8f99aa;font-size:12px;line-height:1.5}
 button{border:0;border-radius:10px;padding:10px 12px;background:#2b6ef2;color:white;font-weight:700}
 button.danger{background:#d93b4a}
 nav{display:flex;gap:7px;overflow:auto;padding:10px 14px;border-bottom:1px solid #262a34}
@@ -278,21 +280,54 @@ function drawNav(){
  tabs.forEach(t=>{const b=document.createElement("button");b.textContent=t;b.className=t===current?"active":"";b.onclick=()=>{current=t;drawNav();load()};nav.appendChild(b)});
 }
 function card(title,data){return '<section class="card"><strong>'+esc(title)+'</strong><pre>'+esc(JSON.stringify(data,null,2))+'</pre></section>'}
+function metrics(data){
+ const f=data.funding?.data?.allowance;
+ return '<div class="grid">'+
+  '<div class="metric"><small>PayPay使用可能額</small><strong>'+esc(f?.allowedJpy??0)+'円</strong></div>'+
+  '<div class="metric"><small>LTC残高</small><strong>'+esc(data.balances?.binanceLtc?.data?.free??"-")+'</strong></div>'+
+  '<div class="metric"><small>HStora残高</small><strong>'+esc(data.balances?.hstora?.data?.balance??"-")+' USD</strong></div>'+
+  '<div class="metric"><small>本日の仕入数</small><strong>'+esc(data.today?.count??0)+'</strong></div>'+
+  '</div>';
+}
+async function observePayPay(){
+ const value=Number(document.querySelector("#paypayBalance")?.value);
+ await api("/api/x/funding/paypay-observation",{method:"POST",body:JSON.stringify({balanceJpy:value})});
+ await load();
+}
+async function observeFx(){
+ const value=Number(document.querySelector("#usdJpy")?.value);
+ await api("/api/x/funding/usd-jpy-observation",{method:"POST",body:JSON.stringify({rate:value})});
+ await load();
+}
+async function saveSettings(){
+ const area=document.querySelector("#settingsJson");
+ let value; try{value=JSON.parse(area.value)}catch{throw new Error("設定JSONが不正です")}
+ await api("/api/x/settings",{method:"PATCH",body:JSON.stringify(value)});
+ await load();
+}
 async function load(){
  try{
   let data;
-  if(current==="Dashboard"||current==="Funding"){
+  if(current==="Dashboard"){
     data=await api("/api/x/dashboard");
     const s=data.settings||{};
     document.querySelector("#mode").textContent=s.dry_run?"DRY RUN":"LIVE";
     document.querySelector("#mode").className="status "+(s.dry_run?"good":"bad");
-    const f=data.funding?.data?.allowance;
-    main.innerHTML='<div class="grid">'+
-      '<div class="metric"><small>PayPay使用可能額</small><strong>'+esc(f?.allowedJpy??0)+'円</strong></div>'+
-      '<div class="metric"><small>LTC残高</small><strong>'+esc(data.balances?.binanceLtc?.data?.free??"-")+'</strong></div>'+
-      '<div class="metric"><small>HStora残高</small><strong>'+esc(data.balances?.hstora?.data?.balance??"-")+' USD</strong></div>'+
-      '<div class="metric"><small>本日の仕入数</small><strong>'+esc(data.today?.count??0)+'</strong></div>'+
-      '</div>'+card(current,data);
+    main.innerHTML=metrics(data)+card(current,data);
+  }else if(current==="Funding"){
+    data=await api("/api/x/dashboard");
+    const s=data.settings||{};
+    main.innerHTML=metrics(data)+
+      '<section class="card"><strong>PayPay残高（手動観測）</strong>'+
+      '<p class="hint">PayPay→Binance Japanの入金操作は公式Web/アプリ側で行い、ここには現在残高だけを記録します。古い観測値では自動購入枠は0円になります。</p>'+
+      '<div class="formrow"><input id="paypayBalance" inputmode="numeric" type="number" min="0" step="1" value="'+esc(s.observed_paypay_balance_jpy??0)+'"><button id="savePayPay">観測値を保存</button></div>'+
+      '</section>'+
+      '<section class="card"><strong>USD/JPY（手動観測）</strong>'+
+      '<p class="hint">HStoraのUSD建て価格をJPY上限と比較するための換算値です。期限切れなら価格判定を停止します。</p>'+
+      '<div class="formrow"><input id="usdJpy" inputmode="decimal" type="number" min="0" step="0.001" value="'+esc(s.usd_jpy_rate??0)+'"><button id="saveFx">換算値を保存</button></div>'+
+      '</section>'+card("Funding detail",data.funding);
+    document.querySelector("#savePayPay").onclick=()=>observePayPay().catch(e=>alert(e.message));
+    document.querySelector("#saveFx").onclick=()=>observeFx().catch(e=>alert(e.message));
   }else if(current==="Binance"){data=await api("/api/x/binance");main.innerHTML=card(current,data)}
   else if(current==="HStora"){data=await api("/api/x/hstora");main.innerHTML=card(current,data)}
   else if(current==="Inventory"){data=await api("/api/x/inventory");main.innerHTML=card(current,data)}
@@ -302,7 +337,9 @@ async function load(){
     main.innerHTML='<section class="card"><strong>LTC Wallet</strong><p class="status">専用ホットウォレットは現在無効です。秘密鍵をCloudflare Workerへ保存しません。</p></section>';
   }else{
     data=await api("/api/x/settings");
-    main.innerHTML=card(current,data.settings);
+    main.innerHTML='<section class="card"><strong>Settings</strong><p class="hint">初期状態は dry_run=true / 自動購入OFF / 自動仕入れOFFです。設定変更だけでは秘密鍵やAPI Secretは保存されません。</p><textarea id="settingsJson"></textarea><div class="formrow"><button id="saveSettings">設定を保存</button></div></section>';
+    document.querySelector("#settingsJson").value=JSON.stringify(data.settings,null,2);
+    document.querySelector("#saveSettings").onclick=()=>saveSettings().catch(e=>alert(e.message));
   }
  }catch(e){main.innerHTML='<section class="card bad">'+esc(e.message)+'</section>'}
 }
