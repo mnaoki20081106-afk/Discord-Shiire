@@ -192,7 +192,7 @@ export async function handleXAdminApi(
   if(url.pathname==="/api/x/dashboard"&&request.method==="GET"){
     const now=Date.now();
     const dayStart=jstPeriodStarts(now).day;
-    const [settings,inventory,today,funding,hstora,market,ltc,jpy,circuitBreakers]=await Promise.all([
+    const [settings,inventory,today,funding,hstora,market,ltc,jpy,circuitBreakers,recentLogs]=await Promise.all([
       loadXSettings(env),
       inventorySummary(env),
       todayPurchaseStats(env,dayStart),
@@ -201,7 +201,8 @@ export async function handleXAdminApi(
       settled(()=>getLtcJpyMarketStatus()),
       settled(()=>getBinanceBalance(env,"LTC")),
       settled(()=>getBinanceBalance(env,"JPY")),
-      listOpenCircuitBreakers(env)
+      listOpenCircuitBreakers(env),
+      listAuditLogs(env,50)
     ]);
     return json({
       generatedAt:now,
@@ -210,8 +211,25 @@ export async function handleXAdminApi(
       balances:{hstora,binanceLtc:ltc,binanceJpy:jpy},
       market,
       circuitBreakers,
+      recentErrors:(recentLogs as any[])
+        .filter(row=>String(row.level)==="error")
+        .slice(0,10),
       inventory,
-      today,
+      today:{
+        ...today,
+        approximateJpy:
+          settings.usd_jpy_rate>0&&
+          settings.usd_jpy_rate_updated_at>0&&
+          now-settings.usd_jpy_rate_updated_at<=settings.max_fx_age_ms
+            ?today.amount*settings.usd_jpy_rate
+            :null,
+        approximateAverageJpy:
+          settings.usd_jpy_rate>0&&
+          settings.usd_jpy_rate_updated_at>0&&
+          now-settings.usd_jpy_rate_updated_at<=settings.max_fx_age_ms
+            ?today.average*settings.usd_jpy_rate
+            :null
+      },
       safety:{
         dryRun:settings.dry_run,
         emergencyStop:settings.emergency_stop,
@@ -339,11 +357,20 @@ async function approveBulk(){await api("/api/x/bulk-approval",{method:"POST",bod
 async function resetEmergency(){await api("/api/x/emergency-stop/reset",{method:"POST",body:"{}"});await load()}
 function metrics(data){
  const f=data.funding?.data?.allowance;
+ const ready=data.inventory?.READY_FOR_DELIVERY??0;
+ const err=(data.recentErrors?.length??0)+(data.circuitBreakers?.length??0);
+ const todayJpy=data.today?.approximateJpy;
+ const avgJpy=data.today?.approximateAverageJpy;
  return '<div class="grid">'+
   '<div class="metric"><small>PayPay使用可能額</small><strong>'+esc(f?.allowedJpy??0)+'円</strong></div>'+
-  '<div class="metric"><small>LTC残高</small><strong>'+esc(data.balances?.binanceLtc?.data?.free??"-")+'</strong></div>'+
+  '<div class="metric"><small>LTC残高</small><strong>'+esc(data.balances?.binanceLtc?.data?.free??"-")+' LTC</strong></div>'+
   '<div class="metric"><small>HStora残高</small><strong>'+esc(data.balances?.hstora?.data?.balance??"-")+' USD</strong></div>'+
+  '<div class="metric"><small>X垢在庫</small><strong>'+esc(ready)+'</strong></div>'+
   '<div class="metric"><small>本日の仕入数</small><strong>'+esc(data.today?.count??0)+'</strong></div>'+
+  '<div class="metric"><small>本日の仕入金額</small><strong>'+(todayJpy==null?esc(data.today?.amount??0)+' USD':esc(Math.round(todayJpy))+'円')+'</strong></div>'+
+  '<div class="metric"><small>平均仕入単価</small><strong>'+(avgJpy==null?esc(data.today?.average??0)+' USD':esc(Math.round(avgJpy))+'円')+'</strong></div>'+
+  '<div class="metric"><small>エラー / Breaker</small><strong>'+esc(err)+'</strong></div>'+
+  '<div class="metric"><small>自動仕入れ</small><strong>'+(data.safety?.autoProcurementEnabled?'ON':'OFF')+'</strong></div>'+
   '</div>';
 }
 async function observePayPay(){
