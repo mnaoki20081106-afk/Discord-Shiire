@@ -343,11 +343,21 @@ async function handleHstoraFundingNeed(
     return {action:"BINANCE_API_BLOCKED",dryRun:settings.dry_run};
   }
 
+  if(!await checkLtcPriceGuard(env,ltcJpy,settings.max_ltc_price_jump_percent)){
+    return {action:"LTC_PRICE_CIRCUIT_BREAKER",dryRun:settings.dry_run};
+  }
+
+  const requiredJpy=Math.ceil(neededUsd*settings.usd_jpy_rate);
+  const requiredLtc=requiredJpy/ltcJpy;
+
   if(settings.pending_paypay_funding_jpy>0){
     const expectedJpy=
       settings.pending_paypay_binance_jpy_baseline+
       settings.pending_paypay_funding_jpy;
-    if(jpyFree>=expectedJpy){
+    const jpyFundingDetected=jpyFree>=expectedJpy;
+    const ltcPurchaseDetected=ltcFree>=requiredLtc;
+
+    if(jpyFundingDetected||ltcPurchaseDetected){
       const confirmedSpend=settings.pending_paypay_funding_jpy;
       settings=await saveXSettings(env,{
         observed_paypay_balance_jpy:Math.max(
@@ -360,36 +370,51 @@ async function handleHstoraFundingNeed(
       });
       await recordFundingEvent(env,{
         provider:"paypay_manual",
-        kind:"JPY_DEPOSIT_DETECTED",
+        kind:ltcPurchaseDetected?"DIRECT_LTC_PURCHASE_DETECTED":"JPY_DEPOSIT_DETECTED",
         amountJpy:confirmedSpend,
+        asset:ltcPurchaseDetected?"LTC":undefined,
+        assetAmount:ltcPurchaseDetected?ltcFree:undefined,
         status:"COMPLETED",
-        metadata:{binanceJpyFree:jpyFree}
+        metadata:{binanceJpyFree:jpyFree,binanceLtcFree:ltcFree}
       });
       await auditX(env,{
         kind:"PAYPAY_FUNDING_CONFIRMED",
-        message:"Binance JPY balance increase satisfied the pending manual funding request.",
-        details:{confirmedSpendJpy:confirmedSpend,binanceJpyFree:jpyFree}
+        message:ltcPurchaseDetected
+          ?"Binance LTC balance now covers the required amount after the pending manual PayPay step."
+          :"Binance JPY balance increase satisfied the pending manual PayPay funding request.",
+        details:{
+          completionMode:ltcPurchaseDetected?"direct_ltc_purchase":"jpy_deposit",
+          confirmedSpendJpy:confirmedSpend,
+          binanceJpyFree:jpyFree,
+          binanceLtcFree:ltcFree
+        }
       });
+      if(ltcPurchaseDetected){
+        return {
+          action:"MANUAL_PAYPAY_LTC_PURCHASE_DETECTED",
+          dryRun:settings.dry_run,
+          details:{requiredLtc,binanceLtcFree:ltcFree}
+        };
+      }
     }else{
       return {
-        action:"WAITING_MANUAL_PAYPAY_DEPOSIT",
+        action:"WAITING_MANUAL_PAYPAY_ACTION",
         dryRun:settings.dry_run,
         details:{
-          requiredDepositJpy:settings.pending_paypay_funding_jpy,
+          requestedMaxSpendJpy:settings.pending_paypay_funding_jpy,
           binanceJpyBaseline:settings.pending_paypay_binance_jpy_baseline,
           currentBinanceJpy:jpyFree,
-          requestedAt:settings.pending_paypay_requested_at
+          currentBinanceLtc:ltcFree,
+          requiredLtc,
+          requestedAt:settings.pending_paypay_requested_at,
+          acceptedManualPaths:[
+            "PayPay -> Binance JPY instant funding",
+            "PayPay -> direct LTC purchase in Binance official UI when LTC is offered"
+          ]
         }
       };
     }
   }
-
-  if(!await checkLtcPriceGuard(env,ltcJpy,settings.max_ltc_price_jump_percent)){
-    return {action:"LTC_PRICE_CIRCUIT_BREAKER",dryRun:settings.dry_run};
-  }
-
-  const requiredJpy=Math.ceil(neededUsd*settings.usd_jpy_rate);
-  const requiredLtc=requiredJpy/ltcJpy;
 
   if(ltcFree>=requiredLtc){
     const message="HStora Main WalletへのLTC入金が必要です。HStora公式APIには入金アドレス/入金見積りAPIがないため、自動送金は行いません。";
@@ -469,14 +494,22 @@ async function handleHstoraFundingNeed(
       metadata:{desired,jpyFree}
     });
     await notifyDiscord(env,{
-      title:"LTC購入資金が必要",
-      message:"Binance JapanへPayPayからJPYを手動入金してください。入金後はBinance JPY残高の増加を公式APIで検知し、同じ要求を重複発行せず処理を再開します。",
-      details:{requiredDepositJpy,purchaseCeilingJpy:desired}
+      title:"PayPay手動操作が必要",
+      message:"Binance Japanの公式UIで、PayPayからJPYへ即時入金するか、LTCがPayPay購入対象として表示される場合はLTCを直接購入してください。BOTはJPY増加または必要量までのLTC増加を検知して自動再開します。",
+      details:{requestedMaxSpendJpy:requiredDepositJpy,purchaseCeilingJpy:desired,requiredLtc}
     }).catch(()=>undefined);
     return {
-      action:"MANUAL_PAYPAY_TO_BINANCE_REQUIRED",
+      action:"MANUAL_PAYPAY_ACTION_REQUIRED",
       dryRun:settings.dry_run,
-      details:{requiredDepositJpy,allowance}
+      details:{
+        requestedMaxSpendJpy:requiredDepositJpy,
+        requiredLtc,
+        allowance,
+        acceptedManualPaths:[
+          "PayPay -> Binance JPY instant funding",
+          "PayPay -> direct LTC purchase in Binance official UI when LTC is offered"
+        ]
+      }
     };
   }
 
