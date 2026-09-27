@@ -6,6 +6,15 @@ export interface Env {
   DISCORD_APPLICATION_ID?: string;
   DISCORD_PUBLIC_KEY?: string;
   DISCORD_BOT_TOKEN?: string;
+
+  // X account procurement integrations. All of these are Worker Secrets.
+  BINANCE_API_KEY?: string;
+  BINANCE_API_SECRET?: string;
+  HSTORA_API_KEY?: string;
+  HSTORA_API_SECRET?: string;
+  HSTORA_WEBHOOK_SECRET?: string;
+  CREDENTIALS_ENCRYPTION_KEY?: string;
+  DISCORD_NOTIFY_WEBHOOK_URL?: string;
 }
 
 export type SupplierKind = "pool" | "http_json";
