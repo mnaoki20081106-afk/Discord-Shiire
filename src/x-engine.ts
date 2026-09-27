@@ -77,6 +77,22 @@ async function reconcilePending(env:Env){
           purchasePrice:Number(row.unit_price),
           orderResponse:order
         });
+        if(added!==Number(row.quantity)){
+          await updatePurchaseOrderRecord(env,String(row.id),{
+            status:"DELIVERY_INTEGRITY_FAILED",
+            supplierOrderId:String(order.id),
+            response:order,
+            errorCode:"DELIVERY_COUNT_MISMATCH"
+          });
+          await setCircuitBreaker(env,"delivery_integrity","OPEN","DELIVERY_COUNT_MISMATCH");
+          await notifyDiscord(env,{
+            title:"不良商品",
+            message:"再照合したHStora注文の納品件数が注文数と一致しません。",
+            level:"error",
+            details:{purchaseOrderId:row.id,ordered:Number(row.quantity),stored:added}
+          }).catch(()=>undefined);
+          continue;
+        }
         await updatePurchaseOrderRecord(env,String(row.id),{
           status:status||"DELIVERED",
           supplierOrderId:String(order.id),
@@ -761,6 +777,29 @@ export async function runXProcurement(env:Env):Promise<XRunResult>{
           orderResponse:order
         })
         :0;
+      if(order.delivery?.available&&added!==quantity){
+        await updatePurchaseOrderRecord(env,recordId,{
+          status:"DELIVERY_INTEGRITY_FAILED",
+          supplierOrderId:String(order.id),
+          response:order,
+          errorCode:"DELIVERY_COUNT_MISMATCH"
+        });
+        await setCircuitBreaker(env,"delivery_integrity","OPEN","DELIVERY_COUNT_MISMATCH");
+        await notifyDiscord(env,{
+          title:"不良商品",
+          message:"照合回収したHStora注文の納品件数が注文数と一致しません。",
+          level:"error",
+          details:{ordered:quantity,stored:added,supplierOrderId:order.id}
+        }).catch(()=>undefined);
+        return {
+          action:"DELIVERY_INTEGRITY_FAILED",
+          dryRun:false,
+          inventory,
+          requested:quantity,
+          productId:Number(fresh.id),
+          details:{ordered:quantity,stored:added}
+        };
+      }
       await updatePurchaseOrderRecord(env,recordId,{
         status,
         supplierOrderId:String(order.id),
