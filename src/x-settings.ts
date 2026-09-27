@@ -39,6 +39,10 @@ export type XSettings={
   usd_jpy_rate:number;
   usd_jpy_rate_updated_at:number;
   max_fx_age_ms:number;
+  max_paypay_observation_age_ms:number;
+
+  auto_ltc_withdraw_enabled:boolean;
+  max_single_withdraw_ltc:number;
 
   max_price_jump_percent:number;
   max_ltc_price_jump_percent:number;
@@ -90,6 +94,10 @@ export const DEFAULT_X_SETTINGS:XSettings={
   usd_jpy_rate:0,
   usd_jpy_rate_updated_at:0,
   max_fx_age_ms:6*60*60*1000,
+  max_paypay_observation_age_ms:60*60*1000,
+
+  auto_ltc_withdraw_enabled:false,
+  max_single_withdraw_ltc:0,
 
   max_price_jump_percent:25,
   max_ltc_price_jump_percent:15,
@@ -124,6 +132,8 @@ export async function saveXSettings(env:Env,patch:Partial<XSettings>):Promise<XS
   if(next.wallet_target_ltc<0||next.wallet_max_ltc<0||next.wallet_target_ltc>next.wallet_max_ltc){
     throw new Error("WALLET_BALANCE_LIMIT_INVALID");
   }
+  if(next.max_single_withdraw_ltc<0) throw new Error("MAX_SINGLE_WITHDRAW_INVALID");
+  if(next.max_paypay_observation_age_ms<60_000) throw new Error("PAYPAY_OBSERVATION_AGE_INVALID");
   next.approved_hstora_product_ids=[...new Set(
     (next.approved_hstora_product_ids??[])
       .map(Number)
