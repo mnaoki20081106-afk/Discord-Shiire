@@ -87,7 +87,7 @@ async function verifyInteraction(
   return crypto.subtle.verify(
     {name:"Ed25519"} as AlgorithmIdentifier,
     key,
-    sigBytes,
+    sigBytes.buffer as ArrayBuffer,
     new TextEncoder().encode(timestamp+text)
   );
 }
