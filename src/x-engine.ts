@@ -5,6 +5,7 @@ import {
   circuitState,
   createPurchaseOrderRecord,
   fundingSpendSince,
+  getSupplierProductRecord,
   pendingPurchaseOrders,
   readyInventoryCount,
   recordFundingEvent,
@@ -137,6 +138,28 @@ async function selectCandidate(env:Env,quantity:number){
     let full=product;
     try{full=await getHstoraProduct(env,Number(product.id));}catch{}
     const q=qualifyHstoraProduct(full,settings,quantity);
+    const previous=await getSupplierProductRecord(env,String(full.id));
+    const previousPrice=Number(previous?.unit_price??0);
+    const currentPrice=Number(full.price??0);
+    const sameCurrency=String(previous?.currency??"").toUpperCase()===String(full.currency??"").toUpperCase();
+    if(previous&&sameCurrency&&previousPrice>0&&currentPrice>0){
+      const jump=Math.abs(currentPrice-previousPrice)/previousPrice*100;
+      if(jump>settings.max_price_jump_percent){
+        await setCircuitBreaker(
+          env,
+          "product_price",
+          "OPEN",
+          "HSTORA_PRODUCT_PRICE_JUMP:"+jump.toFixed(2)+"%"
+        );
+        await auditX(env,{
+          level:"error",
+          kind:"PRODUCT_PRICE_JUMP",
+          message:"HStora product price changed beyond configured threshold",
+          details:{productId:full.id,previousPrice,currentPrice,jumpPercent:jump}
+        });
+        throw new Error("PRODUCT_PRICE_JUMP");
+      }
+    }
     await upsertSupplierProduct(env,{
       supplier:"hstora",
       supplierProductId:String(full.id),
@@ -359,7 +382,11 @@ export async function runXProcurement(env:Env):Promise<XRunResult>{
   let candidate;
   try{candidate=await selectCandidate(env,batch);}
   catch(error){
-    await setCircuitBreaker(env,"hstora","OPEN",error instanceof Error?error.message:String(error));
+    const message=error instanceof Error?error.message:String(error);
+    if(message==="PRODUCT_PRICE_JUMP"){
+      return {action:"PRODUCT_PRICE_CIRCUIT_BREAKER",dryRun:settings.dry_run,inventory};
+    }
+    await setCircuitBreaker(env,"hstora","OPEN",message);
     await notifyDiscord(env,{
       title:"Circuit Breaker: HStora",
       message:"HStora APIの候補取得に失敗したため自動仕入れを停止しました。",
@@ -390,6 +417,26 @@ export async function runXProcurement(env:Env):Promise<XRunResult>{
   const trialCap=prior===0?settings.trial_purchase_count:batch;
   const quantity=Math.min(batch,Math.max(1,trialCap),Number(fresh.stock_available??0));
   if(quantity<=0) return {action:"PRODUCT_OUT_OF_STOCK",dryRun:settings.dry_run,inventory,productId:Number(fresh.id)};
+
+  if(
+    !settings.dry_run&&
+    settings.require_bulk_confirmation&&
+    quantity>=settings.bulk_confirmation_threshold&&
+    settings.bulk_approval_until<Date.now()
+  ){
+    await notifyDiscord(env,{
+      title:"大量購入前確認",
+      message:"設定された閾値以上の仕入れになるため、管理画面で一時承認が必要です。",
+      details:{productId:fresh.id,quantity,threshold:settings.bulk_confirmation_threshold}
+    }).catch(()=>undefined);
+    return {
+      action:"BULK_CONFIRMATION_REQUIRED",
+      dryRun:false,
+      inventory,
+      requested:quantity,
+      productId:Number(fresh.id)
+    };
+  }
 
   const unitSource=Number(q.unit_price_source);
   const totalSource=unitSource*quantity;
