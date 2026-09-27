@@ -118,6 +118,7 @@ const SCHEMA=[
   event_type TEXT NOT NULL,
   received_at INTEGER NOT NULL
 )`,
+`CREATE UNIQUE INDEX IF NOT EXISTS idx_hstora_webhook_event ON hstora_webhook_deliveries(event_id)`,
 `CREATE TABLE IF NOT EXISTS circuit_breakers (
   key TEXT PRIMARY KEY,
   state TEXT NOT NULL,
@@ -422,6 +423,17 @@ export async function storeDeliveredAccounts(env:Env,input:{
     ).bind(randomId(),input.supplierProductId,"READY_FOR_DELIVERY",inserted,now).run();
   }
   return inserted;
+}
+
+export async function purchasedAccountCountForOrder(
+  env:Env,
+  purchaseOrderId:string
+):Promise<number>{
+  await ensureXSchema(env);
+  const row=await env.DB.prepare(
+    "SELECT COUNT(*) AS count FROM purchased_accounts WHERE purchase_order_id=?"
+  ).bind(purchaseOrderId).first<{count:number}>();
+  return Math.max(0,Number(row?.count??0));
 }
 
 export async function inventorySummary(env:Env){
