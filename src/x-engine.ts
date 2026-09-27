@@ -62,7 +62,7 @@ function jstPeriodStarts(now=Date.now()){
   return {dayStart,weekStart,monthStart};
 }
 
-async function reconcilePending(env:Env){
+export async function reconcilePendingXOrders(env:Env){
   const pending=await pendingPurchaseOrders(env);
   for(const row of pending as any[]){
     try{
@@ -570,7 +570,7 @@ export async function runXProcurement(env:Env):Promise<XRunResult>{
     return {action:"CIRCUIT_BREAKER_OPEN",dryRun:settings.dry_run};
   }
 
-  await reconcilePending(env);
+  await reconcilePendingXOrders(env);
 
   try{
     const observedHstora=await getHstoraBalance(env);
