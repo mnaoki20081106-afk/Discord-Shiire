@@ -79,7 +79,7 @@ async function verifyInteraction(
   if(!keyBytes||!sigBytes) return false;
   const key=await crypto.subtle.importKey(
     "raw",
-    keyBytes,
+    keyBytes.buffer as ArrayBuffer,
     {name:"Ed25519"} as AlgorithmIdentifier,
     false,
     ["verify"]
