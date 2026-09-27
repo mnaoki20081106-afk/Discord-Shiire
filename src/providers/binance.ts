@@ -254,8 +254,13 @@ export async function getBinanceBalance(env:Env,asset:string):Promise<BinanceBal
   return {asset:wanted,free,locked};
 }
 
-export async function getBinanceApiRestrictions(env:Env){
-  const value=await signedRequest<unknown>(env,"GET","/sapi/v1/account/apiRestrictions",{});
+export async function getBinanceApiRestrictions(
+  env:Env,
+  purpose:CredentialPurpose="trade"
+){
+  const value=await signedRequest<unknown>(
+    env,"GET","/sapi/v1/account/apiRestrictions",{},purpose
+  );
   if(
     !object(value)||
     typeof value.ipRestrict!=="boolean"||
@@ -329,8 +334,13 @@ export type BinanceNetworkInfo={
   withdrawTag?:boolean;
 };
 
-export async function getBinanceLtcCoinInfo(env:Env){
-  const all=await signedRequest<unknown>(env,"GET","/sapi/v1/capital/config/getall",{});
+export async function getBinanceLtcCoinInfo(
+  env:Env,
+  purpose:CredentialPurpose="trade"
+){
+  const all=await signedRequest<unknown>(
+    env,"GET","/sapi/v1/capital/config/getall",{},purpose
+  );
   if(!Array.isArray(all)) schemaError("coin configuration");
   const ltc=all.find(item=>object(item)&&item.coin==="LTC");
   if(!object(ltc)||!Array.isArray(ltc.networkList)) schemaError("LTC coin configuration");
@@ -358,7 +368,9 @@ export async function getBinanceLtcCoinInfo(env:Env){
 }
 
 export async function getBinanceWithdrawAddresses(env:Env){
-  const value=await signedRequest<unknown>(env,"GET","/sapi/v1/capital/withdraw/address/list",{});
+  const value=await signedRequest<unknown>(
+    env,"GET","/sapi/v1/capital/withdraw/address/list",{},"withdraw"
+  );
   if(!Array.isArray(value)) schemaError("withdraw address list");
   for(const row of value){
     if(
@@ -383,7 +395,7 @@ export async function getBinanceWithdrawAddresses(env:Env){
 
 export async function getBinanceWithdrawQuota(env:Env){
   const value=await signedRequest<unknown>(
-    env,"GET","/sapi/v1/capital/withdraw/quota",{}
+    env,"GET","/sapi/v1/capital/withdraw/quota",{},"withdraw"
   );
   if(
     !object(value)||
@@ -397,7 +409,7 @@ export async function getBinanceWithdrawQuota(env:Env){
 
 export async function getTravelRuleRequirement(env:Env){
   const value=await signedRequest<unknown>(
-    env,"GET","/sapi/v1/localentity/questionnaire-requirements",{}
+    env,"GET","/sapi/v1/localentity/questionnaire-requirements",{},"withdraw"
   );
   if(
     !object(value)||
@@ -420,7 +432,7 @@ export async function getBinanceWithdrawHistory(env:Env,input?:{
     withdrawOrderId:input?.withdrawOrderId,
     startTime:input?.startTime,
     endTime:input?.endTime
-  });
+  },"withdraw");
 }
 
 export async function requestLtcWithdrawal(env:Env,input:{
@@ -438,8 +450,8 @@ export async function requestLtcWithdrawal(env:Env,input:{
   }
 
   const [restrictions,coinInfo,addresses,travelRule]=await Promise.all([
-    getBinanceApiRestrictions(env),
-    getBinanceLtcCoinInfo(env),
+    getBinanceApiRestrictions(env,"withdraw"),
+    getBinanceLtcCoinInfo(env,"withdraw"),
     getBinanceWithdrawAddresses(env),
     getTravelRuleRequirement(env)
   ]);
@@ -514,7 +526,8 @@ export async function requestLtcWithdrawal(env:Env,input:{
         questionnaire,
         withdrawOrderId:input.withdrawOrderId,
         network
-      }
+      },
+      "withdraw"
     );
   }
 
@@ -524,7 +537,7 @@ export async function requestLtcWithdrawal(env:Env,input:{
     amount,
     network,
     withdrawOrderId:input.withdrawOrderId
-  });
+  },"withdraw");
 }
 
 export function newBinanceClientOrderId(){
