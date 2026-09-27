@@ -19,7 +19,7 @@ import {
   upsertSupplierProduct
 } from "./x-db";
 import { loadXSettings, saveXSettings } from "./x-settings";
-import { calculateFundingAllowance } from "./x-risk";
+import { calculateFundingAllowance, detectManualPayPayCompletion } from "./x-risk";
 import {
   getBinanceBalance,
   getBinanceOrder,
@@ -351,13 +351,17 @@ async function handleHstoraFundingNeed(
   const requiredLtc=requiredJpy/ltcJpy;
 
   if(settings.pending_paypay_funding_jpy>0){
-    const expectedJpy=
-      settings.pending_paypay_binance_jpy_baseline+
-      settings.pending_paypay_funding_jpy;
-    const jpyFundingDetected=jpyFree>=expectedJpy;
-    const ltcPurchaseDetected=ltcFree>=requiredLtc;
+    const completion=detectManualPayPayCompletion({
+      pendingJpy:settings.pending_paypay_funding_jpy,
+      binanceJpyBaseline:settings.pending_paypay_binance_jpy_baseline,
+      currentBinanceJpy:jpyFree,
+      currentBinanceLtc:ltcFree,
+      requiredLtc
+    });
+    const jpyFundingDetected=completion==="JPY_FUNDED";
+    const ltcPurchaseDetected=completion==="LTC_PURCHASED";
 
-    if(jpyFundingDetected||ltcPurchaseDetected){
+    if(completion!=="NONE"){
       const confirmedSpend=settings.pending_paypay_funding_jpy;
       settings=await saveXSettings(env,{
         observed_paypay_balance_jpy:Math.max(
