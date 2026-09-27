@@ -439,7 +439,7 @@ export async function purchasedAccountCountForOrder(
 export async function inventorySummary(env:Env){
   await ensureXSchema(env);
   const rows=await env.DB.prepare(
-    "SELECT status,COALESCE(SUM(quantity),0) AS quantity FROM inventory GROUP BY status"
+    "SELECT status,COUNT(*) AS quantity FROM purchased_accounts GROUP BY status"
   ).all();
   const out:Record<string,number>={};
   for(const row of rows.results as any[]) out[String(row.status)]=Number(row.quantity??0);
@@ -485,7 +485,7 @@ export async function listPurchaseOrders(env:Env,limit=100){
 export async function readyInventoryCount(env:Env):Promise<number>{
   await ensureXSchema(env);
   const row=await env.DB.prepare(
-    "SELECT COALESCE(SUM(quantity),0) AS quantity FROM inventory "+
+    "SELECT COUNT(*) AS quantity FROM purchased_accounts "+
     "WHERE status IN ('READY_FOR_DELIVERY','VENDING_RESERVED')"
   ).first<{quantity:number}>();
   return Math.max(0,Number(row?.quantity??0));
