@@ -47,7 +47,9 @@ export async function getFundingPlan(env:Env,now=Date.now()){
     weeklyRemainingJpy:Math.max(0,settings.weekly_purchase_limit_jpy-week),
     monthlyRemainingJpy:Math.max(0,settings.monthly_purchase_limit_jpy-month),
     minPurchaseJpy:settings.min_purchase_jpy,
-    paypayBalanceJpy:observedFresh?settings.observed_paypay_balance_jpy:0,
+    paypayBalanceJpy:observedFresh
+      ?Math.max(0,settings.observed_paypay_balance_jpy-settings.pending_paypay_funding_jpy)
+      :0,
     currentLtc:ltc.free+ltc.locked,
     targetLtcBalance:settings.target_ltc_balance,
     maxLtcBalance:settings.max_ltc_balance,
@@ -57,10 +59,20 @@ export async function getFundingPlan(env:Env,now=Date.now()){
   return {
     observedPayPay:{
       balanceJpy:settings.observed_paypay_balance_jpy,
+      reservedForPendingFundingJpy:settings.pending_paypay_funding_jpy,
+      effectiveBalanceJpy:Math.max(
+        0,
+        settings.observed_paypay_balance_jpy-settings.pending_paypay_funding_jpy
+      ),
       observedAt:settings.observed_paypay_balance_at,
       fresh:observedFresh,
       source:"manual_observation" as const
     },
+    pendingManualFunding:settings.pending_paypay_funding_jpy>0?{
+      amountJpy:settings.pending_paypay_funding_jpy,
+      binanceJpyBaseline:settings.pending_paypay_binance_jpy_baseline,
+      requestedAt:settings.pending_paypay_requested_at
+    }:null,
     binance:{
       jpyFree:jpy.free,
       ltcFree:ltc.free,
