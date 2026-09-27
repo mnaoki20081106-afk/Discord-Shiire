@@ -14,6 +14,8 @@ import {
 import { getMainCatalog, getMainStock } from "./main-bot";
 import { runAllProducts, runProduct } from "./engine";
 import { handleXAdminApi, xAdminPage } from "./x-admin";
+import { runXProcurement } from "./x-engine";
+import { loadXSettings } from "./x-settings";
 
 class HttpError extends Error{
   constructor(public status:number,message:string){super(message);}
@@ -399,6 +401,12 @@ export default {
   },
 
   async scheduled(_controller:ScheduledController,env:Env,ctx:ExecutionContext){
-    ctx.waitUntil(runAllProducts(env).then(()=>undefined));
+    ctx.waitUntil((async()=>{
+      await runAllProducts(env);
+      const settings=await loadXSettings(env);
+      if(settings.auto_procurement_enabled){
+        await runXProcurement(env);
+      }
+    })());
   }
 } satisfies ExportedHandler<Env>;
