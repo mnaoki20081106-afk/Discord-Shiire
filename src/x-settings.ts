@@ -42,6 +42,7 @@ export type XSettings={
   usd_jpy_rate:number;
   usd_jpy_rate_updated_at:number;
   max_fx_age_ms:number;
+  max_fx_jump_percent:number;
 
   auto_ltc_withdraw_enabled:boolean;
   max_single_withdraw_ltc:number;
@@ -99,6 +100,7 @@ export const DEFAULT_X_SETTINGS:XSettings={
   usd_jpy_rate:0,
   usd_jpy_rate_updated_at:0,
   max_fx_age_ms:6*60*60*1000,
+  max_fx_jump_percent:10,
 
   auto_ltc_withdraw_enabled:false,
   max_single_withdraw_ltc:0,
@@ -135,7 +137,7 @@ const INTEGER_KEYS=new Set<keyof XSettings>([
 const NUMBER_KEYS=new Set<keyof XSettings>([
   "target_ltc_balance","max_ltc_balance","wallet_target_ltc","wallet_max_ltc",
   "max_unit_price_jpy","min_seller_rating","max_dispute_rate","usd_jpy_rate",
-  "max_single_withdraw_ltc","max_price_jump_percent","max_ltc_price_jump_percent"
+  "max_fx_jump_percent","max_single_withdraw_ltc","max_price_jump_percent","max_ltc_price_jump_percent"
 ]);
 
 function sanitizeStoredSettings(value:unknown):Partial<XSettings>{
@@ -219,6 +221,7 @@ export async function saveXSettings(env:Env,patch:Partial<XSettings>):Promise<XS
   if(next.bulk_confirmation_threshold<1) throw new Error("BULK_CONFIRMATION_THRESHOLD_INVALID");
   if(next.max_paypay_balance_age_ms<60_000) throw new Error("PAYPAY_BALANCE_AGE_INVALID");
   if(next.max_fx_age_ms<60_000) throw new Error("FX_AGE_INVALID");
+  if(next.max_fx_jump_percent<=0) throw new Error("FX_JUMP_LIMIT_INVALID");
   if(next.max_ltc_balance<0||next.target_ltc_balance<0||next.target_ltc_balance>next.max_ltc_balance){
     throw new Error("LTC_BALANCE_LIMIT_INVALID");
   }
