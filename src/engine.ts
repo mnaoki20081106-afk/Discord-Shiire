@@ -127,7 +127,8 @@ async function processJob(
       env,
       product.processor_kind,
       product.processor_config_json,
-      raw
+      raw,
+      "shiire-process:"+job.id
     );
     if(processed.length===0){
       throw new ProcessorError("PROCESSOR_RETURNED_NO_ITEMS",true);
