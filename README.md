@@ -96,6 +96,10 @@ POST /api/vending/supply/deliver
 
 Dashboardセッションは使いません。Shiire専用HMAC署名でのみアクセスします。
 
+## Main Bot catalog
+
+`GET /api/main-catalog` で、Main Botに現在存在する有限在庫商品・自販機名・guild ID・販売可能在庫数を取得できます。Shiireの商品作成時は、ここで返る `product_id` を `mainProductId` に指定します。
+
 ## Supplier: pool
 
 外部の取得処理や人手で確保した在庫を安全に取り込む入口です。
@@ -161,6 +165,7 @@ Processorから:
 
 ```text
 GET  /api/state
+GET  /api/main-catalog
 GET  /api/suppliers
 POST /api/suppliers
 GET  /api/products
