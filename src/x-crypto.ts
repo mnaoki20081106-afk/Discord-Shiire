@@ -1,16 +1,25 @@
 import type { Env } from "./types";
 
-function decodeBase64(value:string):Uint8Array{
+function decodeBase64(value:string):ArrayBuffer{
   const normalized=value.replace(/-/g,"+").replace(/_/g,"/");
   const padded=normalized+"=".repeat((4-normalized.length%4)%4);
   const raw=atob(padded);
-  return Uint8Array.from(raw,ch=>ch.charCodeAt(0));
+  const bytes=new Uint8Array(raw.length);
+  for(let i=0;i<raw.length;i++) bytes[i]=raw.charCodeAt(i);
+  return bytes.buffer;
 }
 
-function encodeBase64(value:Uint8Array):string{
+function encodeBase64(value:ArrayBuffer):string{
+  const bytes=new Uint8Array(value);
   let binary="";
-  for(const byte of value) binary+=String.fromCharCode(byte);
+  for(const byte of bytes) binary+=String.fromCharCode(byte);
   return btoa(binary);
+}
+
+function bytesToArrayBuffer(bytes:Uint8Array):ArrayBuffer{
+  const copy=new Uint8Array(bytes.byteLength);
+  copy.set(bytes);
+  return copy.buffer;
 }
 
 async function encryptionKey(env:Env):Promise<CryptoKey>{
@@ -29,13 +38,14 @@ export type EncryptedSecret={
 
 export async function encryptSensitive(env:Env,plaintext:string):Promise<EncryptedSecret>{
   const key=await encryptionKey(env);
-  const iv=crypto.getRandomValues(new Uint8Array(12));
+  const iv=bytesToArrayBuffer(crypto.getRandomValues(new Uint8Array(12)));
+  const plaintextBuffer=bytesToArrayBuffer(new TextEncoder().encode(plaintext));
   const encrypted=await crypto.subtle.encrypt(
     {name:"AES-GCM",iv},
     key,
-    new TextEncoder().encode(plaintext)
+    plaintextBuffer
   );
-  return {version:1,iv:encodeBase64(iv),ciphertext:encodeBase64(new Uint8Array(encrypted))};
+  return {version:1,iv:encodeBase64(iv),ciphertext:encodeBase64(encrypted)};
 }
 
 export async function decryptSensitive(env:Env,value:EncryptedSecret):Promise<string>{
