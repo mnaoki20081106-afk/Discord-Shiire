@@ -1,0 +1,227 @@
+import type { Env } from "../types";
+import { hmacHex, randomId, sha256Hex } from "../crypto";
+
+const BASE_URL="https://hstora.com";
+
+export type HstoraCatalogItem={
+  id:number;
+  name:string;
+  slug:string;
+  short_description:string;
+  price:number;
+  currency:string;
+  delivery_type:string;
+  stock_available:number;
+  product_url:string;
+  updated_at:string;
+};
+
+export type HstoraProduct=HstoraCatalogItem&{
+  description:string;
+  price_tiers:Array<{min_quantity:number;unit_price:number}>;
+  rules:{
+    delivery_type:string;
+    instant_delivery:boolean;
+    delivery_data_exposed:boolean;
+  };
+};
+
+export type HstoraCatalogResponse={
+  items:HstoraCatalogItem[];
+  pagination:{page:number;limit:number;total:number;pages:number};
+};
+
+export type HstoraBalance={
+  balance:number;
+  pending_balance:number;
+  currency:string;
+};
+
+export type HstoraOrder={
+  id:number;
+  order_number:string;
+  external_order_id:string;
+  status:string;
+  quantity:number;
+  unit_price:number;
+  total_amount:number;
+  currency:string;
+  delivery_type:string;
+  delivery?:{available:boolean;items?:unknown[]};
+  links?:{web_url?:string;api_url?:string};
+};
+
+type ApiEnvelope<T>={
+  success:boolean;
+  data?:T;
+  error?:{code?:string;message?:string;status?:number};
+};
+
+export class HstoraApiError extends Error{
+  constructor(
+    public status:number,
+    public code:string,
+    public retryable:boolean,
+    message:string
+  ){super(message);}
+}
+
+function credentials(env:Env){
+  const key=env.HSTORA_API_KEY?.trim()??"";
+  const secret=env.HSTORA_API_SECRET?.trim()??"";
+  if(!key||!secret) throw new HstoraApiError(503,"HSTORA_NOT_CONFIGURED",false,"HStora API credentials are not configured");
+  return {key,secret};
+}
+
+function nonce():string{
+  const a=new Uint8Array(16);
+  crypto.getRandomValues(a);
+  return [...a].map(v=>v.toString(16).padStart(2,"0")).join("");
+}
+
+async function signedRequest<T>(
+  env:Env,
+  method:"GET"|"POST",
+  path:string,
+  query:string,
+  body:unknown|null,
+  idempotencyKey?:string
+):Promise<T>{
+  const {key,secret}=credentials(env);
+  if(!path.startsWith("/api/v1/")&&path!=="/api/v1"){
+    throw new HstoraApiError(500,"HSTORA_PATH_INVALID",false,"Refusing non-v1 HStora path");
+  }
+
+  const rawBody=body===null?"":JSON.stringify(body);
+  const timestamp=String(Math.floor(Date.now()/1000));
+  const requestNonce=nonce();
+  const bodyHash=rawBody?await sha256Hex(rawBody):"";
+  const canonical=[method,path,query,timestamp,requestNonce,bodyHash].join("\n");
+  const signature=await hmacHex(secret,canonical);
+
+  const headers=new Headers({
+    "X-API-Key":key,
+    "X-Timestamp":timestamp,
+    "X-Nonce":requestNonce,
+    "X-Signature":signature,
+    "Accept":"application/json"
+  });
+  if(rawBody) headers.set("Content-Type","application/json");
+  if(idempotencyKey) headers.set("Idempotency-Key",idempotencyKey);
+
+  const url=BASE_URL+path+(query?"?"+query:"");
+  const controller=new AbortController();
+  const timer=setTimeout(()=>controller.abort(),20_000);
+  let response:Response;
+  try{
+    response=await fetch(url,{
+      method,
+      headers,
+      body:rawBody||undefined,
+      signal:controller.signal
+    });
+  }catch(error){
+    throw new HstoraApiError(
+      0,
+      "HSTORA_NETWORK_ERROR",
+      true,
+      error instanceof Error?error.message:"HStora network error"
+    );
+  }finally{
+    clearTimeout(timer);
+  }
+
+  const text=await response.text();
+  let payload:ApiEnvelope<T>|null=null;
+  try{payload=text?JSON.parse(text) as ApiEnvelope<T>:null;}catch{}
+  if(!response.ok||!payload?.success){
+    const code=String(payload?.error?.code??("HSTORA_HTTP_"+response.status));
+    const message=String(payload?.error?.message??"HStora API request failed").slice(0,500);
+    const retryable=response.status===409||response.status===429||response.status>=500||response.status===0;
+    throw new HstoraApiError(response.status,code,retryable,message);
+  }
+  if(payload.data===undefined){
+    throw new HstoraApiError(response.status,"HSTORA_RESPONSE_INVALID",false,"HStora response did not contain data");
+  }
+  return payload.data;
+}
+
+function positiveId(id:number){
+  if(!Number.isInteger(id)||id<=0) throw new HstoraApiError(400,"HSTORA_PRODUCT_ID_INVALID",false,"Invalid HStora product id");
+}
+
+export async function hstoraMetadata(){
+  const response=await fetch(BASE_URL+"/api/v1/",{headers:{Accept:"application/json"}});
+  if(!response.ok) throw new HstoraApiError(response.status,"HSTORA_METADATA_FAILED",response.status>=500,"HStora metadata request failed");
+  return response.json();
+}
+
+export async function listHstoraCatalog(env:Env,page=1,limit=20):Promise<HstoraCatalogResponse>{
+  const safePage=Math.max(1,Math.floor(page));
+  // 20 is the documented production example. Do not assume an undocumented max.
+  const safeLimit=limit===20?20:20;
+  return signedRequest<HstoraCatalogResponse>(
+    env,"GET","/api/v1/catalog",`page=${safePage}&limit=${safeLimit}`,null
+  );
+}
+
+export async function getHstoraProduct(env:Env,id:number):Promise<HstoraProduct>{
+  positiveId(id);
+  return signedRequest<HstoraProduct>(env,"GET",`/api/v1/products/${id}`,"",null);
+}
+
+export async function getHstoraBalance(env:Env):Promise<HstoraBalance>{
+  return signedRequest<HstoraBalance>(env,"GET","/api/v1/balance","",null);
+}
+
+export async function createHstoraOrder(env:Env,input:{
+  productId:number;
+  quantity:number;
+  externalOrderId:string;
+  idempotencyKey:string;
+}):Promise<HstoraOrder>{
+  positiveId(input.productId);
+  if(!Number.isInteger(input.quantity)||input.quantity<=0){
+    throw new HstoraApiError(400,"HSTORA_QUANTITY_INVALID",false,"Invalid HStora quantity");
+  }
+  if(!input.externalOrderId.trim()||!input.idempotencyKey.trim()){
+    throw new HstoraApiError(400,"HSTORA_IDEMPOTENCY_REQUIRED",false,"Stable purchase identifiers are required");
+  }
+  return signedRequest<HstoraOrder>(
+    env,
+    "POST",
+    "/api/v1/orders",
+    "",
+    {
+      product_id:input.productId,
+      quantity:input.quantity,
+      external_order_id:input.externalOrderId
+    },
+    input.idempotencyKey
+  );
+}
+
+export async function getHstoraOrder(env:Env,id:number):Promise<HstoraOrder>{
+  if(!Number.isInteger(id)||id<=0) throw new HstoraApiError(400,"HSTORA_ORDER_ID_INVALID",false,"Invalid HStora order id");
+  return signedRequest<HstoraOrder>(env,"GET",`/api/v1/orders/${id}`,"",null);
+}
+
+export async function lookupHstoraOrder(env:Env,externalOrderId:string):Promise<HstoraOrder>{
+  const id=externalOrderId.trim();
+  if(!id) throw new HstoraApiError(400,"HSTORA_EXTERNAL_ORDER_ID_INVALID",false,"External order id is required");
+  return signedRequest<HstoraOrder>(
+    env,
+    "GET",
+    "/api/v1/orders/lookup",
+    "external_order_id="+encodeURIComponent(id),
+    null
+  );
+}
+
+export function newHstoraPurchaseIds(){
+  const id=randomId();
+  return {
+    externalOrderId:"xproc-"+id,
+    idempotencyKey:"xproc-idem-"+id
+  };
+}
