@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { calculateFundingAllowance, splitPurchaseBatches } from "../src/x-risk.ts";
+import { calculateFundingAllowance, splitPurchaseBatches, detectManualPayPayCompletion } from "../src/x-risk.ts";
 
 function base(){
   return {
@@ -71,4 +71,35 @@ test("max LTC balance stops further purchases",()=>{
 
 test("splits 42 units into 20, 20, 2",()=>{
   assert.deepEqual(splitPurchaseBatches(42,20),[20,20,2]);
+});
+
+
+test("detects direct LTC purchase after a pending PayPay action",()=>{
+  assert.equal(detectManualPayPayCompletion({
+    pendingJpy:7_000,
+    binanceJpyBaseline:1_000,
+    currentBinanceJpy:1_000,
+    currentBinanceLtc:0.5,
+    requiredLtc:0.4
+  }),"LTC_PURCHASED");
+});
+
+test("detects PayPay-funded Binance JPY increase",()=>{
+  assert.equal(detectManualPayPayCompletion({
+    pendingJpy:7_000,
+    binanceJpyBaseline:1_000,
+    currentBinanceJpy:8_000,
+    currentBinanceLtc:0.1,
+    requiredLtc:0.4
+  }),"JPY_FUNDED");
+});
+
+test("does not resume before either manual completion condition is met",()=>{
+  assert.equal(detectManualPayPayCompletion({
+    pendingJpy:7_000,
+    binanceJpyBaseline:1_000,
+    currentBinanceJpy:7_999,
+    currentBinanceLtc:0.399,
+    requiredLtc:0.4
+  }),"NONE");
 });
