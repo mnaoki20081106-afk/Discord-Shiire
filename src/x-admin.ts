@@ -72,12 +72,56 @@ export async function handleXAdminApi(
     if(request.method==="GET"){
       return json({settings:publicSettings(await loadXSettings(env))});
     }
-    if(request.method==="PATCH"||request.method==="POST"){
+    if(request.method==="PATCH"||request.method==="POST"||request.method==="PUT"){
       const raw=await requestJson(request);
       if(!raw) return json({error:"INVALID_JSON"},400);
-      const settings=await saveXSettings(env,safePatch(raw));
+      const current=await loadXSettings(env);
+      const source=raw.settings&&typeof raw.settings==="object"
+        ?raw.settings as Record<string,unknown>
+        :raw;
+      const patch=safePatch(source);
+      if(current.dry_run===true&&patch.dry_run===false&&raw.confirmLive!==true){
+        return json({error:"LIVE_MODE_CONFIRMATION_REQUIRED"},409);
+      }
+      if(current.emergency_stop===true&&patch.emergency_stop===false){
+        return json({error:"USE_EMERGENCY_STOP_RESET_ENDPOINT"},409);
+      }
+      const settings=await saveXSettings(env,patch);
       return json({ok:true,settings:publicSettings(settings)});
     }
+  }
+
+  if(url.pathname==="/api/x/funding/paypay-observation"&&request.method==="POST"){
+    const raw=await requestJson(request);
+    const balance=Number(raw?.balanceJpy);
+    if(!Number.isFinite(balance)||balance<0){
+      return json({error:"INVALID_PAYPAY_BALANCE"},400);
+    }
+    const settings=await saveXSettings(env,{
+      observed_paypay_balance_jpy:Math.floor(balance),
+      observed_paypay_balance_at:Date.now()
+    });
+    return json({
+      ok:true,
+      observedPayPayBalanceJpy:settings.observed_paypay_balance_jpy,
+      observedAt:settings.observed_paypay_balance_at
+    });
+  }
+
+  if(url.pathname==="/api/x/run"&&request.method==="POST"){
+    return json(await runXProcurement(env));
+  }
+
+  if(url.pathname==="/api/x/products"&&request.method==="GET"){
+    return json({products:await listSupplierProducts(env,false)});
+  }
+
+  const breakerReset=url.pathname.match(/^\/api\/x\/circuit-breakers\/([^/]+)\/reset$/);
+  if(breakerReset&&request.method==="POST"){
+    const key=decodeURIComponent(breakerReset[1]!);
+    if(!/^[a-z0-9_-]{1,64}$/i.test(key)) return json({error:"INVALID_BREAKER_KEY"},400);
+    await setCircuitBreaker(env,key,"CLOSED","ADMIN_RESET");
+    return json({ok:true,key,state:"CLOSED"});
   }
 
   if(url.pathname==="/api/x/funding/paypay-observation"&&request.method==="POST"){
