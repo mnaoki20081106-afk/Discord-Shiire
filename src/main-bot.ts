@@ -109,3 +109,40 @@ export async function getMainCatalog(env:Env){
     }>;
   }>(response);
 }
+
+
+export async function getMainPaymentStatus(env:Env){
+  const response=await signedFetch(env,"/api/shiire/payment/status");
+  return responseJson<{paypay:boolean;kyash:boolean}>(response);
+}
+
+export async function receiveMainPayment(
+  env:Env,
+  input:{
+    method:"paypay"|"kyash";
+    link:string;
+    amount:number;
+    idempotencyKey:string;
+  }
+){
+  const body=JSON.stringify(input);
+  const response=await signedFetch(env,"/api/shiire/payment/receive",{
+    method:"POST",
+    body
+  });
+  const text=await response.text();
+  let payload:any={};
+  try{payload=text?JSON.parse(text):{};}catch{}
+  if(!response.ok&&response.status!==409){
+    throw new Error(
+      "MAIN_PAYMENT_"+response.status+":"+
+      String(payload.message??payload.error??text).slice(0,300)
+    );
+  }
+  return {
+    ok:Boolean(payload.ok),
+    status:String(payload.status??(response.ok?"completed":"rejected")),
+    amount:Number(payload.amount??payload.linkAmount??0),
+    reason:String(payload.reason??payload.error??"")
+  };
+}
