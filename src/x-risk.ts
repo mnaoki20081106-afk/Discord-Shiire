@@ -80,3 +80,29 @@ export function splitPurchaseBatches(quantity:number,maxBatch:number):number[]{
   }
   return out;
 }
+
+
+export type ManualPayPayCompletion="NONE"|"JPY_FUNDED"|"LTC_PURCHASED";
+
+export function detectManualPayPayCompletion(input:{
+  pendingJpy:number;
+  binanceJpyBaseline:number;
+  currentBinanceJpy:number;
+  currentBinanceLtc:number;
+  requiredLtc:number;
+}):ManualPayPayCompletion{
+  const pending=Math.max(0,input.pendingJpy);
+  if(pending<=0) return "NONE";
+
+  const requiredLtc=Math.max(0,input.requiredLtc);
+  if(requiredLtc>0&&input.currentBinanceLtc>=requiredLtc){
+    return "LTC_PURCHASED";
+  }
+
+  const expectedJpy=Math.max(0,input.binanceJpyBaseline)+pending;
+  if(input.currentBinanceJpy>=expectedJpy){
+    return "JPY_FUNDED";
+  }
+
+  return "NONE";
+}
