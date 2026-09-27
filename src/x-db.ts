@@ -174,7 +174,7 @@ export async function auditX(env:Env,input:{
   await env.DB.prepare(
     "INSERT INTO audit_logs(id,level,kind,message,details_json,created_at) VALUES(?,?,?,?,?,?)"
   ).bind(
-    randomId("audit"),
+    randomId(),
     input.level??"info",
     input.kind,
     input.message.slice(0,1000),
@@ -204,7 +204,7 @@ export async function recordFundingEvent(env:Env,input:{
 }){
   await ensureXSchema(env);
   const now=Date.now();
-  const id=randomId("fund");
+  const id=randomId();
   await env.DB.prepare(
     `INSERT INTO funding_events(
       id,provider,kind,amount_jpy,asset,asset_amount,status,provider_reference,metadata_json,created_at,updated_at
@@ -288,7 +288,7 @@ export async function createPurchaseOrderRecord(env:Env,input:{
 }){
   await ensureXSchema(env);
   const now=Date.now();
-  const id=randomId("po");
+  const id=randomId();
   await env.DB.prepare(`INSERT INTO purchase_orders(
     id,supplier,supplier_product_id,quantity,unit_price,total_amount,currency,status,
     external_order_id,idempotency_key,dry_run,created_at,updated_at
@@ -344,7 +344,7 @@ export async function storeDeliveredAccounts(env:Env,input:{
     const raw=typeof item==="string"?item:JSON.stringify(item);
     const fingerprint=await sha256Hex(raw);
     const encrypted=await encryptSensitive(env,raw);
-    const id=randomId("acct");
+    const id=randomId();
     const result=await env.DB.prepare(`INSERT OR IGNORE INTO purchased_accounts(
       id,supplier,supplier_product_id,purchase_order_id,purchase_price,purchased_at,
       credentials_ciphertext,email_ciphertext,two_factor_ciphertext,credential_fingerprint,status,created_at
@@ -359,7 +359,7 @@ export async function storeDeliveredAccounts(env:Env,input:{
       VALUES(?,?,?,?,?)
       ON CONFLICT(supplier_product_id,status) DO UPDATE SET
         quantity=quantity+excluded.quantity,updated_at=excluded.updated_at`
-    ).bind(randomId("inv"),input.supplierProductId,"READY_FOR_DELIVERY",inserted,now).run();
+    ).bind(randomId(),input.supplierProductId,"READY_FOR_DELIVERY",inserted,now).run();
   }
   return inserted;
 }
