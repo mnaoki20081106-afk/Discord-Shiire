@@ -417,7 +417,7 @@ async function load(){
     const s=data.settings||{};
     main.innerHTML=metrics(data)+
       '<section class="card"><strong>PayPay残高（手動観測）</strong>'+
-      '<p class="hint">PayPay→Binance Japanの入金操作は公式Web/アプリ側で行い、ここには現在残高だけを記録します。古い観測値では自動購入枠は0円になります。</p>'+
+      '<p class="hint">PayPay操作はBinance Japanの公式Web/アプリ側で手動実行します。BOTはPayPay残高を直接取得せず、ここで観測した残高からreserve_jpy等の上限を計算します。古い観測値では自動購入枠は0円です。</p>'+
       '<div class="formrow"><input id="paypayBalance" inputmode="numeric" type="number" min="0" step="1" value="'+esc(s.observed_paypay_balance_jpy??0)+'"><button id="savePayPay">観測値を保存</button></div>'+
       '</section>'+
       '<section class="card"><strong>USD/JPY（手動観測）</strong>'+
@@ -425,7 +425,7 @@ async function load(){
       '<div class="formrow"><input id="usdJpy" inputmode="decimal" type="number" min="0" step="0.001" value="'+esc(s.usd_jpy_rate??0)+'"><button id="saveFx">換算値を保存</button></div>'+
       '</section>'+
       (s.pending_paypay_funding_jpy>0
-        ?'<section class="card"><strong>手動入金待ち</strong><p class="hint">要求額: '+esc(s.pending_paypay_funding_jpy)+'円 / Binance基準残高: '+esc(s.pending_paypay_binance_jpy_baseline)+'円</p><button id="cancelPending" class="danger">この入金要求を取消</button></section>'
+        ?'<section class="card"><strong>PayPay手動操作待ち</strong><p class="hint">最大使用額: '+esc(s.pending_paypay_funding_jpy)+'円。Binance Japan公式UIでPayPay→JPY即時入金、またはLTCがPayPay購入対象として表示される場合はLTC直接購入を行ってください。BOTはJPY増加または必要量までのLTC増加を検知して再開します。</p><button id="cancelPending" class="danger">この要求を取消</button></section>'
         :'')+
       card("Funding detail",data.funding);
     const cancel=document.querySelector("#cancelPending"); if(cancel) cancel.onclick=()=>cancelPendingFunding().catch(e=>alert(e.message));
