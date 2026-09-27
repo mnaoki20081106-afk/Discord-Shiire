@@ -16,6 +16,7 @@ import { runAllProducts, runProduct } from "./engine";
 import { handleXAdminApi, xAdminPage } from "./x-admin";
 import { runXProcurement } from "./x-engine";
 import { loadXSettings } from "./x-settings";
+import { handleHstoraWebhook } from "./x-webhooks";
 
 class HttpError extends Error{
   constructor(public status:number,message:string){super(message);}
@@ -381,6 +382,9 @@ export default {
           mainBotConfigured:Boolean(env.MAIN_BOT_BASE_URL),
           bridgeConfigured:Boolean(env.SHIIRE_BRIDGE_SECRET?.trim()&&env.SHIIRE_BRIDGE_SECRET.trim().length>=32)
         });
+      }
+      if(url.pathname==="/webhooks/hstora"){
+        return handleHstoraWebhook(request,env);
       }
       if(url.pathname==="/interactions"&&request.method==="POST"){
         return handleInteraction(request,env,ctx);
