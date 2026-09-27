@@ -123,6 +123,7 @@ const SCHEMA=[
 `CREATE INDEX IF NOT EXISTS idx_purchase_orders_created ON purchase_orders(created_at)`,
 `CREATE INDEX IF NOT EXISTS idx_accounts_status ON purchased_accounts(status)`,
 `CREATE INDEX IF NOT EXISTS idx_funding_events_created ON funding_events(created_at)`,
+`CREATE UNIQUE INDEX IF NOT EXISTS idx_funding_provider_ref ON funding_events(provider,provider_reference) WHERE provider_reference IS NOT NULL`,
 `CREATE INDEX IF NOT EXISTS idx_audit_logs_created ON audit_logs(created_at)`
 ];
 
@@ -221,9 +222,57 @@ export async function fundingSpendSince(env:Env,since:number):Promise<number>{
   await ensureXSchema(env);
   const row=await env.DB.prepare(
     "SELECT COALESCE(SUM(amount_jpy),0) AS total FROM funding_events "+
-    "WHERE kind='LTC_PURCHASE' AND status IN ('SUBMITTED','FILLED','COMPLETED') AND created_at>=?"
+    "WHERE kind='LTC_PURCHASE' "+
+    "AND status NOT IN ('FAILED','REJECTED','CANCELED','CANCELLED','EXPIRED','VOID') "+
+    "AND created_at>=?"
   ).bind(since).first<{total:number}>();
   return Math.max(0,Number(row?.total??0));
+}
+
+
+export async function fundingEventByProviderReference(
+  env:Env,
+  provider:string,
+  providerReference:string
+){
+  await ensureXSchema(env);
+  return env.DB.prepare(
+    "SELECT * FROM funding_events WHERE provider=? AND provider_reference=?"
+  ).bind(provider,providerReference).first<any>();
+}
+
+export async function pendingBinancePurchaseIntents(env:Env){
+  await ensureXSchema(env);
+  const result=await env.DB.prepare(
+    "SELECT * FROM funding_events WHERE provider='binance_japan' AND kind='LTC_PURCHASE' "+
+    "AND status IN ('INTENT','SUBMITTED','NEW','PARTIALLY_FILLED') "+
+    "ORDER BY created_at ASC LIMIT 20"
+  ).all<any>();
+  return result.results;
+}
+
+export async function updateFundingEventByProviderReference(
+  env:Env,
+  provider:string,
+  providerReference:string,
+  input:{
+    status:string;
+    assetAmount?:number;
+    metadata?:unknown;
+  }
+){
+  await ensureXSchema(env);
+  await env.DB.prepare(
+    "UPDATE funding_events SET status=?,asset_amount=COALESCE(?,asset_amount),"+
+    "metadata_json=?,updated_at=? WHERE provider=? AND provider_reference=?"
+  ).bind(
+    input.status,
+    input.assetAmount??null,
+    JSON.stringify(redact(input.metadata??{})),
+    Date.now(),
+    provider,
+    providerReference
+  ).run();
 }
 
 export async function upsertSupplierProduct(env:Env,input:{
