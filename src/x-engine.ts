@@ -8,6 +8,7 @@ import {
   getSupplierProductRecord,
   getXSetting,
   pendingPurchaseOrders,
+  purchasedAccountCountForOrder,
   readyInventoryCount,
   recordFundingEvent,
   updateFundingEventByProviderReference,
@@ -77,7 +78,8 @@ export async function reconcilePendingXOrders(env:Env){
           purchasePrice:Number(row.unit_price),
           orderResponse:order
         });
-        if(added!==Number(row.quantity)){
+        const storedTotal=await purchasedAccountCountForOrder(env,String(row.id));
+        if(storedTotal!==Number(row.quantity)){
           await updatePurchaseOrderRecord(env,String(row.id),{
             status:"DELIVERY_INTEGRITY_FAILED",
             supplierOrderId:String(order.id),
@@ -89,7 +91,7 @@ export async function reconcilePendingXOrders(env:Env){
             title:"不良商品",
             message:"再照合したHStora注文の納品件数が注文数と一致しません。",
             level:"error",
-            details:{purchaseOrderId:row.id,ordered:Number(row.quantity),stored:added}
+            details:{purchaseOrderId:row.id,ordered:Number(row.quantity),insertedNow:added,storedTotal}
           }).catch(()=>undefined);
           continue;
         }
@@ -101,7 +103,7 @@ export async function reconcilePendingXOrders(env:Env){
         await auditX(env,{
           kind:"HSTORA_ORDER_RECONCILED",
           message:"HStora order delivery reconciled",
-          details:{purchaseOrderId:row.id,supplierOrderId:order.id,added,status}
+          details:{purchaseOrderId:row.id,supplierOrderId:order.id,insertedNow:added,storedTotal,status}
         });
       }else if(status){
         await updatePurchaseOrderRecord(env,String(row.id),{
@@ -782,7 +784,10 @@ export async function runXProcurement(env:Env):Promise<XRunResult>{
         orderResponse:order
       })
       :0;
-    if(order.delivery?.available&&added!==quantity){
+    const storedTotal=order.delivery?.available
+      ?await purchasedAccountCountForOrder(env,recordId)
+      :0;
+    if(order.delivery?.available&&storedTotal!==quantity){
       await updatePurchaseOrderRecord(env,recordId,{
         status:"DELIVERY_INTEGRITY_FAILED",
         supplierOrderId:String(order.id),
@@ -794,7 +799,7 @@ export async function runXProcurement(env:Env):Promise<XRunResult>{
         title:"不良商品",
         message:"HStora納品件数が注文数と一致しないため自動仕入れを停止しました。",
         level:"error",
-        details:{productId:fresh.id,ordered:quantity,stored:added,supplierOrderId:order.id}
+        details:{productId:fresh.id,ordered:quantity,insertedNow:added,storedTotal,supplierOrderId:order.id}
       }).catch(()=>undefined);
       return {
         action:"DELIVERY_INTEGRITY_FAILED",
@@ -802,7 +807,7 @@ export async function runXProcurement(env:Env):Promise<XRunResult>{
         inventory,
         requested:quantity,
         productId:Number(fresh.id),
-        details:{ordered:quantity,stored:added}
+        details:{ordered:quantity,insertedNow:added,storedTotal}
       };
     }
     await updatePurchaseOrderRecord(env,recordId,{
@@ -815,7 +820,7 @@ export async function runXProcurement(env:Env):Promise<XRunResult>{
       message:order.delivery?.available
         ?"購入データを暗号化し、READY_FOR_DELIVERYへ保存しました。"
         :"注文は作成済みです。次回実行時に公式Order Lookupで照合します。",
-      details:{productId:fresh.id,quantity,stored:added,status}
+      details:{productId:fresh.id,quantity,insertedNow:added,storedTotal,status}
     }).catch(()=>undefined);
     return {
       action:order.delivery?.available?"HSTORA_PURCHASE_DELIVERED":"HSTORA_PURCHASE_PROCESSING",
@@ -824,7 +829,7 @@ export async function runXProcurement(env:Env):Promise<XRunResult>{
       requested:quantity,
       productId:Number(fresh.id),
       unitPriceJpy:q.unit_price_jpy,
-      details:{stored:added,status,supplierOrderId:order.id}
+      details:{insertedNow:added,storedTotal,status,supplierOrderId:order.id}
     };
   }catch(error){
     let recovered=false;
@@ -842,7 +847,10 @@ export async function runXProcurement(env:Env):Promise<XRunResult>{
           orderResponse:order
         })
         :0;
-      if(order.delivery?.available&&added!==quantity){
+      const recoveredStoredTotal=order.delivery?.available
+        ?await purchasedAccountCountForOrder(env,recordId)
+        :0;
+      if(order.delivery?.available&&recoveredStoredTotal!==quantity){
         await updatePurchaseOrderRecord(env,recordId,{
           status:"DELIVERY_INTEGRITY_FAILED",
           supplierOrderId:String(order.id),
@@ -854,7 +862,7 @@ export async function runXProcurement(env:Env):Promise<XRunResult>{
           title:"不良商品",
           message:"照合回収したHStora注文の納品件数が注文数と一致しません。",
           level:"error",
-          details:{ordered:quantity,stored:added,supplierOrderId:order.id}
+          details:{ordered:quantity,insertedNow:added,storedTotal:recoveredStoredTotal,supplierOrderId:order.id}
         }).catch(()=>undefined);
         return {
           action:"DELIVERY_INTEGRITY_FAILED",
@@ -862,7 +870,7 @@ export async function runXProcurement(env:Env):Promise<XRunResult>{
           inventory,
           requested:quantity,
           productId:Number(fresh.id),
-          details:{ordered:quantity,stored:added}
+          details:{ordered:quantity,insertedNow:added,storedTotal:recoveredStoredTotal}
         };
       }
       await updatePurchaseOrderRecord(env,recordId,{
@@ -876,7 +884,7 @@ export async function runXProcurement(env:Env):Promise<XRunResult>{
         inventory,
         requested:quantity,
         productId:Number(fresh.id),
-        details:{status,stored:added}
+        details:{status,insertedNow:added,storedTotal:recoveredStoredTotal}
       };
     }catch{}
     if(!recovered){
