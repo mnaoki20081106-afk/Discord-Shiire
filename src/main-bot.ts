@@ -95,3 +95,17 @@ export async function deliverToMain(
     duplicateRequest?:boolean;
   }>(response);
 }
+
+export async function getMainCatalog(env:Env){
+  const response=await signedFetch(env,"/api/vending/supply/catalog");
+  return responseJson<{
+    products:Array<{
+      product_id:string;
+      product_name:string;
+      vending_machine_id:string;
+      vending_machine_name:string;
+      guild_id:string;
+      available:number;
+    }>;
+  }>(response);
+}
