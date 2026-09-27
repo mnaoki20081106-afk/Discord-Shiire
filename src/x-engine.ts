@@ -250,43 +250,52 @@ async function checkLtcPriceGuard(env:Env,current:number,maxJumpPercent:number){
 type BalanceGuard={hstoraUsd:number;allowedDecreaseUsd:number;updatedAt:number};
 async function checkHstoraBalanceGuard(env:Env,current:number){
   const previous=await getXSetting<BalanceGuard>(env,"x_hstora_balance_guard");
+  let remainingAllowed=0;
   if(previous&&Number.isFinite(previous.hstoraUsd)){
-    if(current>previous.hstoraUsd+0.01){
+    const allowed=Math.max(0,Number(previous.allowedDecreaseUsd??0));
+    const delta=current-previous.hstoraUsd;
+    if(delta>0.01){
       await auditX(env,{
         kind:"HSTORA_BALANCE_INCREASE",
         message:"HStora wallet balance increased.",
-        details:{previous:previous.hstoraUsd,current,increaseUsd:current-previous.hstoraUsd}
+        details:{previous:previous.hstoraUsd,current,increaseUsd:delta}
       });
       await notifyDiscord(env,{
         title:"HStora入金完了",
         message:"HStora Main Wallet残高の増加を公式Balance APIで確認しました。",
-        details:{increaseUsd:current-previous.hstoraUsd,currentBalanceUsd:current}
+        details:{increaseUsd:delta,currentBalanceUsd:current}
       }).catch(()=>undefined);
-    }
-    const floor=previous.hstoraUsd-Math.max(0,previous.allowedDecreaseUsd)-0.01;
-    if(current<floor){
-      await setCircuitBreaker(
-        env,
-        "unexpected_balance",
-        "OPEN",
-        "HSTORA_BALANCE_DECREASE"
-      );
-      await auditX(env,{
-        level:"error",
-        kind:"UNEXPECTED_HSTORA_BALANCE_DECREASE",
-        message:"HStora balance decreased beyond the amount expected from bot purchases.",
-        details:{
-          previous:previous.hstoraUsd,
-          current,
-          allowedDecreaseUsd:previous.allowedDecreaseUsd
-        }
-      });
-      return false;
+      remainingAllowed=allowed;
+    }else if(delta<0){
+      const decrease=-delta;
+      if(decrease>allowed+0.01){
+        await setCircuitBreaker(
+          env,
+          "unexpected_balance",
+          "OPEN",
+          "HSTORA_BALANCE_DECREASE"
+        );
+        await auditX(env,{
+          level:"error",
+          kind:"UNEXPECTED_HSTORA_BALANCE_DECREASE",
+          message:"HStora balance decreased beyond the amount expected from bot purchases.",
+          details:{
+            previous:previous.hstoraUsd,
+            current,
+            decreaseUsd:decrease,
+            allowedDecreaseUsd:allowed
+          }
+        });
+        return false;
+      }
+      remainingAllowed=Math.max(0,allowed-decrease);
+    }else{
+      remainingAllowed=allowed;
     }
   }
   await setXSetting(env,"x_hstora_balance_guard",{
     hstoraUsd:current,
-    allowedDecreaseUsd:0,
+    allowedDecreaseUsd:remainingAllowed,
     updatedAt:Date.now()
   });
   return true;
@@ -562,6 +571,21 @@ export async function runXProcurement(env:Env):Promise<XRunResult>{
   }
 
   await reconcilePending(env);
+
+  try{
+    const observedHstora=await getHstoraBalance(env);
+    if(
+      String(observedHstora.currency).toUpperCase()==="USD"&&
+      !await checkHstoraBalanceGuard(env,Number(observedHstora.balance))
+    ){
+      return {action:"UNEXPECTED_BALANCE_CIRCUIT_BREAKER",dryRun:settings.dry_run};
+    }
+  }catch(error){
+    const message=error instanceof Error?error.message:String(error);
+    await setCircuitBreaker(env,"hstora","OPEN",message);
+    return {action:"HSTORA_BALANCE_ERROR",dryRun:settings.dry_run};
+  }
+
   const inventory=await readyInventoryCount(env);
   if(inventory>settings.reorder_point){
     return {action:"INVENTORY_OK",dryRun:settings.dry_run,inventory};
