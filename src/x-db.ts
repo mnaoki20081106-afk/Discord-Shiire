@@ -452,3 +452,12 @@ export async function getSupplierProductRecord(env:Env,supplierProductId:string)
     "SELECT * FROM supplier_products WHERE supplier='hstora' AND supplier_product_id=?"
   ).bind(supplierProductId).first<any>();
 }
+
+
+export async function listOpenCircuitBreakers(env:Env){
+  await ensureXSchema(env);
+  const result=await env.DB.prepare(
+    "SELECT key,state,reason,failure_count,tripped_at,updated_at FROM circuit_breakers WHERE state='OPEN' ORDER BY updated_at DESC"
+  ).all();
+  return result.results;
+}
