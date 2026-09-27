@@ -28,7 +28,8 @@ import {
   createHstoraOrder,
   lookupHstoraOrder,
   getHstoraProduct,
-  type HstoraProduct
+  type HstoraProduct,
+  type HstoraCatalogItem
 } from "./providers/hstora";
 import { qualifyHstoraProduct } from "./x-qualification";
 import { notifyDiscord } from "./x-alerts";
@@ -100,9 +101,9 @@ async function reconcilePending(env:Env){
   }
 }
 
-async function catalogProducts(env:Env,approvedIds:number[]):Promise<HstoraProduct[]>{
+async function catalogProducts(env:Env,approvedIds:number[]):Promise<HstoraCatalogItem[]>{
   if(approvedIds.length){
-    const out:HstoraProduct[]=[];
+    const out:HstoraCatalogItem[]=[];
     for(const id of approvedIds.slice(0,100)){
       try{out.push(await getHstoraProduct(env,id));}
       catch(error){
@@ -135,8 +136,18 @@ async function selectCandidate(env:Env,quantity:number){
   const candidates:Array<{product:HstoraProduct;q:ReturnType<typeof qualifyHstoraProduct>}>=[];
 
   for(const product of products){
-    let full=product;
-    try{full=await getHstoraProduct(env,Number(product.id));}catch{}
+    let full:HstoraProduct;
+    try{
+      full=await getHstoraProduct(env,Number(product.id));
+    }catch(error){
+      await auditX(env,{
+        level:"warn",
+        kind:"HSTORA_PRODUCT_DETAIL_FAILED",
+        message:error instanceof Error?error.message:String(error),
+        details:{productId:product.id}
+      });
+      continue;
+    }
     const q=qualifyHstoraProduct(full,settings,quantity);
     const previous=await getSupplierProductRecord(env,String(full.id));
     const previousPrice=Number(previous?.unit_price??0);
