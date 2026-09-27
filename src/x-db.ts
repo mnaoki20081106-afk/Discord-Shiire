@@ -112,7 +112,13 @@ const SCHEMA=[
   details_json TEXT NOT NULL DEFAULT '{}',
   created_at INTEGER NOT NULL
 )`,
-`CREATE TABLE IF NOT EXISTS hstora_webhook_deliveries (\n  delivery_id TEXT PRIMARY KEY,\n  event_id TEXT NOT NULL,\n  event_type TEXT NOT NULL,\n  received_at INTEGER NOT NULL\n)`,\n`CREATE TABLE IF NOT EXISTS circuit_breakers (
+\`CREATE TABLE IF NOT EXISTS hstora_webhook_deliveries (
+  delivery_id TEXT PRIMARY KEY,
+  event_id TEXT NOT NULL,
+  event_type TEXT NOT NULL,
+  received_at INTEGER NOT NULL
+)\`,
+\`CREATE TABLE IF NOT EXISTS circuit_breakers (
   key TEXT PRIMARY KEY,
   state TEXT NOT NULL,
   reason TEXT,
