@@ -160,6 +160,15 @@ export async function handleXAdminApi(
     return json({ok:true,settings:publicSettings(settings)});
   }
 
+  if(url.pathname==="/api/x/bulk-approval"&&request.method==="POST"){
+    const raw=await requestJson(request);
+    const minutes=Math.max(1,Math.min(60,Math.floor(Number(raw?.minutes??10))));
+    const settings=await saveXSettings(env,{
+      bulk_approval_until:Date.now()+minutes*60_000
+    });
+    return json({ok:true,approvedUntil:settings.bulk_approval_until});
+  }
+
   if(url.pathname==="/api/x/emergency-stop"&&request.method==="POST"){
     const settings=await saveXSettings(env,{
       emergency_stop:true,
