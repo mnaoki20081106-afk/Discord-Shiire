@@ -17,21 +17,19 @@ import {
 import { loadXSettings } from "./x-settings";
 import { calculateFundingAllowance } from "./x-risk";
 import {
-  BinanceError,
-  binanceBalance,
-  binanceLtcJpyPrice,
-  binanceMarketBuyLtcWithJpy
-} from "./x-binance";
+  getBinanceBalance,
+  getLtcJpyMarketStatus,
+  placeLtcJpyMarketBuy
+} from "./providers/binance";
 import {
-  HStoraError,
-  hstoraBalance,
-  hstoraCatalog,
-  hstoraCreateOrder,
-  hstoraLookupOrder,
-  hstoraProduct,
-  type HStoraProduct
-} from "./x-hstora";
-import { qualifyHStoraProduct } from "./x-qualification";
+  getHstoraBalance,
+  listHstoraCatalog,
+  createHstoraOrder,
+  lookupHstoraOrder,
+  getHstoraProduct,
+  type HstoraProduct
+} from "./providers/hstora";
+import { qualifyHstoraProduct } from "./x-qualification";
 import { notifyDiscord } from "./x-alerts";
 
 export type XRunResult={
@@ -62,7 +60,7 @@ async function reconcilePending(env:Env){
   const pending=await pendingPurchaseOrders(env);
   for(const row of pending as any[]){
     try{
-      const order=await hstoraLookupOrder(env,String(row.external_order_id));
+      const order=await lookupHstoraOrder(env,String(row.external_order_id));
       const status=String(order.status??"").toUpperCase();
       const hasDelivery=Boolean(order.delivery?.available&&Array.isArray(order.delivery?.items));
       if(hasDelivery){
@@ -101,11 +99,11 @@ async function reconcilePending(env:Env){
   }
 }
 
-async function catalogProducts(env:Env,approvedIds:number[]):Promise<HStoraProduct[]>{
+async function catalogProducts(env:Env,approvedIds:number[]):Promise<HstoraProduct[]>{
   if(approvedIds.length){
-    const out:HStoraProduct[]=[];
+    const out:HstoraProduct[]=[];
     for(const id of approvedIds.slice(0,100)){
-      try{out.push(await hstoraProduct(env,id));}
+      try{out.push(await getHstoraProduct(env,id));}
       catch(error){
         await auditX(env,{
           level:"warn",
@@ -118,11 +116,11 @@ async function catalogProducts(env:Env,approvedIds:number[]):Promise<HStoraProdu
     return out;
   }
 
-  const out:HStoraProduct[]=[];
+  const out:HstoraProduct[]=[];
   let page=1;
   let pages=1;
   do{
-    const response=await hstoraCatalog(env,{page,limit:100});
+    const response=await listHstoraCatalog(env,page,20);
     out.push(...(response.items??[]));
     pages=Math.min(20,Math.max(1,Number(response.pagination?.pages??1)));
     page++;
@@ -133,12 +131,12 @@ async function catalogProducts(env:Env,approvedIds:number[]):Promise<HStoraProdu
 async function selectCandidate(env:Env,quantity:number){
   const settings=await loadXSettings(env);
   const products=await catalogProducts(env,settings.approved_hstora_product_ids);
-  const candidates:Array<{product:HStoraProduct;q:ReturnType<typeof qualifyHStoraProduct>}>=[];
+  const candidates:Array<{product:HstoraProduct;q:ReturnType<typeof qualifyHstoraProduct>}>=[];
 
   for(const product of products){
     let full=product;
-    try{full=await hstoraProduct(env,Number(product.id));}catch{}
-    const q=qualifyHStoraProduct(full,settings,quantity);
+    try{full=await getHstoraProduct(env,Number(product.id));}catch{}
+    const q=qualifyHstoraProduct(full,settings,quantity);
     await upsertSupplierProduct(env,{
       supplier:"hstora",
       supplierProductId:String(full.id),
@@ -188,9 +186,9 @@ async function handleHstoraFundingNeed(
   let jpyFree:number;
   try{
     [ltcJpy,ltcFree,jpyFree]=await Promise.all([
-      binanceLtcJpyPrice(),
-      binanceBalance(env,"LTC").then(v=>v.free),
-      binanceBalance(env,"JPY").then(v=>v.free)
+      getLtcJpyMarketStatus().then(v=>v.priceJpy),
+      getBinanceBalance(env,"LTC").then(v=>v.free),
+      getBinanceBalance(env,"JPY").then(v=>v.free)
     ]);
   }catch(error){
     await setCircuitBreaker(env,"binance","OPEN",error instanceof Error?error.message:String(error));
@@ -306,7 +304,7 @@ async function handleHstoraFundingNeed(
 
   const clientOrderId=("shiirex_"+randomId()).slice(0,36);
   try{
-    const order=await binanceMarketBuyLtcWithJpy(env,Math.floor(desired),clientOrderId);
+    const order=await placeLtcJpyMarketBuy(env,{quoteJpy:Math.floor(desired),clientOrderId,live:true});
     await recordFundingEvent(env,{
       provider:"binance_japan",
       kind:"LTC_PURCHASE",
@@ -381,8 +379,8 @@ export async function runXProcurement(env:Env):Promise<XRunResult>{
     };
   }
 
-  const fresh=await hstoraProduct(env,Number(candidate.product.id));
-  const q=qualifyHStoraProduct(fresh,settings,batch);
+  const fresh=await getHstoraProduct(env,Number(candidate.product.id));
+  const q=qualifyHstoraProduct(fresh,settings,batch);
   if(!q.qualified){
     await setCircuitBreaker(env,"product_price","OPEN","PRODUCT_REQUALIFICATION_FAILED");
     return {action:"PRODUCT_REQUALIFICATION_FAILED",dryRun:settings.dry_run,inventory,productId:Number(fresh.id),details:q};
@@ -396,7 +394,7 @@ export async function runXProcurement(env:Env):Promise<XRunResult>{
   const unitSource=Number(q.unit_price_source);
   const totalSource=unitSource*quantity;
   let supplierBalance;
-  try{supplierBalance=await hstoraBalance(env);}
+  try{supplierBalance=await getHstoraBalance(env);}
   catch(error){
     await setCircuitBreaker(env,"hstora","OPEN",error instanceof Error?error.message:String(error));
     return {action:"HSTORA_BALANCE_ERROR",dryRun:settings.dry_run,inventory};
@@ -456,7 +454,7 @@ export async function runXProcurement(env:Env):Promise<XRunResult>{
   }).catch(()=>undefined);
 
   try{
-    const order=await hstoraCreateOrder(env,{
+    const order=await createHstoraOrder(env,{
       productId:Number(fresh.id),
       quantity,
       externalOrderId,
@@ -496,7 +494,7 @@ export async function runXProcurement(env:Env):Promise<XRunResult>{
   }catch(error){
     let recovered=false;
     try{
-      const order=await hstoraLookupOrder(env,externalOrderId);
+      const order=await lookupHstoraOrder(env,externalOrderId);
       recovered=true;
       const status=String(order.status??"PROCESSING").toUpperCase();
       const added=order.delivery?.available
@@ -523,7 +521,7 @@ export async function runXProcurement(env:Env):Promise<XRunResult>{
       };
     }catch{}
     if(!recovered){
-      const code=error instanceof HStoraError?error.code:"HSTORA_PURCHASE_FAILED";
+      const code=error instanceof Error?error.code:"HSTORA_PURCHASE_FAILED";
       await updatePurchaseOrderRecord(env,recordId,{status:"FAILED",errorCode:code});
       await setCircuitBreaker(env,"hstora","OPEN",code);
       await notifyDiscord(env,{
