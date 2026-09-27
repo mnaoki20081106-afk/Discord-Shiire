@@ -181,9 +181,11 @@ function validateCatalogItem(value:unknown):HstoraCatalogItem{
     typeof value.slug!=="string"||
     typeof value.short_description!=="string"||
     !Number.isFinite(Number(value.price))||
+    Number(value.price)<0||
     typeof value.currency!=="string"||
     typeof value.delivery_type!=="string"||
-    !Number.isFinite(Number(value.stock_available))||
+    !Number.isSafeInteger(Number(value.stock_available))||
+    Number(value.stock_available)<0||
     typeof value.product_url!=="string"||
     typeof value.updated_at!=="string"
   ) schemaError("catalog item");
@@ -201,8 +203,10 @@ function validateProduct(value:unknown):HstoraProduct{
   for(const tier of value.price_tiers){
     if(
       !record(tier)||
-      !Number.isFinite(Number(tier.min_quantity))||
-      !Number.isFinite(Number(tier.unit_price))
+      !Number.isSafeInteger(Number(tier.min_quantity))||
+      Number(tier.min_quantity)<1||
+      !Number.isFinite(Number(tier.unit_price))||
+      Number(tier.unit_price)<0
     ) schemaError("product price tier");
   }
   if(
@@ -217,7 +221,9 @@ function validateBalance(value:unknown):HstoraBalance{
   if(
     !record(value)||
     !Number.isFinite(Number(value.balance))||
+    Number(value.balance)<0||
     !Number.isFinite(Number(value.pending_balance))||
+    Number(value.pending_balance)<0||
     typeof value.currency!=="string"
   ) schemaError("balance");
   return value as unknown as HstoraBalance;
@@ -230,9 +236,12 @@ function validateOrder(value:unknown):HstoraOrder{
     typeof value.order_number!=="string"||
     typeof value.external_order_id!=="string"||
     typeof value.status!=="string"||
-    !Number.isFinite(Number(value.quantity))||
+    !Number.isSafeInteger(Number(value.quantity))||
+    Number(value.quantity)<1||
     !Number.isFinite(Number(value.unit_price))||
+    Number(value.unit_price)<0||
     !Number.isFinite(Number(value.total_amount))||
+    Number(value.total_amount)<0||
     typeof value.currency!=="string"||
     typeof value.delivery_type!=="string"
   ) schemaError("order");
