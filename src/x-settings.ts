@@ -35,6 +35,7 @@ export type XSettings={
 
   observed_paypay_balance_jpy:number;
   observed_paypay_balance_at:number;
+  max_paypay_balance_age_ms:number;
   usd_jpy_rate:number;
   usd_jpy_rate_updated_at:number;
   max_fx_age_ms:number;
@@ -42,6 +43,10 @@ export type XSettings={
   max_price_jump_percent:number;
   max_ltc_price_jump_percent:number;
   max_consecutive_failures:number;
+
+  require_bulk_confirmation:boolean;
+  bulk_confirmation_threshold:number;
+  bulk_approval_until:number;
 
   hstora_ltc_deposit_address:string;
   hstora_ltc_network:string;
@@ -81,6 +86,7 @@ export const DEFAULT_X_SETTINGS:XSettings={
 
   observed_paypay_balance_jpy:0,
   observed_paypay_balance_at:0,
+  max_paypay_balance_age_ms:24*60*60*1000,
   usd_jpy_rate:0,
   usd_jpy_rate_updated_at:0,
   max_fx_age_ms:6*60*60*1000,
@@ -88,6 +94,10 @@ export const DEFAULT_X_SETTINGS:XSettings={
   max_price_jump_percent:25,
   max_ltc_price_jump_percent:15,
   max_consecutive_failures:3,
+
+  require_bulk_confirmation:true,
+  bulk_confirmation_threshold:20,
+  bulk_approval_until:0,
 
   hstora_ltc_deposit_address:"",
   hstora_ltc_network:"LTC"
@@ -105,6 +115,9 @@ export async function saveXSettings(env:Env,patch:Partial<XSettings>):Promise<XS
   if(next.max_batch_purchase<1) throw new Error("MAX_BATCH_PURCHASE_INVALID");
   if(next.reserve_jpy<0||next.max_purchase_jpy<0) throw new Error("FUNDING_LIMIT_INVALID");
   if(next.max_unit_price_jpy<=0) throw new Error("MAX_UNIT_PRICE_INVALID");
+  if(next.bulk_confirmation_threshold<1) throw new Error("BULK_CONFIRMATION_THRESHOLD_INVALID");
+  if(next.max_paypay_balance_age_ms<60_000) throw new Error("PAYPAY_BALANCE_AGE_INVALID");
+  if(next.max_fx_age_ms<60_000) throw new Error("FX_AGE_INVALID");
   if(next.max_ltc_balance<0||next.target_ltc_balance<0||next.target_ltc_balance>next.max_ltc_balance){
     throw new Error("LTC_BALANCE_LIMIT_INVALID");
   }
