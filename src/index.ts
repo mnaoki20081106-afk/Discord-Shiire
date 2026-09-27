@@ -99,7 +99,42 @@ function interactionResponse(content:string){
   });
 }
 
-async function handleInteraction(request:Request,env:Env):Promise<Response>{
+function deferredInteraction(){
+  return json({type:5,data:{flags:64}});
+}
+
+async function editInteractionOriginal(
+  interaction:any,
+  content:string
+){
+  const applicationId=String(interaction.application_id??"");
+  const token=String(interaction.token??"");
+  if(!applicationId||!token) return;
+  const response=await fetch(
+    "https://discord.com/api/v10/webhooks/"+
+      encodeURIComponent(applicationId)+"/"+
+      encodeURIComponent(token)+
+      "/messages/@original",
+    {
+      method:"PATCH",
+      headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({content:content.slice(0,2000)})
+    }
+  );
+  if(!response.ok){
+    console.error(
+      "Discord interaction edit failed",
+      response.status,
+      (await response.text()).slice(0,300)
+    );
+  }
+}
+
+async function handleInteraction(
+  request:Request,
+  env:Env,
+  ctx:ExecutionContext
+):Promise<Response>{
   const raw=await request.text();
   if(!(await verifyInteraction(request,env,raw))){
     return new Response("invalid signature",{status:401});
@@ -113,38 +148,56 @@ async function handleInteraction(request:Request,env:Env):Promise<Response>{
 
   const name=String(interaction.data?.name??"");
   if(name==="shiire-status"){
-    const products=await listProducts(env);
-    if(products.length===0) return interactionResponse("仕入れ商品がまだ登録されていません。");
-    const lines:string[]=[];
-    for(const product of products.slice(0,15)){
-      let stockText="取得失敗";
+    ctx.waitUntil((async()=>{
       try{
-        const stock=await getMainStock(env,product.main_product_id);
-        stockText=String(stock.available);
-      }catch{}
-      const job=await latestJob(env,product.id);
-      lines.push(
-        `**${product.name}** 在庫 ${stockText} / 下限 ${product.min_stock} / 目標 ${product.target_stock}`+
-        (job?`\n└ 最終ジョブ: ${job.status}`:"")
-      );
-    }
-    return interactionResponse(lines.join("\n"));
+        const products=await listProducts(env);
+        if(products.length===0){
+          await editInteractionOriginal(interaction,"仕入れ商品がまだ登録されていません。");
+          return;
+        }
+        const lines:string[]=[];
+        for(const product of products.slice(0,15)){
+          let stockText="取得失敗";
+          try{
+            const stock=await getMainStock(env,product.main_product_id);
+            stockText=String(stock.available);
+          }catch{}
+          const job=await latestJob(env,product.id);
+          lines.push(
+            `**${product.name}** 在庫 ${stockText} / 下限 ${product.min_stock} / 目標 ${product.target_stock}`+
+            (job?`\n└ 最終ジョブ: ${job.status}`:"")
+          );
+        }
+        await editInteractionOriginal(interaction,lines.join("\n"));
+      }catch(error){
+        await editInteractionOriginal(
+          interaction,
+          "状態確認に失敗しました: "+(error instanceof Error?error.message:String(error))
+        );
+      }
+    })());
+    return deferredInteraction();
   }
 
   if(name==="shiire-run"){
     const productId=option(interaction,"product_id");
     if(!productId) return interactionResponse("product_id を指定してください。");
-    try{
-      const result=await runProduct(env,productId);
-      return interactionResponse(
-        `仕入れ処理: **${result.action}**\n商品ID: ${productId}`+
-        (result.delivered!==undefined?`\n納品: ${result.delivered}件`:"")
-      );
-    }catch(error){
-      return interactionResponse(
-        "仕入れ処理に失敗しました: "+(error instanceof Error?error.message:String(error))
-      );
-    }
+    ctx.waitUntil((async()=>{
+      try{
+        const result=await runProduct(env,productId);
+        await editInteractionOriginal(
+          interaction,
+          `仕入れ処理: **${result.action}**\n商品ID: ${productId}`+
+          (result.delivered!==undefined?`\n納品: ${result.delivered}件`:"")
+        );
+      }catch(error){
+        await editInteractionOriginal(
+          interaction,
+          "仕入れ処理に失敗しました: "+(error instanceof Error?error.message:String(error))
+        );
+      }
+    })());
+    return deferredInteraction();
   }
 
   return interactionResponse("未登録のコマンドです。");
@@ -311,7 +364,7 @@ async function handleApi(request:Request,env:Env,url:URL):Promise<Response>{
 }
 
 export default {
-  async fetch(request:Request,env:Env):Promise<Response>{
+  async fetch(request:Request,env:Env,ctx:ExecutionContext):Promise<Response>{
     try{
       await ensureSchema(env);
       const url=new URL(request.url);
@@ -324,7 +377,7 @@ export default {
         });
       }
       if(url.pathname==="/interactions"&&request.method==="POST"){
-        return handleInteraction(request,env);
+        return handleInteraction(request,env,ctx);
       }
       if(url.pathname.startsWith("/api/")){
         return handleApi(request,env,url);
