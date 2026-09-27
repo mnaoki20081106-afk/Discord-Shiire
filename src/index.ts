@@ -13,6 +13,7 @@ import {
 } from "./db";
 import { getMainCatalog, getMainStock } from "./main-bot";
 import { runAllProducts, runProduct } from "./engine";
+import { handleXAdminApi, xAdminPage } from "./x-admin";
 
 class HttpError extends Error{
   constructor(public status:number,message:string){super(message);}
@@ -245,6 +246,9 @@ async function registerCommands(env:Env){
 async function handleApi(request:Request,env:Env,url:URL):Promise<Response>{
   requireAdmin(request,env);
 
+  const xAdminResponse=await handleXAdminApi(request,env,url);
+  if(xAdminResponse) return xAdminResponse;
+
   if(url.pathname==="/api/state"&&request.method==="GET"){
     return json(await dashboardSnapshot(env));
   }
@@ -378,6 +382,9 @@ export default {
       }
       if(url.pathname==="/interactions"&&request.method==="POST"){
         return handleInteraction(request,env,ctx);
+      }
+      if(url.pathname==="/x-admin"&&request.method==="GET"){
+        return xAdminPage();
       }
       if(url.pathname.startsWith("/api/")){
         return handleApi(request,env,url);
