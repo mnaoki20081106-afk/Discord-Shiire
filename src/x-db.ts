@@ -112,7 +112,7 @@ const SCHEMA=[
   details_json TEXT NOT NULL DEFAULT '{}',
   created_at INTEGER NOT NULL
 )`,
-`CREATE TABLE IF NOT EXISTS circuit_breakers (
+`CREATE TABLE IF NOT EXISTS hstora_webhook_deliveries (\n  delivery_id TEXT PRIMARY KEY,\n  event_id TEXT NOT NULL,\n  event_type TEXT NOT NULL,\n  received_at INTEGER NOT NULL\n)`,\n`CREATE TABLE IF NOT EXISTS circuit_breakers (
   key TEXT PRIMARY KEY,
   state TEXT NOT NULL,
   reason TEXT,
@@ -514,4 +514,18 @@ export async function listOpenCircuitBreakers(env:Env){
     "SELECT key,state,reason,failure_count,tripped_at,updated_at FROM circuit_breakers WHERE state='OPEN' ORDER BY updated_at DESC"
   ).all();
   return result.results;
+}
+
+
+export async function claimHstoraWebhookDelivery(
+  env:Env,
+  deliveryId:string,
+  eventId:string,
+  eventType:string
+):Promise<boolean>{
+  await ensureXSchema(env);
+  const result=await env.DB.prepare(
+    "INSERT OR IGNORE INTO hstora_webhook_deliveries(delivery_id,event_id,event_type,received_at) VALUES(?,?,?,?)"
+  ).bind(deliveryId,eventId,eventType,Date.now()).run();
+  return Number(result.meta?.changes??0)>0;
 }
