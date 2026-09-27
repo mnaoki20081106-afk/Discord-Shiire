@@ -235,6 +235,18 @@ type BalanceGuard={hstoraUsd:number;allowedDecreaseUsd:number;updatedAt:number};
 async function checkHstoraBalanceGuard(env:Env,current:number){
   const previous=await getXSetting<BalanceGuard>(env,"x_hstora_balance_guard");
   if(previous&&Number.isFinite(previous.hstoraUsd)){
+    if(current>previous.hstoraUsd+0.01){
+      await auditX(env,{
+        kind:"HSTORA_BALANCE_INCREASE",
+        message:"HStora wallet balance increased.",
+        details:{previous:previous.hstoraUsd,current,increaseUsd:current-previous.hstoraUsd}
+      });
+      await notifyDiscord(env,{
+        title:"HStora入金完了",
+        message:"HStora Main Wallet残高の増加を公式Balance APIで確認しました。",
+        details:{increaseUsd:current-previous.hstoraUsd,currentBalanceUsd:current}
+      }).catch(()=>undefined);
+    }
     const floor=previous.hstoraUsd-Math.max(0,previous.allowedDecreaseUsd)-0.01;
     if(current<floor){
       await setCircuitBreaker(
@@ -526,7 +538,8 @@ export async function runXProcurement(env:Env):Promise<XRunResult>{
     circuitState(env,"binance_purchase"),
     circuitState(env,"product_price"),
     circuitState(env,"ltc_price"),
-    circuitState(env,"unexpected_balance")
+    circuitState(env,"unexpected_balance"),
+    circuitState(env,"delivery_integrity")
   ]);
   if(breakers.some(value=>String(value?.state??"")==="OPEN")){
     return {action:"CIRCUIT_BREAKER_OPEN",dryRun:settings.dry_run};
@@ -688,6 +701,29 @@ export async function runXProcurement(env:Env):Promise<XRunResult>{
         orderResponse:order
       })
       :0;
+    if(order.delivery?.available&&added!==quantity){
+      await updatePurchaseOrderRecord(env,recordId,{
+        status:"DELIVERY_INTEGRITY_FAILED",
+        supplierOrderId:String(order.id),
+        response:order,
+        errorCode:"DELIVERY_COUNT_MISMATCH"
+      });
+      await setCircuitBreaker(env,"delivery_integrity","OPEN","DELIVERY_COUNT_MISMATCH");
+      await notifyDiscord(env,{
+        title:"不良商品",
+        message:"HStora納品件数が注文数と一致しないため自動仕入れを停止しました。",
+        level:"error",
+        details:{productId:fresh.id,ordered:quantity,stored:added,supplierOrderId:order.id}
+      }).catch(()=>undefined);
+      return {
+        action:"DELIVERY_INTEGRITY_FAILED",
+        dryRun:false,
+        inventory,
+        requested:quantity,
+        productId:Number(fresh.id),
+        details:{ordered:quantity,stored:added}
+      };
+    }
     await updatePurchaseOrderRecord(env,recordId,{
       status:order.delivery?.available?(status||"DELIVERED"):(status||"PROCESSING"),
       supplierOrderId:String(order.id),
