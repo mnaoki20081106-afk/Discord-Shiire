@@ -9,7 +9,7 @@ const env={CREDENTIALS_ENCRYPTION_KEY:key};
 
 test("credential payload round-trips through AES-GCM",async()=>{
   const plaintext="user@example.test:password:2fa-secret";
-  const encrypted=await encryptSensitive(env);
+  const encrypted=await encryptSensitive(env,plaintext);
   const decrypted=await decryptSensitive(env,encrypted);
   assert.equal(decrypted,plaintext);
   assert.notEqual(encrypted.ciphertext,plaintext);
