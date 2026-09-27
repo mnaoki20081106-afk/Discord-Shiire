@@ -150,6 +150,93 @@ function positiveId(id:number){
   if(!Number.isInteger(id)||id<=0) throw new HstoraApiError(400,"HSTORA_PRODUCT_ID_INVALID",false,"Invalid HStora product id");
 }
 
+function record(value:unknown):value is Record<string,unknown>{
+  return Boolean(value)&&typeof value==="object"&&!Array.isArray(value);
+}
+
+function schemaError(context:string):never{
+  throw new HstoraApiError(
+    502,
+    "HSTORA_SCHEMA_CHANGED",
+    false,
+    "Unexpected HStora "+context+" response structure"
+  );
+}
+
+function validateCatalogItem(value:unknown):HstoraCatalogItem{
+  if(!record(value)) schemaError("catalog item");
+  if(
+    !Number.isInteger(Number(value.id))||
+    typeof value.name!=="string"||
+    typeof value.slug!=="string"||
+    typeof value.short_description!=="string"||
+    !Number.isFinite(Number(value.price))||
+    typeof value.currency!=="string"||
+    typeof value.delivery_type!=="string"||
+    !Number.isFinite(Number(value.stock_available))||
+    typeof value.product_url!=="string"||
+    typeof value.updated_at!=="string"
+  ) schemaError("catalog item");
+  return value as unknown as HstoraCatalogItem;
+}
+
+function validateProduct(value:unknown):HstoraProduct{
+  const base=validateCatalogItem(value);
+  if(
+    !record(value)||
+    typeof value.description!=="string"||
+    !Array.isArray(value.price_tiers)||
+    !record(value.rules)
+  ) schemaError("product");
+  for(const tier of value.price_tiers){
+    if(
+      !record(tier)||
+      !Number.isFinite(Number(tier.min_quantity))||
+      !Number.isFinite(Number(tier.unit_price))
+    ) schemaError("product price tier");
+  }
+  if(
+    typeof value.rules.delivery_type!=="string"||
+    typeof value.rules.instant_delivery!=="boolean"||
+    typeof value.rules.delivery_data_exposed!=="boolean"
+  ) schemaError("product rules");
+  return {...base,...value} as unknown as HstoraProduct;
+}
+
+function validateBalance(value:unknown):HstoraBalance{
+  if(
+    !record(value)||
+    !Number.isFinite(Number(value.balance))||
+    !Number.isFinite(Number(value.pending_balance))||
+    typeof value.currency!=="string"
+  ) schemaError("balance");
+  return value as unknown as HstoraBalance;
+}
+
+function validateOrder(value:unknown):HstoraOrder{
+  if(
+    !record(value)||
+    !Number.isInteger(Number(value.id))||
+    typeof value.order_number!=="string"||
+    typeof value.external_order_id!=="string"||
+    typeof value.status!=="string"||
+    !Number.isFinite(Number(value.quantity))||
+    !Number.isFinite(Number(value.unit_price))||
+    !Number.isFinite(Number(value.total_amount))||
+    typeof value.currency!=="string"||
+    typeof value.delivery_type!=="string"
+  ) schemaError("order");
+  if(value.delivery!==undefined){
+    if(!record(value.delivery)||typeof value.delivery.available!=="boolean"){
+      schemaError("order delivery");
+    }
+    if(value.delivery.items!==undefined&&!Array.isArray(value.delivery.items)){
+      schemaError("order delivery items");
+    }
+  }
+  return value as unknown as HstoraOrder;
+}
+
 export async function hstoraMetadata(){
   const response=await fetch(BASE_URL+"/api/v1/",{headers:{Accept:"application/json"}});
   if(!response.ok) throw new HstoraApiError(response.status,"HSTORA_METADATA_FAILED",response.status>=500,"HStora metadata request failed");
@@ -160,18 +247,36 @@ export async function listHstoraCatalog(env:Env,page=1,limit=20):Promise<HstoraC
   const safePage=Math.max(1,Math.floor(page));
   // 20 is the documented production example. Do not assume an undocumented max.
   const safeLimit=limit===20?20:20;
-  return signedRequest<HstoraCatalogResponse>(
+  const response=await signedRequest<unknown>(
     env,"GET","/api/v1/catalog",`page=${safePage}&limit=${safeLimit}`,null
   );
+  if(!record(response)||!Array.isArray(response.items)||!record(response.pagination)){
+    schemaError("catalog");
+  }
+  const pagination=response.pagination;
+  if(
+    !Number.isFinite(Number(pagination.page))||
+    !Number.isFinite(Number(pagination.limit))||
+    !Number.isFinite(Number(pagination.total))||
+    !Number.isFinite(Number(pagination.pages))
+  ) schemaError("catalog pagination");
+  return {
+    items:response.items.map(validateCatalogItem),
+    pagination:pagination as unknown as HstoraCatalogResponse["pagination"]
+  };
 }
 
 export async function getHstoraProduct(env:Env,id:number):Promise<HstoraProduct>{
   positiveId(id);
-  return signedRequest<HstoraProduct>(env,"GET",`/api/v1/products/${id}`,"",null);
+  return validateProduct(
+    await signedRequest<unknown>(env,"GET",`/api/v1/products/${id}`,"",null)
+  );
 }
 
 export async function getHstoraBalance(env:Env):Promise<HstoraBalance>{
-  return signedRequest<HstoraBalance>(env,"GET","/api/v1/balance","",null);
+  return validateBalance(
+    await signedRequest<unknown>(env,"GET","/api/v1/balance","",null)
+  );
 }
 
 export async function createHstoraOrder(env:Env,input:{
@@ -187,7 +292,7 @@ export async function createHstoraOrder(env:Env,input:{
   if(!input.externalOrderId.trim()||!input.idempotencyKey.trim()){
     throw new HstoraApiError(400,"HSTORA_IDEMPOTENCY_REQUIRED",false,"Stable purchase identifiers are required");
   }
-  return signedRequest<HstoraOrder>(
+  return validateOrder(await signedRequest<unknown>(
     env,
     "POST",
     "/api/v1/orders",
@@ -198,24 +303,26 @@ export async function createHstoraOrder(env:Env,input:{
       external_order_id:input.externalOrderId
     },
     input.idempotencyKey
-  );
+  ));
 }
 
 export async function getHstoraOrder(env:Env,id:number):Promise<HstoraOrder>{
   if(!Number.isInteger(id)||id<=0) throw new HstoraApiError(400,"HSTORA_ORDER_ID_INVALID",false,"Invalid HStora order id");
-  return signedRequest<HstoraOrder>(env,"GET",`/api/v1/orders/${id}`,"",null);
+  return validateOrder(
+    await signedRequest<unknown>(env,"GET",`/api/v1/orders/${id}`,"",null)
+  );
 }
 
 export async function lookupHstoraOrder(env:Env,externalOrderId:string):Promise<HstoraOrder>{
   const id=externalOrderId.trim();
   if(!id) throw new HstoraApiError(400,"HSTORA_EXTERNAL_ORDER_ID_INVALID",false,"External order id is required");
-  return signedRequest<HstoraOrder>(
+  return validateOrder(await signedRequest<unknown>(
     env,
     "GET",
     "/api/v1/orders/lookup",
     "external_order_id="+encodeURIComponent(id),
     null
-  );
+  ));
 }
 
 export function newHstoraPurchaseIds(){
