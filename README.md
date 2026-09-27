@@ -359,6 +359,16 @@ DISCORD_NOTIFY_WEBHOOK_URL
 HSTORA_WEBHOOK_SECRET
 ```
 
+For live withdrawal support, use a **separate** Binance API key rather than expanding the trading key:
+
+```text
+BINANCE_WITHDRAW_API_KEY
+BINANCE_WITHDRAW_API_SECRET
+BINANCE_FIXED_EGRESS_CONFIRMED=true
+```
+
+The withdrawal key is rejected by the adapter unless Binance reports IP restriction enabled, withdrawal permission enabled, the LTC destination is in the official withdrawal allowlist, the network is available, the amount is within current limits, and fixed outbound egress has been explicitly confirmed.
+
 `BINANCE_TRAVEL_RULE_QUESTIONNAIRE` is only used when Binance reports that the API key/entity requires the Travel Rule questionnaire. Do not generate or guess its contents.
 
 `CREDENTIALS_ENCRYPTION_KEY` must decode to exactly 32 bytes. One way to create a suitable value locally is:
@@ -378,6 +388,8 @@ Automatic processing stops on conditions including:
 - unexpected HStora balance decrease beyond known bot purchases
 - delivery-count mismatch
 - authentication/API failures
+
+The default manual USD/JPY observation jump threshold is `max_fx_jump_percent = 10`. A fresh prior rate followed by a larger percentage jump opens the `fx_rate` breaker instead of accepting the new rate.
 
 Circuit breakers are visible from the X admin dashboard and require an explicit admin reset.
 
