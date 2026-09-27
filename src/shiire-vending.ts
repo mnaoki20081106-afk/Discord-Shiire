@@ -217,11 +217,13 @@ function machineEmbed(
       "在庫: "+product.stock_count+" / "+
       "販売: "+product.sales_count;
   });
+  const description=(
+    (machine.panel_description||"購入したい商品を下のボタンから選択してください。")+
+    (lines.length?"\n\n"+lines.join("\n\n"):"\n\n現在販売中の商品はありません。")
+  ).slice(0,4096);
   return {
-    title:machine.panel_title||machine.name||"仕入れBOT自販機",
-    description:
-      (machine.panel_description||"購入したい商品を下のボタンから選択してください。")+
-      (lines.length?"\n\n"+lines.join("\n\n"):"\n\n現在販売中の商品はありません。"),
+    title:(machine.panel_title||machine.name||"仕入れBOT自販機").slice(0,256),
+    description,
     color:5763719,
     ...(machine.panel_image_url?{image:{url:machine.panel_image_url}}:{})
   };
@@ -841,7 +843,7 @@ export async function handleShiireMainBridge(
       inviteUrl:env.DISCORD_APPLICATION_ID
         ?"https://discord.com/oauth2/authorize?client_id="+
           encodeURIComponent(env.DISCORD_APPLICATION_ID)+
-          "&permissions=268486656&integration_type=0&scope=bot%20applications.commands"
+          "&permissions=268487680&integration_type=0&scope=bot%20applications.commands"
         :null
     });
   }
@@ -945,6 +947,10 @@ export async function handleShiireMainBridge(
     }
     if(request.method==="POST"){
       const input=await parseBridgeJson(rawBody);
+      const existingProducts=await listShiireProducts(env,machine.id);
+      if(existingProducts.length>=25){
+        throw new ShiireVendingError(409,"VENDING_PRODUCT_LIMIT_REACHED");
+      }
       const name=String(input.name??"").trim();
       const supplierProductId=String(input.supplierProductId??"").trim();
       const pricePayPay=Number(input.pricePayPay??0);
