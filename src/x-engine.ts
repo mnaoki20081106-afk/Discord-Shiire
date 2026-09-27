@@ -38,6 +38,7 @@ import {
 } from "./providers/hstora";
 import { qualifyHstoraProduct } from "./x-qualification";
 import { notifyDiscord } from "./x-alerts";
+import { notifyShiireVendingStockArrival } from "./shiire-vending";
 
 export type XRunResult={
   action:string;
@@ -78,6 +79,13 @@ export async function reconcilePendingXOrders(env:Env){
           purchasePrice:Number(row.unit_price),
           orderResponse:order
         });
+        if(added>0){
+          await notifyShiireVendingStockArrival(
+            env,
+            String(row.supplier_product_id),
+            added
+          ).catch(()=>undefined);
+        }
         const storedTotal=await purchasedAccountCountForOrder(env,String(row.id));
         if(storedTotal!==Number(row.quantity)){
           await updatePurchaseOrderRecord(env,String(row.id),{
@@ -784,6 +792,13 @@ export async function runXProcurement(env:Env):Promise<XRunResult>{
         orderResponse:order
       })
       :0;
+    if(added>0){
+      await notifyShiireVendingStockArrival(
+        env,
+        String(fresh.id),
+        added
+      ).catch(()=>undefined);
+    }
     const storedTotal=order.delivery?.available
       ?await purchasedAccountCountForOrder(env,recordId)
       :0;
@@ -847,6 +862,13 @@ export async function runXProcurement(env:Env):Promise<XRunResult>{
           orderResponse:order
         })
         :0;
+      if(added>0){
+        await notifyShiireVendingStockArrival(
+          env,
+          String(fresh.id),
+          added
+        ).catch(()=>undefined);
+      }
       const recoveredStoredTotal=order.delivery?.available
         ?await purchasedAccountCountForOrder(env,recordId)
         :0;
