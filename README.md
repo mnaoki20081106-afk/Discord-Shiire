@@ -342,6 +342,7 @@ BINANCE_API_KEY
 BINANCE_API_SECRET
 HSTORA_API_KEY
 HSTORA_API_SECRET
+HSTORA_WEBHOOK_SECRET
 CREDENTIALS_ENCRYPTION_KEY
 ```
 
@@ -392,3 +393,22 @@ and verifies that 42 requested accounts with `max_batch_purchase = 20` split as:
 ```text
 20, 20, 2
 ```
+
+
+### HStora webhooks
+
+Discord-Shiire exposes the signed webhook receiver:
+
+```text
+POST /webhooks/hstora
+```
+
+Configure the HStora webhook destination to the public Worker URL plus this path and store the webhook signing secret as:
+
+```text
+HSTORA_WEBHOOK_SECRET
+```
+
+The receiver verifies the official HStora v1 signature headers and canonical body hash. It never logs the webhook payload. `X-HStore-Delivery-Id` is stored for idempotency so webhook retries cannot process the same delivery twice.
+
+Order events trigger reconciliation through the official HStora Order Lookup API. `order.refunded` and `order.disputed` open a circuit breaker and stop further automatic procurement until an admin explicitly resets it.
