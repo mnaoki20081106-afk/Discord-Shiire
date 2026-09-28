@@ -454,6 +454,10 @@ async function checkHstoraBalanceGuard(env:Env,current:number){
         message:"HStora Main Wallet残高の増加を公式Balance APIで確認しました。",
         details:{increaseUsd:delta,currentBalanceUsd:current}
       }).catch(()=>undefined);
+      await setXSetting(env,"x_manual_hstora_topup_notice",{
+        neededUsd:0,
+        notifiedAt:0
+      });
       remainingAllowed=allowed;
     }else if(delta<0){
       const decrease=-delta;
