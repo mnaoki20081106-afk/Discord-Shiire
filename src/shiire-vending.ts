@@ -1127,7 +1127,7 @@ export async function handleShiireMainBridge(
       inviteUrl:env.DISCORD_APPLICATION_ID
         ?"https://discord.com/oauth2/authorize?client_id="+
           encodeURIComponent(env.DISCORD_APPLICATION_ID)+
-          "&permissions=268487680&integration_type=0&scope=bot%20applications.commands"
+          "&permissions=268553216&integration_type=0&scope=bot%20applications.commands"
         :null
     });
   }
