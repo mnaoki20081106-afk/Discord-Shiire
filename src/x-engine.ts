@@ -56,11 +56,40 @@ import {
   type ProcurementClass
 } from "./x-qualification";
 import { notifyDiscord } from "./x-alerts";
+import { chooseRestockClass, restockCycleComplete, type RestockClass } from "./x-restock-policy";
 import { notifyShiireVendingStockArrival } from "./shiire-vending";
 
 const PAYPAY_DIRECT_PURCHASE_MIN_JPY=1_000;
 const PAYPAY_JPY_DEPOSIT_MIN_GROSS_JPY=1_000;
 const PAYPAY_JPY_DEPOSIT_FEE_JPY=110;
+
+type RestockCycleState={
+  active:boolean;
+  startedAt:number;
+};
+
+function restockCycleKey(targetClass:RestockClass){
+  return "x_restock_cycle_"+targetClass.toLowerCase();
+}
+
+async function loadRestockCycle(env:Env,targetClass:RestockClass){
+  const state=await getXSetting<RestockCycleState>(
+    env,
+    restockCycleKey(targetClass)
+  );
+  return Boolean(state?.active);
+}
+
+async function setRestockCycle(
+  env:Env,
+  targetClass:RestockClass,
+  active:boolean
+){
+  await setXSetting(env,restockCycleKey(targetClass),{
+    active,
+    startedAt:active?Date.now():0
+  } satisfies RestockCycleState);
+}
 
 export type XRunResult={
   action:string;
@@ -1208,32 +1237,75 @@ async function runXProcurementUnlocked(env:Env):Promise<XRunResult>{
     return {action:"HSTORA_BALANCE_ERROR",dryRun:settings.dry_run};
   }
 
-  const [inventory,topInventory,noShadowInventory]=await Promise.all([
+  const [
+    inventory,
+    topInventory,
+    noShadowInventory,
+    storedTopCycle,
+    storedNoShadowCycle
+  ]=await Promise.all([
     readyInventoryCount(env),
     readyInventoryCountByClass(env,"TOP_SEARCH"),
-    readyInventoryCountByClass(env,"NO_SHADOWBAN")
+    readyInventoryCountByClass(env,"NO_SHADOWBAN"),
+    loadRestockCycle(env,"TOP_SEARCH"),
+    loadRestockCycle(env,"NO_SHADOWBAN")
   ]);
 
-  let targetClass:ProcurementClass|null=null;
-  let classInventory=0;
-  let classTarget=0;
+  let topCycleActive=
+    storedTopCycle&&
+    !restockCycleComplete(topInventory,settings.target_stock);
+  let noShadowCycleActive=
+    storedNoShadowCycle&&
+    !restockCycleComplete(
+      noShadowInventory,
+      settings.no_shadowban_target_stock
+    );
 
-  // TOP_SEARCH gets priority when both independent product stocks are low.
-  if(topInventory<=settings.reorder_point){
-    targetClass="TOP_SEARCH";
-    classInventory=topInventory;
-    classTarget=settings.target_stock;
-  }else if(noShadowInventory<=settings.no_shadowban_reorder_point){
-    targetClass="NO_SHADOWBAN";
-    classInventory=noShadowInventory;
-    classTarget=settings.no_shadowban_target_stock;
-  }else{
+  if(!settings.dry_run){
+    if(storedTopCycle&&!topCycleActive){
+      await setRestockCycle(env,"TOP_SEARCH",false);
+    }
+    if(storedNoShadowCycle&&!noShadowCycleActive){
+      await setRestockCycle(env,"NO_SHADOWBAN",false);
+    }
+  }
+
+  const decision=chooseRestockClass({
+    topInventory,
+    topReorderPoint:settings.reorder_point,
+    topTargetStock:settings.target_stock,
+    topCycleActive,
+    noShadowInventory,
+    noShadowReorderPoint:settings.no_shadowban_reorder_point,
+    noShadowTargetStock:settings.no_shadowban_target_stock,
+    noShadowCycleActive
+  });
+
+  if(!decision){
     return {
       action:"INVENTORY_OK",
       dryRun:settings.dry_run,
       inventory,
-      details:{topSearch:topInventory,noShadowban:noShadowInventory}
+      details:{
+        topSearch:topInventory,
+        noShadowban:noShadowInventory,
+        topCycleActive,
+        noShadowCycleActive
+      }
     };
+  }
+
+  const {targetClass,classTarget}=decision;
+  let classInventory=decision.classInventory;
+  const cycleWasActive=
+    targetClass==="TOP_SEARCH"
+      ?topCycleActive
+      :noShadowCycleActive;
+
+  if(decision.triggeredNow&&!settings.dry_run){
+    await setRestockCycle(env,targetClass,true);
+    if(targetClass==="TOP_SEARCH") topCycleActive=true;
+    else noShadowCycleActive=true;
   }
 
   const need=Math.max(0,classTarget-classInventory);
@@ -1262,6 +1334,10 @@ async function runXProcurementUnlocked(env:Env):Promise<XRunResult>{
     }).catch(()=>undefined);
     return {action:"HSTORA_API_BLOCKED",dryRun:settings.dry_run,inventory};
   }
+
+  // Product scanning can backfill previously unclassified existing stock.
+  // A newly-triggered cycle must be cancelled if that backfill shows the
+  // inventory was actually above its reorder point before we buy anything.
   const refreshedClassInventory=await readyInventoryCountByClass(
     env,
     targetClass
@@ -1270,7 +1346,11 @@ async function runXProcurementUnlocked(env:Env):Promise<XRunResult>{
     targetClass==="TOP_SEARCH"
       ?settings.reorder_point
       :settings.no_shadowban_reorder_point;
-  if(refreshedClassInventory>refreshedReorder){
+
+  if(refreshedClassInventory>=classTarget){
+    if(!settings.dry_run){
+      await setRestockCycle(env,targetClass,false);
+    }
     return {
       action:"INVENTORY_RECLASSIFIED_OK",
       dryRun:settings.dry_run,
@@ -1278,18 +1358,45 @@ async function runXProcurementUnlocked(env:Env):Promise<XRunResult>{
       details:{
         targetClass,
         before:classInventory,
-        after:refreshedClassInventory
+        after:refreshedClassInventory,
+        target:classTarget
       }
     };
   }
-  const refreshedNeed=Math.max(0,classTarget-refreshedClassInventory);
-  batch=Math.min(refreshedNeed,settings.max_batch_purchase);
-  if(batch<=0){
+
+  if(
+    decision.triggeredNow&&
+    !cycleWasActive&&
+    refreshedClassInventory>refreshedReorder
+  ){
+    if(!settings.dry_run){
+      await setRestockCycle(env,targetClass,false);
+    }
     return {
       action:"INVENTORY_RECLASSIFIED_OK",
       dryRun:settings.dry_run,
       inventory:await readyInventoryCount(env),
-      details:{targetClass,classInventory:refreshedClassInventory,classTarget}
+      details:{
+        targetClass,
+        before:classInventory,
+        after:refreshedClassInventory,
+        reorderPoint:refreshedReorder
+      }
+    };
+  }
+
+  classInventory=refreshedClassInventory;
+  const refreshedNeed=Math.max(0,classTarget-classInventory);
+  batch=Math.min(refreshedNeed,settings.max_batch_purchase);
+  if(batch<=0){
+    if(!settings.dry_run){
+      await setRestockCycle(env,targetClass,false);
+    }
+    return {
+      action:"INVENTORY_RECLASSIFIED_OK",
+      dryRun:settings.dry_run,
+      inventory:await readyInventoryCount(env),
+      details:{targetClass,classInventory,classTarget}
     };
   }
 
