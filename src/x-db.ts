@@ -494,9 +494,9 @@ export async function purchaseStatsByClass(env:Env,since:number){
   await ensureXSchema(env);
   const rows=await env.DB.prepare(
     "SELECT COALESCE(procurement_class,'UNCLASSIFIED') AS procurement_class,"+
-    "COALESCE(SUM(CASE WHEN status NOT IN ('DRY_RUN','FAILED') THEN quantity ELSE 0 END),0) AS count,"+
-    "COALESCE(SUM(CASE WHEN status NOT IN ('DRY_RUN','FAILED') THEN total_amount ELSE 0 END),0) AS amount,"+
-    "COALESCE(AVG(CASE WHEN status NOT IN ('DRY_RUN','FAILED') THEN unit_price END),0) AS average "+
+    "COALESCE(SUM(CASE WHEN status IN ('DELIVERED','COMPLETED') THEN quantity ELSE 0 END),0) AS count,"+
+    "COALESCE(SUM(CASE WHEN status IN ('DELIVERED','COMPLETED') THEN total_amount ELSE 0 END),0) AS amount,"+
+    "COALESCE(AVG(CASE WHEN status IN ('DELIVERED','COMPLETED') THEN unit_price END),0) AS average "+
     "FROM purchase_orders WHERE created_at>=? GROUP BY procurement_class"
   ).bind(since).all<any>();
   const out:Record<string,{count:number;amount:number;average:number}>={};
@@ -551,9 +551,9 @@ export async function inventorySummary(env:Env){
 export async function todayPurchaseStats(env:Env,dayStart:number){
   await ensureXSchema(env);
   const row=await env.DB.prepare(`SELECT
-    COALESCE(SUM(CASE WHEN status NOT IN ('DRY_RUN','FAILED') THEN quantity ELSE 0 END),0) AS count,
-    COALESCE(SUM(CASE WHEN status NOT IN ('DRY_RUN','FAILED') THEN total_amount ELSE 0 END),0) AS amount,
-    COALESCE(AVG(CASE WHEN status NOT IN ('DRY_RUN','FAILED') THEN unit_price END),0) AS avg
+    COALESCE(SUM(CASE WHEN status IN ('DELIVERED','COMPLETED') THEN quantity ELSE 0 END),0) AS count,
+    COALESCE(SUM(CASE WHEN status IN ('DELIVERED','COMPLETED') THEN total_amount ELSE 0 END),0) AS amount,
+    COALESCE(AVG(CASE WHEN status IN ('DELIVERED','COMPLETED') THEN unit_price END),0) AS avg
     FROM purchase_orders WHERE created_at>=?`).bind(dayStart).first<any>();
   return {count:Number(row?.count??0),amount:Number(row?.amount??0),average:Number(row?.avg??0)};
 }
