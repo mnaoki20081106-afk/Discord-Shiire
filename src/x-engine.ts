@@ -500,12 +500,29 @@ async function selectCandidate(
     const q=qualifyHstoraProduct(full,settings,plannedQuantity);
     const previous=await getSupplierProductRecord(env,String(full.id));
     const previousPrice=Number(previous?.unit_price??0);
-    const currentPrice=Number(full.price??0);
+    const currentPrice=Number(q.unit_price_source);
     const sameCurrency=
       String(previous?.currency??"").toUpperCase()===
       String(full.currency??"").toUpperCase();
+    let previousPlannedQuantity:number|null=null;
+    if(previous?.structured_json){
+      try{
+        const structured=JSON.parse(String(previous.structured_json));
+        const parsed=Number(structured?.planned_quantity);
+        if(Number.isSafeInteger(parsed)&&parsed>0){
+          previousPlannedQuantity=parsed;
+        }
+      }catch{}
+    }
+    const comparableQuantity=previousPlannedQuantity===plannedQuantity;
 
-    if(previous&&sameCurrency&&previousPrice>0&&currentPrice>0){
+    if(
+      previous&&
+      sameCurrency&&
+      comparableQuantity&&
+      previousPrice>0&&
+      currentPrice>0
+    ){
       const jump=Math.abs(currentPrice-previousPrice)/previousPrice*100;
       if(jump>settings.max_price_jump_percent){
         await setCircuitBreaker(
