@@ -559,9 +559,9 @@ async function handleHstoraFundingNeed(
       binanceJpyBaseline:settings.pending_paypay_binance_jpy_baseline,
       binanceLtcBaseline:settings.pending_paypay_binance_ltc_baseline,
       ltcBaselineCaptured:settings.pending_paypay_ltc_baseline_captured,
+      directLtcBudgetJpy:directLtcBudget,
       currentBinanceJpy:jpyFree,
-      currentBinanceLtc:ltcFree,
-      requiredLtcAtRequest:settings.pending_paypay_required_ltc
+      currentBinanceLtc:ltcFree
     });
     const ltcPurchaseDetected=completion==="LTC_PURCHASED";
 
