@@ -7,7 +7,7 @@ export type ProductQualification={
   unit_price_jpy:number|null;
   stock:number;
   search_visibility:string[];
-  seller_quality:"api"|"manual_approval"|"unavailable";
+  seller_quality:"api"|"manual_approval"|"trial_only"|"unavailable";
   reasons:string[];
   evidence:string[];
 };
@@ -20,12 +20,27 @@ const VISIBILITY_RULES:Array<{label:string;patterns:RegExp[]}>= [
   {label:"Search Visible",patterns:[/\bsearch\s+visible\b/i,/\bvisible\s+in\s+search\b/i]}
 ];
 
-function productText(product:HstoraProduct):string{
+type VisibilityProduct=Pick<HstoraProduct,"name"|"slug"|"short_description">&
+  Partial<Pick<HstoraProduct,"description">>;
+
+function productText(product:VisibilityProduct):string{
   return [product.name,product.short_description??"",product.description??""]
     .join("\n").replace(/\s+/g," ").trim();
 }
 
-export function detectSearchVisibility(product:HstoraProduct){
+export function isXAccountProduct(product:VisibilityProduct):boolean{
+  const identity=[product.name,product.slug,product.short_description??""]
+    .join(" ")
+    .replace(/[_-]+/g," ");
+  return (
+    /\btwitter\b/i.test(identity)||
+    /\bx\s+accounts?\b/i.test(identity)||
+    /\bx\s+top\b/i.test(identity)||
+    /\btwitter\s*\/\s*x\b/i.test(identity)
+  );
+}
+
+export function detectSearchVisibility(product:VisibilityProduct){
   const text=productText(product);
   const labels:string[]=[];
   const evidence:string[]=[];
@@ -77,7 +92,13 @@ export function qualifyHstoraProduct(
     reasons.push("UNSUPPORTED_CURRENCY_"+currency);
   }
 
-  if(!visibility.labels.length) reasons.push("SEARCH_VISIBILITY_NOT_CONFIRMED");
+  if(!isXAccountProduct(product)) reasons.push("NOT_X_ACCOUNT_PRODUCT");
+  const topConfirmed=
+    visibility.labels.includes("TOP+Latest")||
+    visibility.labels.includes("TOP Search");
+  if(settings.search_visibility_requirement==="top"&&!topConfirmed){
+    reasons.push("TOP_SEARCH_NOT_CONFIRMED");
+  }
   if(product.stock_available<settings.minimum_stock) reasons.push("STOCK_BELOW_MINIMUM");
   if(unitJpy===null||!Number.isFinite(unitJpy)||unitJpy<=0){
     reasons.push("UNIT_PRICE_JPY_UNAVAILABLE");
@@ -88,6 +109,8 @@ export function qualifyHstoraProduct(
   let sellerQuality:ProductQualification["seller_quality"]="unavailable";
   if(settings.seller_quality_mode==="strict_api"){
     reasons.push("SELLER_QUALITY_FIELDS_UNAVAILABLE_IN_HSTORA_API");
+  }else if(settings.seller_quality_mode==="trial_only"){
+    sellerQuality="trial_only";
   }else if(settings.approved_hstora_product_ids.includes(Number(product.id))){
     sellerQuality="manual_approval";
   }else{
