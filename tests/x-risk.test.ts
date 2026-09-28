@@ -4,6 +4,7 @@ import {
   calculateFundingAllowance,
   calculateLtcPurchaseAllowance,
   calculateSpendablePayPayJpy,
+  isPendingDirectLtcFundingReady,
   nextObservedPayPayBalance,
   planManualPayPayPaths,
   splitPurchaseBatches,
@@ -293,4 +294,32 @@ test("older PayPay observation is reduced by the confirmed spend",()=>{
     pendingRequestedAt:1_000,
     confirmedSpendJpy:7_000
   }),23_000);
+});
+
+
+test("direct LTC confirmation waits until the original required balance is reached",()=>{
+  assert.equal(isPendingDirectLtcFundingReady({
+    baselineLtc:0.1,
+    currentLtc:0.11,
+    requiredLtcAtRequest:0.5,
+    baselineCaptured:true
+  }),false);
+});
+
+test("direct LTC confirmation is ready only after increase and original target",()=>{
+  assert.equal(isPendingDirectLtcFundingReady({
+    baselineLtc:0.1,
+    currentLtc:0.5,
+    requiredLtcAtRequest:0.5,
+    baselineCaptured:true
+  }),true);
+});
+
+test("direct LTC confirmation fails closed without captured baseline",()=>{
+  assert.equal(isPendingDirectLtcFundingReady({
+    baselineLtc:0,
+    currentLtc:1,
+    requiredLtcAtRequest:0.5,
+    baselineCaptured:false
+  }),false);
 });
