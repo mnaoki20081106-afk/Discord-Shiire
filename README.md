@@ -327,6 +327,29 @@ Before live withdrawals, the adapter requires:
 
 An ambiguous LTC order submission is reconciled with the same `clientOrderId` before any retry decision.
 
+#### Independent LTC auto-purchase
+
+`auto_purchase_enabled` is independent from `auto_procurement_enabled`.
+
+When LTC auto-purchase is enabled, the one-minute Cron checks the live Binance LTC/JPY market and the Binance JPY/LTC balances even when HStora procurement itself is disabled. If the LTC balance is below `target_ltc_balance`, the Worker can submit a Binance Spot `MARKET BUY` using `quoteOrderQty`, bounded by:
+
+- current Binance JPY free balance
+- `max_purchase_jpy`
+- remaining daily / weekly / monthly purchase limits
+- `target_ltc_balance`
+- `max_ltc_balance`
+- the current Binance `MIN_NOTIONAL` / `NOTIONAL` market filters
+
+The same durable funding event, `newClientOrderId`, ambiguous-result reconciliation, and circuit-breaker path is used by both independent target rebalancing and HStora-shortfall purchases.
+
+A manual diagnostic trigger is also available:
+
+```text
+POST /api/x/funding/auto-purchase/run
+```
+
+PayPay funding remains a separate boundary. Binance Japan currently documents PayPay funding/purchases through its official website/app flow; Discord-Shiire does not invent an undocumented PayPay API or automate the Binance website.
+
 ### HStora
 
 The HStora adapter uses the documented v1 catalog/product/balance/order APIs.
@@ -615,6 +638,7 @@ Binance出金用APIキー・固定送信元IP確認・Travel Rule JSONは現在�
 - PayPay残高の手動観測
 - USD/JPYの手動観測
 - Dry Run / LTC自動購入 / 自動仕入れ
+- LTC自動購入の即時判定（自動仕入れOFFでも実行可能）
 - Emergency Stop / 解除
 - PayPay手動操作待ちの取消
 - Circuit Breaker解除
