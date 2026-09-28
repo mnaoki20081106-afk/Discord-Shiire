@@ -205,9 +205,15 @@ DB
 The X account procurement flow is implemented as a separate, fail-closed pipeline inside Discord-Shiire.
 
 ```text
-PayPay (manual official-UI boundary)
-  -> Binance Japan JPY instant funding OR direct LTC purchase when offered
-  -> LTC/JPY Spot when JPY funding was used
+Current default:
+LTC manual top-up
+  -> HStora Main Wallet
+  -> HStora balance credit detected by the 1-minute Cron
+  -> HStora official API purchase
+
+Future optional funding path:
+Binance Japan JPY
+  -> LTC/JPY Spot
   -> HStora Main Wallet funding boundary
   -> HStora official API purchase
   -> encrypted D1 inventory
@@ -244,10 +250,12 @@ All `/api/x/*` endpoints require the existing `ADMIN_TOKEN`.
 The defaults are intentionally non-live:
 
 ```text
+funding_mode = manual_hstora
 dry_run = true
 auto_purchase_enabled = false
 auto_procurement_enabled = false
 dedicated_ltc_wallet = disabled (no signer connected)
+BINANCE_AUTO_FUNDING_ENABLED = false / unset
 emergency_stop = false
 seller_quality_mode = trial_only
 ```
@@ -255,7 +263,11 @@ seller_quality_mode = trial_only
 Turning Dry Run off through the admin API requires an explicit live-mode confirmation.
 Emergency Stop disables both automatic purchase and automatic procurement.
 
-Funding limits are calculated fail-closed, but existing Binance JPY and new PayPay outflow are treated separately.
+The current default funding mode is `manual_hstora`. In this mode Discord-Shiire never calls the Binance market-buy path. When the HStora Main Wallet is short, it sends a rate-limited notice, waits for an LTC top-up made through HStora's Wallet UI, and automatically resumes procurement after the official HStora balance API reflects the credit.
+
+The existing Binance purchase code is preserved for later use. Selecting `binance_auto` is rejected unless the Worker environment also has `BINANCE_AUTO_FUNDING_ENABLED=true`. Live Binance market buys perform the same hard server-side check again, so changing D1 settings alone cannot unlock trading.
+
+Funding limits for `binance_auto` are calculated fail-closed, and existing Binance JPY and new PayPay outflow are treated separately.
 
 The LTC purchase ceiling is the minimum of:
 
@@ -329,7 +341,10 @@ An ambiguous LTC order submission is reconciled with the same `clientOrderId` be
 
 #### Independent LTC auto-purchase
 
-`auto_purchase_enabled` is independent from `auto_procurement_enabled`.
+`auto_purchase_enabled` is independent from `auto_procurement_enabled`, but it is active only when both of these conditions are also true:
+
+- `funding_mode = binance_auto`
+- `BINANCE_AUTO_FUNDING_ENABLED=true`
 
 When LTC auto-purchase is enabled, the one-minute Cron checks the live Binance LTC/JPY market and the Binance JPY/LTC balances even when HStora procurement itself is disabled. If the LTC balance is below `target_ltc_balance`, the Worker can submit a Binance Spot `MARKET BUY` using `quoteOrderQty`, bounded by:
 
@@ -363,7 +378,7 @@ The current HStora product schema does not expose the requested seller rating, r
 
 No seller quality value is fabricated.
 
-HStora wallet deposit-address automation is not guessed. If the official API does not expose the required deposit operation, the pipeline stops at the manual HStora LTC deposit boundary and detects the HStora balance increase afterward.
+HStora wallet deposit-address automation is not guessed. The official v1 API currently used by this project exposes balance/catalog/order operations but no deposit-address or deposit-execution endpoint. Therefore the default `manual_hstora` flow deliberately stops only at the HStora Wallet top-up action. After the balance increase is detected, procurement and vending delivery continue automatically. Discord-Shiire does not store a self-custody LTC private key in the Worker for this flow.
 
 ### Credential storage
 
@@ -381,8 +396,6 @@ X-account credentials stay encrypted while they are in stock. Discord-Shiire's o
 Store these with Cloudflare Worker Secret management, never in GitHub or `wrangler.jsonc`:
 
 ```text
-BINANCE_API_KEY
-BINANCE_API_SECRET
 HSTORA_API_KEY
 HSTORA_API_SECRET
 CREDENTIALS_ENCRYPTION_KEY
@@ -392,9 +405,16 @@ Optional / feature-specific:
 
 ```text
 HSTORA_WEBHOOK_SECRET
-BINANCE_TRAVEL_RULE_QUESTIONNAIRE
 DISCORD_NOTIFY_WEBHOOK_URL
+
+# Only for future Binance auto-funding
+BINANCE_API_KEY
+BINANCE_API_SECRET
+BINANCE_AUTO_FUNDING_ENABLED
+BINANCE_TRAVEL_RULE_QUESTIONNAIRE
 ```
+
+Leave `BINANCE_AUTO_FUNDING_ENABLED` unset or false while using the default manual HStora LTC top-up mode.
 
 `HSTORA_WEBHOOK_SECRET` はWebhook即時反映を使う場合に設定します。未設定でも1分Cronの注文照合は動作します。
 
@@ -612,12 +632,12 @@ Existing purchased accounts are backfilled into the new procurement classes when
 2. Xaccount-Bot Worker に `SHIIRE_API_BASE_URL=<Discord-Shiireの実URL>` を設定する。
 3. Discord-Shiire Worker に `XACCOUNT_BOT_BASE_URL=<Xaccount-Botの実URL>` を設定する。
 4. 両Workerに同一の32文字以上の `SHIIRE_BRIDGE_SECRET` を Secret として設定する。
-5. Factoryフォームから Discord-Shiire Worker に `DISCORD_APPLICATION_ID`, `DISCORD_PUBLIC_KEY`, `DISCORD_BOT_TOKEN`, `BINANCE_API_KEY`, `BINANCE_API_SECRET`, `HSTORA_API_KEY`, `HSTORA_API_SECRET` を設定する。`ADMIN_TOKEN` と `CREDENTIALS_ENCRYPTION_KEY` はFactoryが自動生成する。従来型の汎用仕入れも使う場合だけ `MAIN_BOT_BASE_URL` を追加する。
+5. Factoryフォームから Discord-Shiire Worker に `DISCORD_APPLICATION_ID`, `DISCORD_PUBLIC_KEY`, `DISCORD_BOT_TOKEN`, `HSTORA_API_KEY`, `HSTORA_API_SECRET` を設定する。将来Binance自動補充を使う場合だけ `BINANCE_API_KEY` / `BINANCE_API_SECRET` を追加し、正規の利用条件とAPI設定を満たした後に `BINANCE_AUTO_FUNDING_ENABLED=true` を設定する。`ADMIN_TOKEN` と `CREDENTIALS_ENCRYPTION_KEY` はFactoryが自動生成する。従来型の汎用仕入れも使う場合だけ `MAIN_BOT_BASE_URL` を追加する。
 6. Discord Developer Portal の Interactions Endpoint URL を `https://<Discord-Shiire Worker>/interactions` に設定する。
 7. HStora Webhook を使う場合だけ、Webhook URLを `https://<Discord-Shiire Worker>/webhooks/hstora` に設定し、同じ署名Secretを `HSTORA_WEBHOOK_SECRET` として保存する。
 8. Xaccount-Bot の GitHub Repository Variable `VITE_API_BASE_URL` を実際の Xaccount-Bot Worker origin に設定する。
 
-なお、現在のXアカウント仕入れフローでは HStora Main Wallet へのLTC入金は手動境界です。Binance出金APIの安全チェック実装はありますが、HStoraの入金先を公式APIから取得できないため、自動仕入れエンジンから出金関数を呼びません。専用LTC Walletも未接続です。
+なお、現在の標準フローでは HStora Main Wallet へのLTC入金だけが手動境界です。入金反映後は1分Cronで残高増加を検知し、仕入れ・在庫保存・自販機納品へ自動復帰します。Binance出金APIの安全チェック実装は残していますが、HStoraの入金先を公式APIから取得できないため、自動仕入れエンジンから出金関数を呼びません。専用LTC Walletも未接続です。
 
 
 ### Discord-Bot-Factory
@@ -633,6 +653,7 @@ Binance出金用APIキー・固定送信元IP確認・Travel Rule JSONは現在�
 
 通常運用では Discord-Shiire の `/x-admin` に ADMIN_TOKEN を入力する必要はありません。Xaccount-Bot の「仕入れbot > 資金・LTC / ログ・障害」から、署名付きBridge経由で次を操作できます。
 
+- LTC補充モード（HStora手動補充 / 将来のBinance自動補充）
 - reserve_jpy / 1回・日・週・月のLTC購入上限 / 最低購入額
 - Binance LTC目標残高 / 最大残高
 - PayPay残高の手動観測
