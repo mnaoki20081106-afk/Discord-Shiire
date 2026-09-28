@@ -215,3 +215,37 @@ test("Search Visible without TOP or No Shadowban is not a procurement product cl
   assert.equal(q.qualified,false);
   assert.ok(q.reasons.includes("SUPPORTED_X_PRODUCT_CLASS_NOT_CONFIRMED"));
 });
+
+
+test("negated TOP Search wording does not qualify as TOP_SEARCH",()=>{
+  const q=qualifyHstoraProduct(
+    product({
+      name:"Twitter X Accounts",
+      short_description:"No TOP Search / No Shadowban",
+      description:"Search Visible. No TOP Search support.",
+      price:0.58
+    }),
+    settings(),
+    1
+  );
+  assert.equal(q.procurement_class,"NO_SHADOWBAN");
+  assert.equal(q.qualified,true);
+  assert.equal(q.search_visibility.includes("TOP Search"),false);
+  assert.ok(q.search_visibility.includes("No Shadowban"));
+});
+
+test("TOP Search unavailable wording is not positive TOP evidence",()=>{
+  const q=qualifyHstoraProduct(
+    product({
+      name:"Twitter X Accounts",
+      short_description:"No Shadowban",
+      description:"TOP Search unavailable. Search Visible.",
+      price:0.58
+    }),
+    settings(),
+    1
+  );
+  assert.equal(q.procurement_class,"NO_SHADOWBAN");
+  assert.equal(q.qualified,true);
+  assert.equal(q.search_visibility.includes("TOP Search"),false);
+});
