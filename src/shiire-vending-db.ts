@@ -199,7 +199,7 @@ export async function deleteShiireMachine(env:Env,id:string){
 export async function listShiireSourceProducts(env:Env){
   await ensureShiireVendingSchema(env);
   return (await env.DB.prepare(
-    "SELECT supplier_product_id,title,currency,unit_price,stock_available,qualified,last_seen_at FROM supplier_products WHERE supplier='hstora' ORDER BY updated_at DESC LIMIT 500"
+    "SELECT supplier_product_id,title,currency,unit_price,stock_available,procurement_class,qualified,last_seen_at FROM supplier_products WHERE supplier='hstora' ORDER BY updated_at DESC LIMIT 500"
   ).all()).results;
 }
 
