@@ -1,7 +1,7 @@
 import type { Env } from "./types";
 import { randomId } from "./crypto";
 import { encryptSensitive, decryptSensitive, type EncryptedSecret } from "./x-crypto";
-import { ensureXSchema } from "./x-db";
+import { ensureD1Column, ensureXSchema } from "./x-db";
 import { canReleaseReservedOrder, paymentPrice, shouldExpireUnpaidOrder } from "./shiire-vending-policy";
 
 export type ShiireVendingMachine={
@@ -78,42 +78,26 @@ export async function ensureShiireVendingSchema(env:Env){
   if(ready) return;
   await ensureXSchema(env);
   for(const sql of SCHEMA) await env.DB.prepare(sql).run();
-  const machineColumns=(await env.DB.prepare(
-    "PRAGMA table_info(shiire_vending_machines)"
-  ).all<{name:string}>()).results.map(row=>row.name);
   for(const [name,type] of [
     ["panel_image_url","TEXT"],
     ["panel_image_mime","TEXT"],
     ["panel_image_base64","TEXT"]
   ] as const){
-    if(!machineColumns.includes(name)){
-      await env.DB.prepare(
-        "ALTER TABLE shiire_vending_machines ADD COLUMN "+name+" "+type
-      ).run();
-    }
+    await ensureD1Column(env,"shiire_vending_machines",name,type);
   }
 
-  const productColumns=(await env.DB.prepare(
-    "PRAGMA table_info(shiire_vending_products)"
-  ).all<{name:string}>()).results.map(row=>row.name);
-  if(!productColumns.includes("procurement_class")){
-    await env.DB.prepare(
-      "ALTER TABLE shiire_vending_products ADD COLUMN procurement_class TEXT"
-    ).run();
-  }
+  await ensureD1Column(
+    env,
+    "shiire_vending_products",
+    "procurement_class",
+    "TEXT"
+  );
 
-  const orderColumns=(await env.DB.prepare(
-    "PRAGMA table_info(shiire_vending_orders)"
-  ).all<{name:string}>()).results.map(row=>row.name);
   for(const [name,type] of [
     ["delivery_channel_id","TEXT"],
     ["delivery_message_id","TEXT"]
   ] as const){
-    if(!orderColumns.includes(name)){
-      await env.DB.prepare(
-        "ALTER TABLE shiire_vending_orders ADD COLUMN "+name+" "+type
-      ).run();
-    }
+    await ensureD1Column(env,"shiire_vending_orders",name,type);
   }
   ready=true;
 }
