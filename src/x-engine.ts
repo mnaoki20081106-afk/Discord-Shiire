@@ -531,9 +531,11 @@ async function handleHstoraFundingNeed(
     const completion=detectManualPayPayCompletion({
       pendingJpy:settings.pending_paypay_funding_jpy,
       binanceJpyBaseline:settings.pending_paypay_binance_jpy_baseline,
+      binanceLtcBaseline:settings.pending_paypay_binance_ltc_baseline,
+      ltcBaselineCaptured:settings.pending_paypay_ltc_baseline_captured,
       currentBinanceJpy:jpyFree,
       currentBinanceLtc:ltcFree,
-      requiredLtc
+      requiredLtcAtRequest:settings.pending_paypay_required_ltc
     });
     const jpyFundingDetected=completion==="JPY_FUNDED";
     const ltcPurchaseDetected=completion==="LTC_PURCHASED";
@@ -547,6 +549,9 @@ async function handleHstoraFundingNeed(
         ),
         pending_paypay_funding_jpy:0,
         pending_paypay_binance_jpy_baseline:0,
+        pending_paypay_binance_ltc_baseline:0,
+        pending_paypay_required_ltc:0,
+        pending_paypay_ltc_baseline_captured:false,
         pending_paypay_requested_at:0
       });
       await recordFundingEvent(env,{
@@ -584,9 +589,11 @@ async function handleHstoraFundingNeed(
         details:{
           requestedMaxSpendJpy:settings.pending_paypay_funding_jpy,
           binanceJpyBaseline:settings.pending_paypay_binance_jpy_baseline,
+          binanceLtcBaseline:settings.pending_paypay_binance_ltc_baseline,
+          requiredLtcAtRequest:settings.pending_paypay_required_ltc,
           currentBinanceJpy:jpyFree,
           currentBinanceLtc:ltcFree,
-          requiredLtc,
+          requiredLtcNow:requiredLtc,
           requestedAt:settings.pending_paypay_requested_at,
           acceptedManualPaths:[
             "PayPay -> Binance JPY instant funding",
@@ -665,6 +672,9 @@ async function handleHstoraFundingNeed(
     settings=await saveXSettings(env,{
       pending_paypay_funding_jpy:requiredDepositJpy,
       pending_paypay_binance_jpy_baseline:Math.floor(jpyFree),
+      pending_paypay_binance_ltc_baseline:ltcFree,
+      pending_paypay_required_ltc:requiredLtc,
+      pending_paypay_ltc_baseline_captured:true,
       pending_paypay_requested_at:Date.now()
     });
     await recordFundingEvent(env,{
