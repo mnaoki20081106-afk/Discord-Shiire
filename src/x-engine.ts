@@ -569,8 +569,6 @@ async function handleHstoraFundingNeed(
           binanceJpyFree:jpyFree,
           binanceLtcFree:ltcFree,
           binanceLtcBaseline:ltcBaseline,
-          detectedLtcIncrease,
-          binanceLtcBaseline:ltcBaseline,
           detectedLtcIncrease
         }
       });
@@ -583,7 +581,9 @@ async function handleHstoraFundingNeed(
           completionMode:ltcPurchaseDetected?"direct_ltc_purchase":"jpy_deposit",
           confirmedSpendJpy:confirmedSpend,
           binanceJpyFree:jpyFree,
-          binanceLtcFree:ltcFree
+          binanceLtcFree:ltcFree,
+          binanceLtcBaseline:ltcBaseline,
+          detectedLtcIncrease
         }
       });
       if(ltcPurchaseDetected){
