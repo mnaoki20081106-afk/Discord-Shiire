@@ -1,16 +1,31 @@
 import type { Env } from "./types";
 import { hmacHex, randomId } from "./crypto";
 
+function requireHttpsOrigin(rawValue:string|undefined,key:string):URL{
+  const raw=rawValue?.trim()??"";
+  if(!raw) throw new Error(key+"_NOT_CONFIGURED");
+  let url:URL;
+  try{url=new URL(raw);}
+  catch{throw new Error(key+"_INVALID");}
+  if(
+    url.protocol!=="https:"||
+    url.username||
+    url.password||
+    url.search||
+    url.hash||
+    (url.pathname!=="/"&&url.pathname!=="")
+  ){
+    throw new Error(key+"_MUST_BE_HTTPS_ORIGIN");
+  }
+  return new URL(url.origin+"/");
+}
+
 function baseUrl(env:Env):URL{
-  const raw=env.MAIN_BOT_BASE_URL?.trim();
-  if(!raw) throw new Error("MAIN_BOT_BASE_URL_NOT_CONFIGURED");
-  return new URL(raw.endsWith("/")?raw:raw+"/");
+  return requireHttpsOrigin(env.MAIN_BOT_BASE_URL,"MAIN_BOT_BASE_URL");
 }
 
 function xaccountBaseUrl(env:Env):URL{
-  const raw=env.XACCOUNT_BOT_BASE_URL?.trim();
-  if(!raw) throw new Error("XACCOUNT_BOT_BASE_URL_NOT_CONFIGURED");
-  return new URL(raw.endsWith("/")?raw:raw+"/");
+  return requireHttpsOrigin(env.XACCOUNT_BOT_BASE_URL,"XACCOUNT_BOT_BASE_URL");
 }
 
 async function signedFetch(
