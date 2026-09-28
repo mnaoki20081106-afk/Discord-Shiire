@@ -21,7 +21,11 @@ import {
   upsertSupplierProduct
 } from "./x-db";
 import { loadXSettings, saveXSettings } from "./x-settings";
-import { calculateFundingAllowance, detectManualPayPayCompletion } from "./x-risk";
+import {
+  calculateLtcPurchaseAllowance,
+  calculateSpendablePayPayJpy,
+  detectManualPayPayCompletion
+} from "./x-risk";
 import {
   getBinanceBalance,
   getBinanceOrder,
@@ -45,6 +49,10 @@ import {
 } from "./x-qualification";
 import { notifyDiscord } from "./x-alerts";
 import { notifyShiireVendingStockArrival } from "./shiire-vending";
+
+const PAYPAY_DIRECT_PURCHASE_MIN_JPY=1_000;
+const PAYPAY_JPY_DEPOSIT_MIN_GROSS_JPY=1_000;
+const PAYPAY_JPY_DEPOSIT_FEE_JPY=110;
 
 export type XRunResult={
   action:string;
@@ -665,55 +673,104 @@ async function handleHstoraFundingNeed(
     fundingWindowRemaining(env,settings.monthly_purchase_limit_jpy,monthStart)
   ]);
 
-  const observedFresh=
-    settings.observed_paypay_balance_at>0&&
-    Date.now()-settings.observed_paypay_balance_at<=settings.max_paypay_balance_age_ms;
-
-  if(!observedFresh){
-    await notifyDiscord(env,{
-      title:"PayPay残高確認が必要",
-      message:"reserve_jpyを保証するため、管理画面で現在のPayPay残高を更新してください。",
-      details:{ltcShortfall,buyNeededJpy}
-    }).catch(()=>undefined);
-    return {
-      action:"PAYPAY_BALANCE_OBSERVATION_REQUIRED",
-      dryRun:settings.dry_run,
-      details:{ltcShortfall,buyNeededJpy}
-    };
-  }
-
-  const allowance=calculateFundingAllowance({
-    reserveJpy:settings.reserve_jpy,
+  const purchaseAllowance=calculateLtcPurchaseAllowance({
     maxPurchaseJpy:settings.max_purchase_jpy,
     dailyRemainingJpy:daily,
     weeklyRemainingJpy:weekly,
     monthlyRemainingJpy:monthly,
     minPurchaseJpy:settings.min_purchase_jpy,
-    paypayBalanceJpy:settings.observed_paypay_balance_jpy,
     currentLtc:ltcFree,
     targetLtcBalance:settings.target_ltc_balance,
     maxLtcBalance:settings.max_ltc_balance,
     ltcJpy
   });
-  const desired=Math.min(buyNeededJpy,allowance.allowedJpy);
+  const desired=Math.min(buyNeededJpy,purchaseAllowance.allowedJpy);
 
   if(desired<=0){
     return {
       action:"FUNDING_LIMIT_BLOCKED",
       dryRun:settings.dry_run,
-      details:{buyNeededJpy,allowance}
+      details:{buyNeededJpy,purchaseAllowance}
     };
   }
 
+  // Existing Binance JPY can be used without consulting PayPay balance.
+  // PayPay reserve_jpy only protects new PayPay outflow.
   if(jpyFree<desired){
-    const requiredDepositJpy=Math.ceil(desired-jpyFree);
+    const observedFresh=
+      settings.observed_paypay_balance_at>0&&
+      Date.now()-settings.observed_paypay_balance_at<=settings.max_paypay_balance_age_ms;
+
+    if(!observedFresh){
+      await notifyDiscord(env,{
+        title:"PayPay残高確認が必要",
+        message:"reserve_jpyを保証するため、管理画面で現在のPayPay残高を更新してください。",
+        details:{ltcShortfall,buyNeededJpy,desiredPurchaseJpy:desired}
+      }).catch(()=>undefined);
+      return {
+        action:"PAYPAY_BALANCE_OBSERVATION_REQUIRED",
+        dryRun:settings.dry_run,
+        details:{ltcShortfall,buyNeededJpy,desiredPurchaseJpy:desired}
+      };
+    }
+
+    const spendablePayPay=calculateSpendablePayPayJpy({
+      observedBalanceJpy:settings.observed_paypay_balance_jpy,
+      reserveJpy:settings.reserve_jpy
+    });
+    const netJpyCreditNeeded=Math.ceil(Math.max(0,desired-jpyFree));
+    const grossJpyDepositRequired=netJpyCreditNeeded>0
+      ?Math.max(
+        PAYPAY_JPY_DEPOSIT_MIN_GROSS_JPY,
+        netJpyCreditNeeded+PAYPAY_JPY_DEPOSIT_FEE_JPY
+      )
+      :0;
+
+    const jpyDepositAvailable=
+      grossJpyDepositRequired>0&&
+      grossJpyDepositRequired<=spendablePayPay;
+    const directLtcAvailable=
+      desired>=PAYPAY_DIRECT_PURCHASE_MIN_JPY&&
+      desired<=spendablePayPay;
+
+    if(!jpyDepositAvailable&&!directLtcAvailable){
+      return {
+        action:"PAYPAY_FUNDING_LIMIT_BLOCKED",
+        dryRun:settings.dry_run,
+        details:{
+          desiredPurchaseJpy:desired,
+          spendablePayPayJpy:spendablePayPay,
+          reserveJpy:settings.reserve_jpy,
+          jpyDeposit:{
+            grossRequiredJpy:grossJpyDepositRequired,
+            expectedNetCreditJpy:netJpyCreditNeeded,
+            feeJpy:PAYPAY_JPY_DEPOSIT_FEE_JPY,
+            minimumGrossJpy:PAYPAY_JPY_DEPOSIT_MIN_GROSS_JPY,
+            available:false
+          },
+          directLtc:{
+            purchaseJpy:desired,
+            minimumJpy:PAYPAY_DIRECT_PURCHASE_MIN_JPY,
+            available:false
+          },
+          purchaseAllowance
+        }
+      };
+    }
+
+    const paypayReservationJpy=Math.max(
+      jpyDepositAvailable?grossJpyDepositRequired:0,
+      directLtcAvailable?desired:0
+    );
+
     settings=await saveXSettings(env,{
-      // Reserve the largest PayPay amount that could be spent while this
-      // manual step is pending. The JPY-deposit path may need less because
-      // existing Binance JPY can be reused; the direct-LTC path cannot.
-      pending_paypay_funding_jpy:desired,
-      pending_paypay_jpy_deposit_required_jpy:requiredDepositJpy,
-      pending_paypay_direct_ltc_budget_jpy:desired,
+      pending_paypay_funding_jpy:paypayReservationJpy,
+      pending_paypay_jpy_deposit_required_jpy:
+        jpyDepositAvailable?grossJpyDepositRequired:0,
+      pending_paypay_jpy_credit_required_jpy:
+        jpyDepositAvailable?netJpyCreditNeeded:0,
+      pending_paypay_direct_ltc_budget_jpy:
+        directLtcAvailable?desired:0,
       pending_paypay_path_amounts_captured:true,
       pending_paypay_binance_jpy_baseline:Math.floor(jpyFree),
       pending_paypay_binance_ltc_baseline:ltcFree,
@@ -721,37 +778,83 @@ async function handleHstoraFundingNeed(
       pending_paypay_ltc_baseline_captured:true,
       pending_paypay_requested_at:Date.now()
     });
+
     await recordFundingEvent(env,{
       provider:"paypay_manual",
-      kind:"JPY_DEPOSIT_REQUIRED",
-      amountJpy:requiredDepositJpy,
+      kind:"PAYPAY_MANUAL_ACTION_REQUIRED",
+      amountJpy:paypayReservationJpy,
       status:"REQUIRED",
-      metadata:{desired,jpyFree}
+      metadata:{
+        desiredPurchaseJpy:desired,
+        spendablePayPayJpy:spendablePayPay,
+        jpyDepositAvailable,
+        grossJpyDepositRequired,
+        expectedNetJpyCredit:netJpyCreditNeeded,
+        paypayJpyDepositFeeJpy:PAYPAY_JPY_DEPOSIT_FEE_JPY,
+        directLtcAvailable,
+        directLtcBudgetJpy:directLtcAvailable?desired:0,
+        binanceJpyFree:jpyFree
+      }
     });
+
+    const manualPaths:string[]=[];
+    if(jpyDepositAvailable){
+      manualPaths.push(
+        "PayPay -> Binance JPY instant funding: gross "+
+        grossJpyDepositRequired+
+        " JPY (official fee "+
+        PAYPAY_JPY_DEPOSIT_FEE_JPY+
+        " JPY, expected balance increase at least "+
+        netJpyCreditNeeded+
+        " JPY)"
+      );
+    }
+    if(directLtcAvailable){
+      manualPaths.push(
+        "PayPay -> direct LTC purchase in Binance official UI: "+
+        desired+
+        " JPY"
+      );
+    }
+
     await notifyDiscord(env,{
       title:"PayPay手動操作が必要",
-      message:"Binance Japanの公式UIで、PayPayからJPYへ即時入金するか、LTCがPayPay購入対象として表示される場合はLTCを直接購入してください。BOTはJPY増加または必要量までのLTC増加を検知して自動再開します。",
+      message:"Binance Japanの公式UIで、表示された利用可能な経路のどちらかを実行してください。BOTは実際のJPY/LTC残高増加を検知して自動再開します。",
       details:{
-        paypayReservationJpy:desired,
-        jpyDepositRequiredJpy:requiredDepositJpy,
-        directLtcBudgetJpy:desired,
-        purchaseCeilingJpy:desired,
-        requiredLtc
+        paypayReservationJpy,
+        desiredPurchaseJpy:desired,
+        jpyDeposit:jpyDepositAvailable?{
+          grossRequiredJpy:grossJpyDepositRequired,
+          expectedNetCreditJpy:netJpyCreditNeeded,
+          feeJpy:PAYPAY_JPY_DEPOSIT_FEE_JPY
+        }:null,
+        directLtc:directLtcAvailable?{
+          purchaseJpy:desired,
+          minimumJpy:PAYPAY_DIRECT_PURCHASE_MIN_JPY
+        }:null,
+        requiredLtc,
+        acceptedManualPaths:manualPaths
       }
     }).catch(()=>undefined);
+
     return {
       action:"MANUAL_PAYPAY_ACTION_REQUIRED",
       dryRun:settings.dry_run,
       details:{
-        paypayReservationJpy:desired,
-        jpyDepositRequiredJpy:requiredDepositJpy,
-        directLtcBudgetJpy:desired,
+        paypayReservationJpy,
+        desiredPurchaseJpy:desired,
+        jpyDeposit:jpyDepositAvailable?{
+          grossRequiredJpy:grossJpyDepositRequired,
+          expectedNetCreditJpy:netJpyCreditNeeded,
+          feeJpy:PAYPAY_JPY_DEPOSIT_FEE_JPY
+        }:null,
+        directLtc:directLtcAvailable?{
+          purchaseJpy:desired,
+          minimumJpy:PAYPAY_DIRECT_PURCHASE_MIN_JPY
+        }:null,
         requiredLtc,
-        allowance,
-        acceptedManualPaths:[
-          "PayPay -> Binance JPY instant funding",
-          "PayPay -> direct LTC purchase in Binance official UI when LTC is offered"
-        ]
+        purchaseAllowance,
+        acceptedManualPaths:manualPaths
       }
     };
   }
