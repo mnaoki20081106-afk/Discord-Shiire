@@ -16,6 +16,7 @@ import { runAllProducts, runProduct } from "./engine";
 import { handleXAdminApi, xAdminPage } from "./x-admin";
 import { runLtcAutoPurchase, runXProcurement } from "./x-engine";
 import { loadXSettings } from "./x-settings";
+import { isBinanceAutoFundingServerEnabled } from "./x-funding-mode";
 import { handleHstoraWebhook } from "./x-webhooks";
 import {
   handleShiireVendingInteraction,
@@ -405,6 +406,7 @@ export default {
           binanceTradeConfigured:Boolean(
             env.BINANCE_API_KEY&&env.BINANCE_API_SECRET
           ),
+          binanceAutoFundingServerEnabled:isBinanceAutoFundingServerEnabled(env),
           hstoraConfigured:Boolean(
             env.HSTORA_API_KEY&&env.HSTORA_API_SECRET
           ),
@@ -455,7 +457,7 @@ export default {
 
       try{
         const settings=await loadXSettings(env);
-        if(settings.auto_purchase_enabled){
+        if(settings.funding_mode==="binance_auto"&&settings.auto_purchase_enabled){
           try{
             await runLtcAutoPurchase(env);
           }catch(error){

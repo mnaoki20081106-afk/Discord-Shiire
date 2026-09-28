@@ -8,7 +8,7 @@
   "d1_schema_files": [],
   "setup": {
     "title": "Discord-Shiire / Xアカウント仕入れBOT",
-    "description": "Xaccount-Botと連携する仕入れ・在庫・自販機BOTをCloudflare Workersへ起動します。初期状態はDry Run / 自動仕入れOFFです。",
+    "description": "Xaccount-Botと連携する仕入れ・在庫・自販機BOTをCloudflare Workersへ起動します。初期状態はHStoraへのLTC手動補充 / Dry Run / 自動仕入れOFFです。",
     "fields": [
       {
         "key": "DISCORD_BOT_TOKEN",
@@ -99,17 +99,25 @@
         "pattern": "^https://[^\\s/]+/?$"
       },
       {
+        "key": "BINANCE_AUTO_FUNDING_ENABLED",
+        "label": "Binance自動LTC購入をサーバー側で許可",
+        "type": "boolean",
+        "required": false,
+        "help": "通常はOFF。Binanceを正規に利用できる状態になり、API設定を完了した後だけONにしてください。OFFでは管理画面設定に関係なく実LTC購入を拒否します。"
+      },
+      {
         "key": "BINANCE_API_KEY",
         "label": "Binance Japan API Key（取引）",
         "type": "secret",
-        "required": true,
-        "help": "読取＋現物取引に限定したキーを推奨。出金キーとは分離してください。"
+        "required": false,
+        "help": "将来Binance自動LTC購入を使う場合のみ設定。現在のHStora手動LTC補充モードでは不要です。"
       },
       {
         "key": "BINANCE_API_SECRET",
         "label": "Binance Japan API Secret（取引）",
         "type": "secret",
-        "required": true
+        "required": false,
+        "help": "将来Binance自動LTC購入を使う場合のみ設定。現在の手動補充モードでは不要です。"
       },
       {
         "key": "HSTORA_API_KEY",
@@ -226,8 +234,9 @@
       "notes": [
         "Privileged Gateway Intentsは現在のDiscord-Shiire実装では不要です。",
         "Binance出金キー・固定IP・Travel Rule設定は現在のHStora手動入金境界では不要です。",
-        "初期状態はDry Run=true / auto_purchase_enabled=false / auto_procurement_enabled=falseです。",
-        "在庫通知でロールをpingする場合は、通知対象ロールをDiscord側でメンション可能にしてください。BOTへMention Everyone権限を広く付ける構成にはしていません。"
+        "初期状態は funding_mode=manual_hstora / Dry Run=true / Binance自動購入OFF / 自動仕入れOFFです。",
+        "在庫通知でロールをpingする場合は、通知対象ロールをDiscord側でメンション可能にしてください。BOTへMention Everyone権限を広く付ける構成にはしていません。",
+        "BINANCE_AUTO_FUNDING_ENABLEDは通常OFFです。ONにしない限り、Binanceの実LTC購入はコード側で拒否されます。"
       ]
     }
   }

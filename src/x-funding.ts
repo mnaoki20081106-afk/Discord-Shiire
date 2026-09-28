@@ -7,6 +7,8 @@ import {
 import { auditX, fundingSpendSince, recordFundingEvent } from "./x-db";
 import { loadXSettings, saveXSettings } from "./x-settings";
 import { getBinanceBalance, getLtcJpyMarketStatus } from "./providers/binance";
+import { getHstoraBalance } from "./providers/hstora";
+import { fundingModeLabel, isBinanceAutoFundingServerEnabled } from "./x-funding-mode";
 
 const JST_OFFSET_MS=9*60*60*1000;
 
@@ -31,10 +33,67 @@ export function jstPeriodStarts(now=Date.now()){
 export async function getFundingPlan(env:Env,now=Date.now()){
   const settings=await loadXSettings(env);
   const periods=jstPeriodStarts(now);
-  const [today,week,month,market,ltc,jpy]=await Promise.all([
+  const [today,week,month]=await Promise.all([
     fundingSpendSince(env,periods.day),
     fundingSpendSince(env,periods.week),
-    fundingSpendSince(env,periods.month),
+    fundingSpendSince(env,periods.month)
+  ]);
+  const serverUnlocked=isBinanceAutoFundingServerEnabled(env);
+  const common={
+    mode:settings.funding_mode,
+    modeLabel:fundingModeLabel(settings.funding_mode),
+    binanceAutoFunding:{
+      serverUnlocked,
+      selected:settings.funding_mode==="binance_auto",
+      autoPurchaseEnabled:settings.auto_purchase_enabled
+    },
+    periods:{
+      todaySpentJpy:today,
+      weekSpentJpy:week,
+      monthSpentJpy:month,
+      dayRemainingJpy:Math.max(0,settings.daily_purchase_limit_jpy-today),
+      weekRemainingJpy:Math.max(0,settings.weekly_purchase_limit_jpy-week),
+      monthRemainingJpy:Math.max(0,settings.monthly_purchase_limit_jpy-month)
+    }
+  };
+
+  if(settings.funding_mode==="manual_hstora"){
+    const hstora=await getHstoraBalance(env);
+    return {
+      ...common,
+      manualHstoraTopUp:{
+        enabled:true,
+        walletUrl:"https://hstora.com/en/wallet",
+        balance:hstora,
+        resume:"automatic_after_hstora_balance_credit"
+      },
+      observedPayPay:null,
+      pendingManualFunding:null,
+      binance:null,
+      allowance:null,
+      paypayFunding:{
+        enabled:false,
+        blockedReason:"FUNDING_MODE_MANUAL_HSTORA"
+      }
+    };
+  }
+
+  if(!serverUnlocked){
+    return {
+      ...common,
+      manualHstoraTopUp:null,
+      observedPayPay:null,
+      pendingManualFunding:null,
+      binance:null,
+      allowance:null,
+      paypayFunding:{
+        enabled:false,
+        blockedReason:"BINANCE_AUTO_FUNDING_SERVER_LOCKED"
+      }
+    };
+  }
+
+  const [market,ltc,jpy]=await Promise.all([
     getLtcJpyMarketStatus(),
     getBinanceBalance(env,"LTC"),
     getBinanceBalance(env,"JPY")
@@ -109,14 +168,8 @@ export async function getFundingPlan(env:Env,now=Date.now()){
       ltcLocked:ltc.locked,
       market
     },
-    periods:{
-      todaySpentJpy:today,
-      weekSpentJpy:week,
-      monthSpentJpy:month,
-      dayRemainingJpy:Math.max(0,settings.daily_purchase_limit_jpy-today),
-      weekRemainingJpy:Math.max(0,settings.weekly_purchase_limit_jpy-week),
-      monthRemainingJpy:Math.max(0,settings.monthly_purchase_limit_jpy-month)
-    },
+    ...common,
+    manualHstoraTopUp:null,
     allowance,
     paypayFunding:{
       fresh:observedFresh,
@@ -129,6 +182,12 @@ export async function getFundingPlan(env:Env,now=Date.now()){
 
 export async function confirmPendingDirectLtcFunding(env:Env){
   const settings=await loadXSettings(env);
+  if(settings.funding_mode!=="binance_auto"){
+    throw new Error("BINANCE_FUNDING_MODE_INACTIVE");
+  }
+  if(!isBinanceAutoFundingServerEnabled(env)){
+    throw new Error("BINANCE_AUTO_FUNDING_SERVER_LOCKED");
+  }
   if(
     settings.pending_paypay_funding_jpy<=0||
     settings.pending_paypay_direct_ltc_budget_jpy<=0||

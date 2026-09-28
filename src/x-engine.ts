@@ -21,6 +21,7 @@ import {
   upsertSupplierProduct
 } from "./x-db";
 import { loadXSettings, saveXSettings } from "./x-settings";
+import { isBinanceAutoFundingServerEnabled } from "./x-funding-mode";
 import {
   calculateLtcPurchaseAllowance,
   calculateSpendablePayPayJpy,
@@ -453,6 +454,10 @@ async function checkHstoraBalanceGuard(env:Env,current:number){
         message:"HStora Main Wallet残高の増加を公式Balance APIで確認しました。",
         details:{increaseUsd:delta,currentBalanceUsd:current}
       }).catch(()=>undefined);
+      await setXSetting(env,"x_manual_hstora_topup_notice",{
+        neededUsd:0,
+        notifiedAt:0
+      });
       remainingAllowed=allowed;
     }else if(delta<0){
       const decrease=-delta;
@@ -713,6 +718,19 @@ export async function runLtcAutoPurchase(env:Env):Promise<XRunResult>{
   if(settings.emergency_stop){
     return {action:"EMERGENCY_STOP",dryRun:settings.dry_run};
   }
+  if(settings.funding_mode!=="binance_auto"){
+    return {
+      action:"MANUAL_HSTORA_LTC_FUNDING_MODE",
+      dryRun:settings.dry_run,
+      details:{fundingMode:settings.funding_mode}
+    };
+  }
+  if(!isBinanceAutoFundingServerEnabled(env)){
+    return {
+      action:"BINANCE_AUTO_FUNDING_SERVER_LOCKED",
+      dryRun:settings.dry_run
+    };
+  }
   if(!settings.auto_purchase_enabled){
     return {action:"AUTO_LTC_PURCHASE_DISABLED",dryRun:settings.dry_run};
   }
@@ -850,6 +868,52 @@ async function handleHstoraFundingNeed(
   neededUsd:number
 ):Promise<XRunResult>{
   let settings=await loadXSettings(env);
+
+  if(settings.funding_mode==="manual_hstora"){
+    const now=Date.now();
+    const previous=await getXSetting<{neededUsd:number;notifiedAt:number}>(
+      env,
+      "x_manual_hstora_topup_notice"
+    );
+    const shouldNotify=
+      !previous||
+      now-Number(previous.notifiedAt??0)>=30*60_000||
+      Math.abs(Number(previous.neededUsd??0)-neededUsd)>=0.01;
+    if(shouldNotify){
+      await notifyDiscord(env,{
+        title:"HStora LTC補充が必要",
+        message:"HStora Main WalletへLTCで手動補充してください。残高反映後は次回Cronから仕入れ・納品を自動再開します。",
+        details:{
+          neededUsd,
+          fundingMode:"manual_hstora",
+          walletUrl:"https://hstora.com/en/wallet"
+        }
+      }).catch(()=>undefined);
+      await setXSetting(env,"x_manual_hstora_topup_notice",{
+        neededUsd,
+        notifiedAt:now
+      });
+    }
+    return {
+      action:"MANUAL_HSTORA_LTC_TOPUP_REQUIRED",
+      dryRun:settings.dry_run,
+      details:{
+        neededUsd,
+        fundingMode:"manual_hstora",
+        resume:"automatic_after_hstora_balance_credit",
+        walletUrl:"https://hstora.com/en/wallet"
+      }
+    };
+  }
+
+  if(!isBinanceAutoFundingServerEnabled(env)){
+    return {
+      action:"BINANCE_AUTO_FUNDING_SERVER_LOCKED",
+      dryRun:settings.dry_run,
+      details:{fundingMode:settings.funding_mode}
+    };
+  }
+
   if(settings.usd_jpy_rate<=0||Date.now()-settings.usd_jpy_rate_updated_at>settings.max_fx_age_ms){
     return {
       action:"MANUAL_FX_RATE_REQUIRED",
@@ -1237,18 +1301,25 @@ export async function runXProcurement(env:Env):Promise<XRunResult>{
   const settings=await loadXSettings(env);
   if(settings.emergency_stop) return {action:"EMERGENCY_STOP",dryRun:settings.dry_run};
 
-  const breakers=await Promise.all([
-    circuitState(env,"hstora"),
-    circuitState(env,"binance"),
-    circuitState(env,"binance_purchase"),
-    circuitState(env,"paypay_manual"),
-    circuitState(env,"fx_rate"),
-    circuitState(env,"product_price"),
-    circuitState(env,"ltc_price"),
-    circuitState(env,"unexpected_balance"),
-    circuitState(env,"delivery_integrity"),
-    circuitState(env,"hstora_order_alert")
-  ]);
+  const breakerKeys=[
+    "hstora",
+    "product_price",
+    "unexpected_balance",
+    "delivery_integrity",
+    "hstora_order_alert"
+  ];
+  if(settings.funding_mode==="binance_auto"){
+    breakerKeys.push(
+      "binance",
+      "binance_purchase",
+      "paypay_manual",
+      "fx_rate",
+      "ltc_price"
+    );
+  }
+  const breakers=await Promise.all(
+    breakerKeys.map(key=>circuitState(env,key))
+  );
   if(breakers.some(value=>String(value?.state??"")==="OPEN")){
     return {action:"CIRCUIT_BREAKER_OPEN",dryRun:settings.dry_run};
   }

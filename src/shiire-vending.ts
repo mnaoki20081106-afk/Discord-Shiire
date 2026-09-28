@@ -1,6 +1,7 @@
 import type { Env } from "./types";
 import { hmacHex, sha256Hex } from "./crypto";
 import { loadXSettings, saveXSettings } from "./x-settings";
+import { fundingModeLabel, isBinanceAutoFundingServerEnabled } from "./x-funding-mode";
 import {
   confirmPendingDirectLtcFunding,
   getFundingPlan,
@@ -108,6 +109,7 @@ function safeProcurementSettings(settings:Awaited<ReturnType<typeof loadXSetting
     emergency_stop:settings.emergency_stop,
     auto_purchase_enabled:settings.auto_purchase_enabled,
     auto_procurement_enabled:settings.auto_procurement_enabled,
+    funding_mode:settings.funding_mode,
     reserve_jpy:settings.reserve_jpy,
     max_purchase_jpy:settings.max_purchase_jpy,
     daily_purchase_limit_jpy:settings.daily_purchase_limit_jpy,
@@ -140,7 +142,11 @@ async function operationsOverview(env:Env){
   const settings=await loadXSettings(env);
   const dayStart=jstPeriodStarts(now).day;
   const hotWallet=new DisabledHotWalletProvider();
+  const binanceActive=
+    settings.funding_mode==="binance_auto"&&
+    isBinanceAutoFundingServerEnabled(env);
 
+  const inactiveBinance={ok:false as const,error:"BINANCE_FUNDING_INACTIVE"};
   const [
     funding,
     hstora,
@@ -158,7 +164,9 @@ async function operationsOverview(env:Env){
   ]=await Promise.all([
     operationSettled(()=>getFundingPlan(env,now)),
     operationSettled(()=>getHstoraBalance(env)),
-    operationSettled(()=>getBinanceWithdrawalSafetyStatus(env)),
+    binanceActive
+      ?operationSettled(()=>getBinanceWithdrawalSafetyStatus(env))
+      :Promise.resolve(inactiveBinance),
     hotWallet.health(),
     hotWallet.getBalance("LTC"),
     inventorySummary(env),
@@ -171,21 +179,11 @@ async function operationsOverview(env:Env){
     listPurchaseOrders(env,12)
   ]);
 
-  // getFundingPlan already fetches LTC/JPY plus Binance LTC/JPY balances.
-  // Reuse that snapshot instead of making the dashboard call the same Binance
-  // endpoints a second time. If the funding snapshot fails, fetch these
-  // independently so the UI can show which provider call is actually broken.
-  let market:
-    |{ok:true;data:any}
-    |{ok:false;error:string};
-  let ltc:
-    |{ok:true;data:any}
-    |{ok:false;error:string};
-  let jpy:
-    |{ok:true;data:any}
-    |{ok:false;error:string};
+  let market:{ok:true;data:any}|{ok:false;error:string}=inactiveBinance;
+  let ltc:{ok:true;data:any}|{ok:false;error:string}=inactiveBinance;
+  let jpy:{ok:true;data:any}|{ok:false;error:string}=inactiveBinance;
 
-  if(funding.ok){
+  if(binanceActive&&funding.ok&&funding.data.binance){
     market={ok:true,data:funding.data.binance.market};
     ltc={
       ok:true,
@@ -201,7 +199,7 @@ async function operationsOverview(env:Env){
         locked:0
       }
     };
-  }else{
+  }else if(binanceActive){
     [market,ltc,jpy]=await Promise.all([
       operationSettled(()=>getLtcJpyMarketStatus()),
       operationSettled(()=>getBinanceBalance(env,"LTC")),
@@ -217,11 +215,7 @@ async function operationsOverview(env:Env){
   const providerIssues:Array<{provider:string;error:string}>=[];
   for(const [provider,result] of [
     ["Funding",funding],
-    ["HStora",hstora],
-    ["LTC/JPY",market],
-    ["Binance LTC",ltc],
-    ["Binance JPY",jpy],
-    ["Binance Withdrawal",withdrawalSafety]
+    ["HStora",hstora]
   ] as const){
     if(!result.ok){
       providerIssues.push({
@@ -230,12 +224,30 @@ async function operationsOverview(env:Env){
       });
     }
   }
+  if(binanceActive){
+    for(const [provider,result] of [
+      ["LTC/JPY",market],
+      ["Binance LTC",ltc],
+      ["Binance JPY",jpy],
+      ["Binance Withdrawal",withdrawalSafety]
+    ] as const){
+      if(!result.ok){
+        providerIssues.push({
+          provider,
+          error:String(result.error).slice(0,300)
+        });
+      }
+    }
+  }
 
   return {
     generatedAt:now,
     safety:{
       dryRun:settings.dry_run,
       emergencyStop:settings.emergency_stop,
+      fundingMode:settings.funding_mode,
+      fundingModeLabel:fundingModeLabel(settings.funding_mode),
+      binanceAutoFundingServerEnabled:isBinanceAutoFundingServerEnabled(env),
       autoPurchaseEnabled:settings.auto_purchase_enabled,
       autoProcurementEnabled:settings.auto_procurement_enabled
     },
@@ -277,6 +289,7 @@ async function operationsOverview(env:Env){
     latestActivity,
     recentOrders,
     integrations:{
+      binanceAutoFundingServerEnabled:isBinanceAutoFundingServerEnabled(env),
       binanceTradeConfigured:Boolean(env.BINANCE_API_KEY&&env.BINANCE_API_SECRET),
       binanceWithdrawConfigured:Boolean(
         env.BINANCE_WITHDRAW_API_KEY&&env.BINANCE_WITHDRAW_API_SECRET
@@ -1146,7 +1159,9 @@ export async function handleShiireMainBridge(
       const code=error instanceof Error?error.message:String(error);
       const status=
         code==="NO_PENDING_DIRECT_LTC_CONFIRMATION"||
-        code==="LTC_BALANCE_INCREASE_NOT_DETECTED"
+        code==="LTC_BALANCE_INCREASE_NOT_DETECTED"||
+        code==="BINANCE_FUNDING_MODE_INACTIVE"||
+        code==="BINANCE_AUTO_FUNDING_SERVER_LOCKED"
           ?409
           :500;
       return responseJson({error:code},status);
@@ -1206,6 +1221,44 @@ export async function handleShiireMainBridge(
       recentCryptoTransactions(env,60)
     ]);
     return responseJson({logs,breakers,fundingEvents,cryptoTransactions});
+  }
+
+  if(suffix==="/funding/mode"&&request.method==="POST"){
+    const input=await parseBridgeJson(rawBody);
+    const mode=String(input.mode??"");
+    if(mode!=="manual_hstora"&&mode!=="binance_auto"){
+      throw new ShiireVendingError(400,"INVALID_FUNDING_MODE");
+    }
+    if(mode==="binance_auto"&&!isBinanceAutoFundingServerEnabled(env)){
+      throw new ShiireVendingError(409,"BINANCE_AUTO_FUNDING_SERVER_LOCKED");
+    }
+    const settings=await saveXSettings(env,mode==="manual_hstora"?{
+      funding_mode:"manual_hstora",
+      auto_purchase_enabled:false,
+      pending_paypay_funding_jpy:0,
+      pending_paypay_jpy_deposit_required_jpy:0,
+      pending_paypay_jpy_credit_required_jpy:0,
+      pending_paypay_direct_ltc_budget_jpy:0,
+      pending_paypay_path_amounts_captured:false,
+      pending_paypay_binance_jpy_baseline:0,
+      pending_paypay_binance_ltc_baseline:0,
+      pending_paypay_required_ltc:0,
+      pending_paypay_ltc_baseline_captured:false,
+      pending_paypay_requested_at:0
+    }:{
+      funding_mode:"binance_auto"
+    });
+    await auditX(env,{
+      kind:"FUNDING_MODE_CHANGED",
+      message:"Funding mode changed from the authenticated main dashboard.",
+      details:{mode:settings.funding_mode}
+    });
+    return responseJson({
+      ok:true,
+      funding_mode:settings.funding_mode,
+      fundingModeLabel:fundingModeLabel(settings.funding_mode),
+      binanceAutoFundingServerEnabled:isBinanceAutoFundingServerEnabled(env)
+    });
   }
 
   if(suffix==="/funding-settings"){

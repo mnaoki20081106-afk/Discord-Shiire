@@ -8,7 +8,9 @@ export interface Env {
   DISCORD_PUBLIC_KEY?: string;
   DISCORD_BOT_TOKEN?: string;
 
-  // X account procurement integrations. All of these are Worker Secrets.
+  // X account procurement integrations. All of these are Worker Secrets unless noted.
+  // Hard server-side gate for live Binance LTC purchases.
+  BINANCE_AUTO_FUNDING_ENABLED?: string;
   BINANCE_API_KEY?: string;
   BINANCE_API_SECRET?: string;
   BINANCE_WITHDRAW_API_KEY?: string;
