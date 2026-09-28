@@ -71,6 +71,9 @@ export async function getFundingPlan(env:Env,now=Date.now()){
     pendingManualFunding:settings.pending_paypay_funding_jpy>0?{
       amountJpy:settings.pending_paypay_funding_jpy,
       binanceJpyBaseline:settings.pending_paypay_binance_jpy_baseline,
+      binanceLtcBaseline:settings.pending_paypay_binance_ltc_baseline,
+      requiredLtcAtRequest:settings.pending_paypay_required_ltc,
+      ltcBaselineCaptured:settings.pending_paypay_ltc_baseline_captured,
       requestedAt:settings.pending_paypay_requested_at
     }:null,
     binance:{
