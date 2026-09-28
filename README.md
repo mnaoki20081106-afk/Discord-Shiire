@@ -197,7 +197,7 @@ D1 binding:
 DB
 ```
 
-Main Bot URLは `wrangler.jsonc` の `MAIN_BOT_BASE_URL` で設定します。
+`MAIN_BOT_BASE_URL` はXアカウント以外の従来型商品をMain Bot有限在庫へ自動納品する場合だけ設定します。Factory利用時はフォームの「旧Main Bot Worker URL（汎用仕入れ用）」へ実際のWorker HTTPS originを入力してください。使用しない場合は未設定で構いません。
 
 
 ## X account procurement
@@ -255,9 +255,10 @@ seller_quality_mode = trial_only
 Turning Dry Run off through the admin API requires an explicit live-mode confirmation.
 Emergency Stop disables both automatic purchase and automatic procurement.
 
-Funding limits are calculated fail-closed. The actual JPY purchase ceiling is the minimum of:
+Funding limits are calculated fail-closed, but existing Binance JPY and new PayPay outflow are treated separately.
 
-- observed PayPay balance minus `reserve_jpy`
+The LTC purchase ceiling is the minimum of:
+
 - `max_purchase_jpy`
 - remaining daily limit
 - remaining weekly limit
@@ -265,7 +266,21 @@ Funding limits are calculated fail-closed. The actual JPY purchase ceiling is th
 - remaining LTC target balance capacity
 - remaining LTC maximum balance capacity
 
-A stale PayPay observation makes the allowable automated purchase amount zero.
+If the existing Binance JPY balance is sufficient, the bot can use that balance without consuming the configured PayPay reserve.
+
+Only when additional PayPay funding is required does the bot calculate spendable PayPay as:
+
+- observed PayPay balance
+- minus `reserve_jpy`
+
+A stale PayPay observation blocks only a new PayPay funding step; it does not block use of already-funded Binance JPY.
+
+For the current Binance Japan PayPay flow, the code distinguishes the two manual paths:
+
+- PayPay -> Binance JPY instant deposit: minimum gross deposit 1,000 JPY, 110 JPY fee deducted from the specified amount
+- PayPay -> direct crypto purchase: minimum purchase 1,000 JPY; the direct purchase path does not add the JPY-deposit fee
+
+The pending state persists both the gross PayPay deposit amount and the expected net Binance JPY increase so the 110 JPY fee cannot cause a false wait or false completion.
 
 ### PayPay boundary
 
@@ -281,8 +296,6 @@ PayPay funding is a manual boundary:
 4. Discord-Shiire checks official Binance account balances.
 5. A sufficient JPY increase causes the bot to continue with the LTC/JPY Spot purchase path.
 6. A sufficient LTC increase means the manual direct-LTC purchase already satisfied the requirement, so the bot does not submit a duplicate LTC order.
-
-The pending request is persisted so the one-minute Cron does not repeatedly create the same funding request.
 
 The pending request is persisted so the one-minute Cron does not repeatedly create the same funding request.
 
@@ -576,7 +589,7 @@ Existing purchased accounts are backfilled into the new procurement classes when
 2. Xaccount-Bot Worker に `SHIIRE_API_BASE_URL=<Discord-Shiireの実URL>` を設定する。
 3. Discord-Shiire Worker に `XACCOUNT_BOT_BASE_URL=<Xaccount-Botの実URL>` を設定する。
 4. 両Workerに同一の32文字以上の `SHIIRE_BRIDGE_SECRET` を Secret として設定する。
-5. Discord-Shiire Worker に `ADMIN_TOKEN`, `DISCORD_APPLICATION_ID`, `DISCORD_PUBLIC_KEY`, `DISCORD_BOT_TOKEN`, `BINANCE_API_KEY`, `BINANCE_API_SECRET`, `HSTORA_API_KEY`, `HSTORA_API_SECRET`, `CREDENTIALS_ENCRYPTION_KEY` を設定する。
+5. Factoryフォームから Discord-Shiire Worker に `DISCORD_APPLICATION_ID`, `DISCORD_PUBLIC_KEY`, `DISCORD_BOT_TOKEN`, `BINANCE_API_KEY`, `BINANCE_API_SECRET`, `HSTORA_API_KEY`, `HSTORA_API_SECRET` を設定する。`ADMIN_TOKEN` と `CREDENTIALS_ENCRYPTION_KEY` はFactoryが自動生成する。従来型の汎用仕入れも使う場合だけ `MAIN_BOT_BASE_URL` を追加する。
 6. Discord Developer Portal の Interactions Endpoint URL を `https://<Discord-Shiire Worker>/interactions` に設定する。
 7. HStora Webhook を使う場合だけ、Webhook URLを `https://<Discord-Shiire Worker>/webhooks/hstora` に設定し、同じ署名Secretを `HSTORA_WEBHOOK_SECRET` として保存する。
 8. Xaccount-Bot の GitHub Repository Variable `VITE_API_BASE_URL` を実際の Xaccount-Bot Worker origin に設定する。
