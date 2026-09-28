@@ -43,6 +43,8 @@ import {
   createHstoraOrder,
   lookupHstoraOrder,
   getHstoraProduct,
+  HstoraApiError,
+  type HstoraOrder,
   type HstoraProduct,
   type HstoraCatalogItem
 } from "./providers/hstora";
@@ -50,6 +52,7 @@ import {
   detectSearchVisibility,
   isXAccountProduct,
   qualifyHstoraProduct,
+  tierUnitPrice,
   type ProcurementClass
 } from "./x-qualification";
 import { notifyDiscord } from "./x-alerts";
@@ -85,71 +88,213 @@ function jstPeriodStarts(now=Date.now()){
 
 export async function reconcilePendingXOrders(env:Env){
   const pending=await pendingPurchaseOrders(env);
+
   for(const row of pending as any[]){
+    let order:HstoraOrder|null=null;
+    let lookupError:unknown=null;
+
     try{
-      const order=await lookupHstoraOrder(env,String(row.external_order_id));
-      const status=String(order.status??"").toUpperCase();
-      const hasDelivery=Boolean(order.delivery?.available&&Array.isArray(order.delivery?.items));
-      if(hasDelivery){
-        const added=await storeDeliveredAccounts(env,{
-          purchaseOrderId:String(row.id),
-          supplier:"hstora",
-          supplierProductId:String(row.supplier_product_id),
-          purchasePrice:Number(row.unit_price),
-          procurementClass:
-            row.procurement_class==="TOP_SEARCH"||
-            row.procurement_class==="NO_SHADOWBAN"
-              ?row.procurement_class
-              :null,
-          orderResponse:order
-        });
-        if(added>0){
-          await notifyShiireVendingStockArrival(
+      order=await lookupHstoraOrder(env,String(row.external_order_id));
+    }catch(error){
+      lookupError=error;
+    }
+
+    if(!order&&String(row.status??"").toUpperCase()==="CREATED"){
+      // The Worker may have crashed after persisting the local intent but
+      // before or during POST /orders. HStora explicitly requires retrying the
+      // SAME intended purchase with the same external_order_id and
+      // Idempotency-Key. Never mint a new purchase identity here.
+      try{
+        const product=await getHstoraProduct(
+          env,
+          Number(row.supplier_product_id)
+        );
+        const currentUnit=tierUnitPrice(product,Number(row.quantity));
+        const expectedUnit=Number(row.unit_price);
+        const sameCurrency=
+          String(product.currency??"").toUpperCase()===
+          String(row.currency??"").toUpperCase();
+        const samePrice=
+          Number.isFinite(currentUnit)&&
+          Number.isFinite(expectedUnit)&&
+          Math.abs(currentUnit-expectedUnit)<=1e-9;
+
+        if(!sameCurrency||!samePrice){
+          await setCircuitBreaker(
             env,
-            String(row.supplier_product_id),
-            added
-          ).catch(()=>undefined);
-        }
-        const storedTotal=await purchasedAccountCountForOrder(env,String(row.id));
-        if(storedTotal!==Number(row.quantity)){
-          await updatePurchaseOrderRecord(env,String(row.id),{
-            status:"DELIVERY_INTEGRITY_FAILED",
-            supplierOrderId:String(order.id),
-            response:order,
-            errorCode:"DELIVERY_COUNT_MISMATCH"
-          });
-          await setCircuitBreaker(env,"delivery_integrity","OPEN","DELIVERY_COUNT_MISMATCH");
-          await notifyDiscord(env,{
-            title:"不良商品",
-            message:"再照合したHStora注文の納品件数が注文数と一致しません。",
+            "hstora_order_alert",
+            "OPEN",
+            "CREATED_INTENT_PRICE_CHANGED_BEFORE_SAFE_RETRY"
+          );
+          await auditX(env,{
             level:"error",
-            details:{purchaseOrderId:row.id,ordered:Number(row.quantity),insertedNow:added,storedTotal}
-          }).catch(()=>undefined);
+            kind:"HSTORA_CREATED_INTENT_RETRY_BLOCKED",
+            message:"A CREATED HStora intent could not be safely retried because the product currency or effective unit price changed.",
+            details:{
+              purchaseOrderId:row.id,
+              supplierProductId:row.supplier_product_id,
+              expectedCurrency:row.currency,
+              currentCurrency:product.currency,
+              expectedUnitPrice:expectedUnit,
+              currentUnitPrice:currentUnit,
+              lookupError:lookupError instanceof Error
+                ?lookupError.message
+                :String(lookupError??"")
+            }
+          });
           continue;
         }
-        await updatePurchaseOrderRecord(env,String(row.id),{
-          status:status||"DELIVERED",
-          supplierOrderId:String(order.id),
-          response:order
+
+        order=await createHstoraOrder(env,{
+          productId:Number(row.supplier_product_id),
+          quantity:Number(row.quantity),
+          externalOrderId:String(row.external_order_id),
+          idempotencyKey:String(row.idempotency_key)
         });
         await auditX(env,{
-          kind:"HSTORA_ORDER_RECONCILED",
-          message:"HStora order delivery reconciled",
-          details:{purchaseOrderId:row.id,supplierOrderId:order.id,insertedNow:added,storedTotal,status}
+          kind:"HSTORA_CREATED_INTENT_SAFE_RETRY",
+          message:"Recovered a persisted HStora purchase intent by reusing its original purchase identifiers.",
+          details:{
+            purchaseOrderId:row.id,
+            externalOrderId:row.external_order_id,
+            supplierOrderId:order.id,
+            status:order.status
+          }
         });
-      }else if(status){
-        await updatePurchaseOrderRecord(env,String(row.id),{
-          status,
-          supplierOrderId:String(order.id),
-          response:order
-        });
+      }catch(error){
+        if(error instanceof HstoraApiError&&!error.retryable){
+          await updatePurchaseOrderRecord(env,String(row.id),{
+            status:"FAILED",
+            errorCode:error.code
+          });
+          await setCircuitBreaker(
+            env,
+            "hstora_order_alert",
+            "OPEN",
+            error.code+":"+error.message.slice(0,160)
+          );
+          await auditX(env,{
+            level:"error",
+            kind:"HSTORA_CREATED_INTENT_REJECTED",
+            message:"HStora explicitly rejected the safe retry of a persisted CREATED purchase intent.",
+            details:{
+              purchaseOrderId:row.id,
+              status:error.status,
+              code:error.code
+            }
+          });
+        }else{
+          await auditX(env,{
+            level:"warn",
+            kind:"HSTORA_CREATED_INTENT_RETRY_PENDING",
+            message:error instanceof Error?error.message:String(error),
+            details:{purchaseOrderId:row.id}
+          });
+        }
+        continue;
       }
-    }catch(error){
+    }
+
+    if(!order){
       await auditX(env,{
         level:"warn",
         kind:"HSTORA_RECONCILE_FAILED",
-        message:error instanceof Error?error.message:String(error),
+        message:lookupError instanceof Error
+          ?lookupError.message
+          :String(lookupError??"HStora order lookup failed"),
         details:{purchaseOrderId:row.id}
+      });
+      continue;
+    }
+
+    const status=String(order.status??"").toUpperCase();
+
+    if(
+      String(row.status??"").toUpperCase()==="CREATED"&&
+      ["CREATED","PROCESSING","DELIVERED","COMPLETED"].includes(status)
+    ){
+      // A crash could have happened before the original run registered the
+      // expected wallet decrease. Register it once while the local row is
+      // still CREATED; after this reconciliation the row status changes.
+      await allowExpectedHstoraDecrease(env,Number(row.total_amount));
+    }
+
+    const hasDelivery=Boolean(
+      order.delivery?.available&&
+      Array.isArray(order.delivery?.items)
+    );
+
+    if(hasDelivery){
+      const added=await storeDeliveredAccounts(env,{
+        purchaseOrderId:String(row.id),
+        supplier:"hstora",
+        supplierProductId:String(row.supplier_product_id),
+        purchasePrice:Number(row.unit_price),
+        procurementClass:
+          row.procurement_class==="TOP_SEARCH"||
+          row.procurement_class==="NO_SHADOWBAN"
+            ?row.procurement_class
+            :null,
+        orderResponse:order
+      });
+      if(added>0){
+        await notifyShiireVendingStockArrival(
+          env,
+          String(row.supplier_product_id),
+          added
+        ).catch(()=>undefined);
+      }
+      const storedTotal=await purchasedAccountCountForOrder(
+        env,
+        String(row.id)
+      );
+      if(storedTotal!==Number(row.quantity)){
+        await updatePurchaseOrderRecord(env,String(row.id),{
+          status:"DELIVERY_INTEGRITY_FAILED",
+          supplierOrderId:String(order.id),
+          response:order,
+          errorCode:"DELIVERY_COUNT_MISMATCH"
+        });
+        await setCircuitBreaker(
+          env,
+          "delivery_integrity",
+          "OPEN",
+          "DELIVERY_COUNT_MISMATCH"
+        );
+        await notifyDiscord(env,{
+          title:"不良商品",
+          message:"再照合したHStora注文の納品件数が注文数と一致しません。",
+          level:"error",
+          details:{
+            purchaseOrderId:row.id,
+            ordered:Number(row.quantity),
+            insertedNow:added,
+            storedTotal
+          }
+        }).catch(()=>undefined);
+        continue;
+      }
+      await updatePurchaseOrderRecord(env,String(row.id),{
+        status:status||"DELIVERED",
+        supplierOrderId:String(order.id),
+        response:order
+      });
+      await auditX(env,{
+        kind:"HSTORA_ORDER_RECONCILED",
+        message:"HStora order delivery reconciled",
+        details:{
+          purchaseOrderId:row.id,
+          supplierOrderId:order.id,
+          insertedNow:added,
+          storedTotal,
+          status
+        }
+      });
+    }else if(status){
+      await updatePurchaseOrderRecord(env,String(row.id),{
+        status,
+        supplierOrderId:String(order.id),
+        response:order
       });
     }
   }
