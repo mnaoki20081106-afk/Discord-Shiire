@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { marketNotionalBounds } from "../src/providers/binance.ts";
+import { marketNotionalBounds } from "../src/providers/binance-market.ts";
 
 test("uses the strictest market minimum across Binance notional filters",()=>{
   assert.deepEqual(marketNotionalBounds([
