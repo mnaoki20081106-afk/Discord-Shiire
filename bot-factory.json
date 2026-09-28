@@ -192,9 +192,9 @@
       "checks": [
         {
           "id": "interaction-endpoint",
-          "label": "Interactions Endpoint URLを設定",
-          "required": true,
-          "description": "初回デプロイ後のWorker URL + /interactions をDiscord Developer Portal > General Informationへ設定します。",
+          "label": "初回デプロイ後: Interactions Endpoint URLを設定",
+          "required": false,
+          "description": "Factoryの初回デプロイ後に発行されたDiscord-Shiire Worker URL + /interactions をDiscord Developer Portal > General Informationへ設定します。",
           "path": "Discord Developer Portal > General Information > Interactions Endpoint URL"
         }
       ],
