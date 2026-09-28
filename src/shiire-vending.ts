@@ -138,9 +138,6 @@ async function operationsOverview(env:Env){
   const [
     funding,
     hstora,
-    market,
-    ltc,
-    jpy,
     withdrawalSafety,
     hotWalletHealth,
     hotWalletBalance,
@@ -155,9 +152,6 @@ async function operationsOverview(env:Env){
   ]=await Promise.all([
     operationSettled(()=>getFundingPlan(env,now)),
     operationSettled(()=>getHstoraBalance(env)),
-    operationSettled(()=>getLtcJpyMarketStatus()),
-    operationSettled(()=>getBinanceBalance(env,"LTC")),
-    operationSettled(()=>getBinanceBalance(env,"JPY")),
     operationSettled(()=>getBinanceWithdrawalSafetyStatus(env)),
     hotWallet.health(),
     hotWallet.getBalance("LTC"),
@@ -171,10 +165,65 @@ async function operationsOverview(env:Env){
     listPurchaseOrders(env,12)
   ]);
 
+  // getFundingPlan already fetches LTC/JPY plus Binance LTC/JPY balances.
+  // Reuse that snapshot instead of making the dashboard call the same Binance
+  // endpoints a second time. If the funding snapshot fails, fetch these
+  // independently so the UI can show which provider call is actually broken.
+  let market:
+    |{ok:true;data:any}
+    |{ok:false;error:string};
+  let ltc:
+    |{ok:true;data:any}
+    |{ok:false;error:string};
+  let jpy:
+    |{ok:true;data:any}
+    |{ok:false;error:string};
+
+  if(funding.ok){
+    market={ok:true,data:funding.data.binance.market};
+    ltc={
+      ok:true,
+      data:{
+        free:funding.data.binance.ltcFree,
+        locked:funding.data.binance.ltcLocked
+      }
+    };
+    jpy={
+      ok:true,
+      data:{
+        free:funding.data.binance.jpyFree,
+        locked:0
+      }
+    };
+  }else{
+    [market,ltc,jpy]=await Promise.all([
+      operationSettled(()=>getLtcJpyMarketStatus()),
+      operationSettled(()=>getBinanceBalance(env,"LTC")),
+      operationSettled(()=>getBinanceBalance(env,"JPY"))
+    ]);
+  }
+
   const recentErrors=(logs as any[])
     .filter(row=>String(row.level)==="error")
     .slice(0,8);
   const latestActivity=(logs as any[])[0]??null;
+
+  const providerIssues:Array<{provider:string;error:string}>=[];
+  for(const [provider,result] of [
+    ["Funding",funding],
+    ["HStora",hstora],
+    ["LTC/JPY",market],
+    ["Binance LTC",ltc],
+    ["Binance JPY",jpy],
+    ["Binance Withdrawal",withdrawalSafety]
+  ] as const){
+    if(!result.ok){
+      providerIssues.push({
+        provider,
+        error:String(result.error).slice(0,300)
+      });
+    }
+  }
 
   return {
     generatedAt:now,
@@ -197,6 +246,7 @@ async function operationsOverview(env:Env){
       }
     },
     withdrawalSafety,
+    providerIssues,
     inventory,
     inventoryByClass,
     today:{
