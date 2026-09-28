@@ -70,6 +70,13 @@ export async function getFundingPlan(env:Env,now=Date.now()){
     },
     pendingManualFunding:settings.pending_paypay_funding_jpy>0?{
       amountJpy:settings.pending_paypay_funding_jpy,
+      jpyDepositRequiredJpy:settings.pending_paypay_path_amounts_captured
+        ?settings.pending_paypay_jpy_deposit_required_jpy
+        :settings.pending_paypay_funding_jpy,
+      directLtcBudgetJpy:settings.pending_paypay_path_amounts_captured
+        ?settings.pending_paypay_direct_ltc_budget_jpy
+        :0,
+      pathAmountsCaptured:settings.pending_paypay_path_amounts_captured,
       binanceJpyBaseline:settings.pending_paypay_binance_jpy_baseline,
       binanceLtcBaseline:settings.pending_paypay_binance_ltc_baseline,
       requiredLtcAtRequest:settings.pending_paypay_required_ltc,
