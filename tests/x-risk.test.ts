@@ -78,9 +78,11 @@ test("detects direct LTC purchase after a pending PayPay action",()=>{
   assert.equal(detectManualPayPayCompletion({
     pendingJpy:7_000,
     binanceJpyBaseline:1_000,
+    binanceLtcBaseline:0.1,
+    ltcBaselineCaptured:true,
     currentBinanceJpy:1_000,
     currentBinanceLtc:0.5,
-    requiredLtc:0.4
+    requiredLtcAtRequest:0.4
   }),"LTC_PURCHASED");
 });
 
@@ -88,9 +90,11 @@ test("detects PayPay-funded Binance JPY increase",()=>{
   assert.equal(detectManualPayPayCompletion({
     pendingJpy:7_000,
     binanceJpyBaseline:1_000,
+    binanceLtcBaseline:0.1,
+    ltcBaselineCaptured:true,
     currentBinanceJpy:8_000,
     currentBinanceLtc:0.1,
-    requiredLtc:0.4
+    requiredLtcAtRequest:0.4
   }),"JPY_FUNDED");
 });
 
@@ -98,8 +102,35 @@ test("does not resume before either manual completion condition is met",()=>{
   assert.equal(detectManualPayPayCompletion({
     pendingJpy:7_000,
     binanceJpyBaseline:1_000,
+    binanceLtcBaseline:0.1,
+    ltcBaselineCaptured:true,
     currentBinanceJpy:7_999,
     currentBinanceLtc:0.399,
-    requiredLtc:0.4
+    requiredLtcAtRequest:0.4
+  }),"NONE");
+});
+
+
+test("does not false-detect LTC purchase when requirement falls below the old balance",()=>{
+  assert.equal(detectManualPayPayCompletion({
+    pendingJpy:7_000,
+    binanceJpyBaseline:1_000,
+    binanceLtcBaseline:0.5,
+    ltcBaselineCaptured:true,
+    currentBinanceJpy:1_000,
+    currentBinanceLtc:0.5,
+    requiredLtcAtRequest:0.6
+  }),"NONE");
+});
+
+test("legacy pending request without captured LTC baseline fails closed",()=>{
+  assert.equal(detectManualPayPayCompletion({
+    pendingJpy:7_000,
+    binanceJpyBaseline:1_000,
+    binanceLtcBaseline:0,
+    ltcBaselineCaptured:false,
+    currentBinanceJpy:1_000,
+    currentBinanceLtc:1,
+    requiredLtcAtRequest:0
   }),"NONE");
 });
