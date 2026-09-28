@@ -447,12 +447,26 @@ export default {
 
   async scheduled(_controller:ScheduledController,env:Env,ctx:ExecutionContext){
     ctx.waitUntil((async()=>{
-      await runAllProducts(env);
-      const settings=await loadXSettings(env);
-      if(settings.auto_procurement_enabled){
-        await runXProcurement(env);
+      try{
+        await runAllProducts(env);
+      }catch(error){
+        console.error("scheduled generic procurement failed",error);
       }
-      await shiireVendingSweep(env);
+
+      try{
+        const settings=await loadXSettings(env);
+        if(settings.auto_procurement_enabled){
+          await runXProcurement(env);
+        }
+      }catch(error){
+        console.error("scheduled X procurement failed",error);
+      }
+
+      try{
+        await shiireVendingSweep(env);
+      }catch(error){
+        console.error("scheduled Shiire vending sweep failed",error);
+      }
     })());
   }
 } satisfies ExportedHandler<Env>;
