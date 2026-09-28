@@ -618,9 +618,10 @@ export async function cleanShiireVendingExpired(env:Env){
     ).bind(now,row.id).run();
   }
 
-  await env.DB.prepare(
-    "UPDATE shiire_vending_orders SET status='paid',updated_at=? WHERE status='delivering' AND delivered_at IS NULL AND updated_at<?"
-  ).bind(now,now-5*60_000).run();
+  // Never auto-reset a stale delivering order to paid. A Discord DM may already
+  // have been accepted while the following D1 write failed; automatically
+  // returning to paid could resend sensitive account credentials.
+  
 }
 
 export async function listPendingShiirePayments(env:Env,limit=8){
