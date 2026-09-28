@@ -1,6 +1,7 @@
 import type { Env } from "./types";
 import { randomId } from "./crypto";
 import {
+  acquireProcurementLease,
   auditX,
   circuitState,
   createPurchaseOrderRecord,
@@ -12,6 +13,7 @@ import {
   readyInventoryCount,
   readyInventoryCountByClass,
   recordFundingEvent,
+  releaseProcurementLease,
   updateFundingEventByProviderReference,
   setCircuitBreaker,
   storeDeliveredAccounts,
@@ -41,6 +43,8 @@ import {
   createHstoraOrder,
   lookupHstoraOrder,
   getHstoraProduct,
+  HstoraApiError,
+  type HstoraOrder,
   type HstoraProduct,
   type HstoraCatalogItem
 } from "./providers/hstora";
@@ -48,14 +52,46 @@ import {
   detectSearchVisibility,
   isXAccountProduct,
   qualifyHstoraProduct,
+  tierUnitPrice,
   type ProcurementClass
 } from "./x-qualification";
 import { notifyDiscord } from "./x-alerts";
+import { chooseRestockClass, restockCycleComplete, type RestockClass } from "./x-restock-policy";
+import { hstoraHasUsableDelivery, hstoraStatusRequiresDelivery } from "./x-hstora-order-policy";
+import { comparableEffectivePriceJumpPercent } from "./x-price-policy";
 import { notifyShiireVendingStockArrival } from "./shiire-vending";
 
 const PAYPAY_DIRECT_PURCHASE_MIN_JPY=1_000;
 const PAYPAY_JPY_DEPOSIT_MIN_GROSS_JPY=1_000;
 const PAYPAY_JPY_DEPOSIT_FEE_JPY=110;
+
+type RestockCycleState={
+  active:boolean;
+  startedAt:number;
+};
+
+function restockCycleKey(targetClass:RestockClass){
+  return "x_restock_cycle_"+targetClass.toLowerCase();
+}
+
+async function loadRestockCycle(env:Env,targetClass:RestockClass){
+  const state=await getXSetting<RestockCycleState>(
+    env,
+    restockCycleKey(targetClass)
+  );
+  return Boolean(state?.active);
+}
+
+async function setRestockCycle(
+  env:Env,
+  targetClass:RestockClass,
+  active:boolean
+){
+  await setXSetting(env,restockCycleKey(targetClass),{
+    active,
+    startedAt:active?Date.now():0
+  } satisfies RestockCycleState);
+}
 
 export type XRunResult={
   action:string;
@@ -83,71 +119,235 @@ function jstPeriodStarts(now=Date.now()){
 
 export async function reconcilePendingXOrders(env:Env){
   const pending=await pendingPurchaseOrders(env);
+
   for(const row of pending as any[]){
+    let order:HstoraOrder|null=null;
+    let lookupError:unknown=null;
+
     try{
-      const order=await lookupHstoraOrder(env,String(row.external_order_id));
-      const status=String(order.status??"").toUpperCase();
-      const hasDelivery=Boolean(order.delivery?.available&&Array.isArray(order.delivery?.items));
-      if(hasDelivery){
-        const added=await storeDeliveredAccounts(env,{
-          purchaseOrderId:String(row.id),
-          supplier:"hstora",
-          supplierProductId:String(row.supplier_product_id),
-          purchasePrice:Number(row.unit_price),
-          procurementClass:
-            row.procurement_class==="TOP_SEARCH"||
-            row.procurement_class==="NO_SHADOWBAN"
-              ?row.procurement_class
-              :null,
-          orderResponse:order
-        });
-        if(added>0){
-          await notifyShiireVendingStockArrival(
+      order=await lookupHstoraOrder(env,String(row.external_order_id));
+    }catch(error){
+      lookupError=error;
+    }
+
+    if(!order&&String(row.status??"").toUpperCase()==="CREATED"){
+      // The Worker may have crashed after persisting the local intent but
+      // before or during POST /orders. HStora explicitly requires retrying the
+      // SAME intended purchase with the same external_order_id and
+      // Idempotency-Key. Never mint a new purchase identity here.
+      try{
+        const product=await getHstoraProduct(
+          env,
+          Number(row.supplier_product_id)
+        );
+        const currentUnit=tierUnitPrice(product,Number(row.quantity));
+        const expectedUnit=Number(row.unit_price);
+        const sameCurrency=
+          String(product.currency??"").toUpperCase()===
+          String(row.currency??"").toUpperCase();
+        const samePrice=
+          Number.isFinite(currentUnit)&&
+          Number.isFinite(expectedUnit)&&
+          Math.abs(currentUnit-expectedUnit)<=1e-9;
+
+        if(!sameCurrency||!samePrice){
+          await setCircuitBreaker(
             env,
-            String(row.supplier_product_id),
-            added
-          ).catch(()=>undefined);
-        }
-        const storedTotal=await purchasedAccountCountForOrder(env,String(row.id));
-        if(storedTotal!==Number(row.quantity)){
-          await updatePurchaseOrderRecord(env,String(row.id),{
-            status:"DELIVERY_INTEGRITY_FAILED",
-            supplierOrderId:String(order.id),
-            response:order,
-            errorCode:"DELIVERY_COUNT_MISMATCH"
-          });
-          await setCircuitBreaker(env,"delivery_integrity","OPEN","DELIVERY_COUNT_MISMATCH");
-          await notifyDiscord(env,{
-            title:"不良商品",
-            message:"再照合したHStora注文の納品件数が注文数と一致しません。",
+            "hstora_order_alert",
+            "OPEN",
+            "CREATED_INTENT_PRICE_CHANGED_BEFORE_SAFE_RETRY"
+          );
+          await auditX(env,{
             level:"error",
-            details:{purchaseOrderId:row.id,ordered:Number(row.quantity),insertedNow:added,storedTotal}
-          }).catch(()=>undefined);
+            kind:"HSTORA_CREATED_INTENT_RETRY_BLOCKED",
+            message:"A CREATED HStora intent could not be safely retried because the product currency or effective unit price changed.",
+            details:{
+              purchaseOrderId:row.id,
+              supplierProductId:row.supplier_product_id,
+              expectedCurrency:row.currency,
+              currentCurrency:product.currency,
+              expectedUnitPrice:expectedUnit,
+              currentUnitPrice:currentUnit,
+              lookupError:lookupError instanceof Error
+                ?lookupError.message
+                :String(lookupError??"")
+            }
+          });
           continue;
         }
-        await updatePurchaseOrderRecord(env,String(row.id),{
-          status:status||"DELIVERED",
-          supplierOrderId:String(order.id),
-          response:order
+
+        order=await createHstoraOrder(env,{
+          productId:Number(row.supplier_product_id),
+          quantity:Number(row.quantity),
+          externalOrderId:String(row.external_order_id),
+          idempotencyKey:String(row.idempotency_key)
         });
         await auditX(env,{
-          kind:"HSTORA_ORDER_RECONCILED",
-          message:"HStora order delivery reconciled",
-          details:{purchaseOrderId:row.id,supplierOrderId:order.id,insertedNow:added,storedTotal,status}
+          kind:"HSTORA_CREATED_INTENT_SAFE_RETRY",
+          message:"Recovered a persisted HStora purchase intent by reusing its original purchase identifiers.",
+          details:{
+            purchaseOrderId:row.id,
+            externalOrderId:row.external_order_id,
+            supplierOrderId:order.id,
+            status:order.status
+          }
         });
-      }else if(status){
-        await updatePurchaseOrderRecord(env,String(row.id),{
-          status,
-          supplierOrderId:String(order.id),
-          response:order
-        });
+      }catch(error){
+        if(error instanceof HstoraApiError&&!error.retryable){
+          await updatePurchaseOrderRecord(env,String(row.id),{
+            status:"FAILED",
+            errorCode:error.code
+          });
+          await setCircuitBreaker(
+            env,
+            "hstora_order_alert",
+            "OPEN",
+            error.code+":"+error.message.slice(0,160)
+          );
+          await auditX(env,{
+            level:"error",
+            kind:"HSTORA_CREATED_INTENT_REJECTED",
+            message:"HStora explicitly rejected the safe retry of a persisted CREATED purchase intent.",
+            details:{
+              purchaseOrderId:row.id,
+              status:error.status,
+              code:error.code
+            }
+          });
+        }else{
+          await auditX(env,{
+            level:"warn",
+            kind:"HSTORA_CREATED_INTENT_RETRY_PENDING",
+            message:error instanceof Error?error.message:String(error),
+            details:{purchaseOrderId:row.id}
+          });
+        }
+        continue;
       }
-    }catch(error){
+    }
+
+    if(!order){
       await auditX(env,{
         level:"warn",
         kind:"HSTORA_RECONCILE_FAILED",
-        message:error instanceof Error?error.message:String(error),
+        message:lookupError instanceof Error
+          ?lookupError.message
+          :String(lookupError??"HStora order lookup failed"),
         details:{purchaseOrderId:row.id}
+      });
+      continue;
+    }
+
+    const status=String(order.status??"").toUpperCase();
+
+    if(
+      String(row.status??"").toUpperCase()==="CREATED"&&
+      ["CREATED","PROCESSING","DELIVERED","COMPLETED"].includes(status)
+    ){
+      // A crash could have happened before the original run registered the
+      // expected wallet decrease. Register it once while the local row is
+      // still CREATED; after this reconciliation the row status changes.
+      await allowExpectedHstoraDecrease(env,Number(row.total_amount));
+    }
+
+    const hasDelivery=hstoraHasUsableDelivery(order);
+    if(hstoraStatusRequiresDelivery(status)&&!hasDelivery){
+      await updatePurchaseOrderRecord(env,String(row.id),{
+        status:"DELIVERY_INTEGRITY_FAILED",
+        supplierOrderId:String(order.id),
+        response:order,
+        errorCode:"TERMINAL_ORDER_WITHOUT_DELIVERY"
+      });
+      await setCircuitBreaker(
+        env,
+        "delivery_integrity",
+        "OPEN",
+        "TERMINAL_ORDER_WITHOUT_DELIVERY"
+      );
+      await notifyDiscord(env,{
+        title:"不良商品",
+        message:"HStora注文が完了状態なのに納品データを取得できないため、自動仕入れを停止しました。",
+        level:"error",
+        details:{
+          purchaseOrderId:row.id,
+          supplierOrderId:order.id,
+          status
+        }
+      }).catch(()=>undefined);
+      continue;
+    }
+
+    if(hasDelivery){
+      const added=await storeDeliveredAccounts(env,{
+        purchaseOrderId:String(row.id),
+        supplier:"hstora",
+        supplierProductId:String(row.supplier_product_id),
+        purchasePrice:Number(row.unit_price),
+        procurementClass:
+          row.procurement_class==="TOP_SEARCH"||
+          row.procurement_class==="NO_SHADOWBAN"
+            ?row.procurement_class
+            :null,
+        orderResponse:order
+      });
+      if(added>0){
+        await notifyShiireVendingStockArrival(
+          env,
+          String(row.supplier_product_id),
+          added
+        ).catch(()=>undefined);
+      }
+      const storedTotal=await purchasedAccountCountForOrder(
+        env,
+        String(row.id)
+      );
+      if(storedTotal!==Number(row.quantity)){
+        await updatePurchaseOrderRecord(env,String(row.id),{
+          status:"DELIVERY_INTEGRITY_FAILED",
+          supplierOrderId:String(order.id),
+          response:order,
+          errorCode:"DELIVERY_COUNT_MISMATCH"
+        });
+        await setCircuitBreaker(
+          env,
+          "delivery_integrity",
+          "OPEN",
+          "DELIVERY_COUNT_MISMATCH"
+        );
+        await notifyDiscord(env,{
+          title:"不良商品",
+          message:"再照合したHStora注文の納品件数が注文数と一致しません。",
+          level:"error",
+          details:{
+            purchaseOrderId:row.id,
+            ordered:Number(row.quantity),
+            insertedNow:added,
+            storedTotal
+          }
+        }).catch(()=>undefined);
+        continue;
+      }
+      await updatePurchaseOrderRecord(env,String(row.id),{
+        status:status||"DELIVERED",
+        supplierOrderId:String(order.id),
+        response:order
+      });
+      await auditX(env,{
+        kind:"HSTORA_ORDER_RECONCILED",
+        message:"HStora order delivery reconciled",
+        details:{
+          purchaseOrderId:row.id,
+          supplierOrderId:order.id,
+          insertedNow:added,
+          storedTotal,
+          status
+        }
+      });
+    }else if(status){
+      await updatePurchaseOrderRecord(env,String(row.id),{
+        status,
+        supplierOrderId:String(order.id),
+        response:order
       });
     }
   }
@@ -301,13 +501,29 @@ async function selectCandidate(
     const q=qualifyHstoraProduct(full,settings,plannedQuantity);
     const previous=await getSupplierProductRecord(env,String(full.id));
     const previousPrice=Number(previous?.unit_price??0);
-    const currentPrice=Number(full.price??0);
-    const sameCurrency=
-      String(previous?.currency??"").toUpperCase()===
-      String(full.currency??"").toUpperCase();
+    const currentPrice=Number(q.unit_price_source);
+    let previousPlannedQuantity:number|null=null;
+    if(previous?.structured_json){
+      try{
+        const structured=JSON.parse(String(previous.structured_json));
+        const parsed=Number(structured?.planned_quantity);
+        if(Number.isSafeInteger(parsed)&&parsed>0){
+          previousPlannedQuantity=parsed;
+        }
+      }catch{}
+    }
+    const jump=previous
+      ?comparableEffectivePriceJumpPercent({
+        previousUnitPrice:previousPrice,
+        previousCurrency:String(previous.currency??""),
+        previousPlannedQuantity,
+        currentUnitPrice:currentPrice,
+        currentCurrency:String(full.currency??""),
+        currentPlannedQuantity:plannedQuantity
+      })
+      :null;
 
-    if(previous&&sameCurrency&&previousPrice>0&&currentPrice>0){
-      const jump=Math.abs(currentPrice-previousPrice)/previousPrice*100;
+    if(jump!==null){
       if(jump>settings.max_price_jump_percent){
         await setCircuitBreaker(
           env,
@@ -993,7 +1209,7 @@ async function handleHstoraFundingNeed(
   }
 }
 
-export async function runXProcurement(env:Env):Promise<XRunResult>{
+async function runXProcurementUnlocked(env:Env):Promise<XRunResult>{
   const settings=await loadXSettings(env);
   if(settings.emergency_stop) return {action:"EMERGENCY_STOP",dryRun:settings.dry_run};
 
@@ -1015,6 +1231,38 @@ export async function runXProcurement(env:Env):Promise<XRunResult>{
 
   await reconcilePendingXOrders(env);
 
+  const unresolvedOrders=await pendingPurchaseOrders(env);
+  if(unresolvedOrders.length){
+    await auditX(env,{
+      kind:"HSTORA_ORDER_PENDING_BLOCK",
+      message:"A previous HStora order is still unresolved; no new purchase will be created.",
+      details:{
+        count:unresolvedOrders.length,
+        orders:unresolvedOrders.slice(0,10).map((row:any)=>({
+          id:row.id,
+          externalOrderId:row.external_order_id,
+          status:row.status,
+          procurementClass:row.procurement_class,
+          createdAt:row.created_at
+        }))
+      }
+    });
+    return {
+      action:"HSTORA_ORDER_PENDING",
+      dryRun:settings.dry_run,
+      details:{
+        count:unresolvedOrders.length,
+        orders:unresolvedOrders.slice(0,10).map((row:any)=>({
+          id:row.id,
+          externalOrderId:row.external_order_id,
+          status:row.status,
+          procurementClass:row.procurement_class,
+          createdAt:row.created_at
+        }))
+      }
+    };
+  }
+
   try{
     const observedHstora=await getHstoraBalance(env);
     if(
@@ -1029,32 +1277,75 @@ export async function runXProcurement(env:Env):Promise<XRunResult>{
     return {action:"HSTORA_BALANCE_ERROR",dryRun:settings.dry_run};
   }
 
-  const [inventory,topInventory,noShadowInventory]=await Promise.all([
+  const [
+    inventory,
+    topInventory,
+    noShadowInventory,
+    storedTopCycle,
+    storedNoShadowCycle
+  ]=await Promise.all([
     readyInventoryCount(env),
     readyInventoryCountByClass(env,"TOP_SEARCH"),
-    readyInventoryCountByClass(env,"NO_SHADOWBAN")
+    readyInventoryCountByClass(env,"NO_SHADOWBAN"),
+    loadRestockCycle(env,"TOP_SEARCH"),
+    loadRestockCycle(env,"NO_SHADOWBAN")
   ]);
 
-  let targetClass:ProcurementClass|null=null;
-  let classInventory=0;
-  let classTarget=0;
+  let topCycleActive=
+    storedTopCycle&&
+    !restockCycleComplete(topInventory,settings.target_stock);
+  let noShadowCycleActive=
+    storedNoShadowCycle&&
+    !restockCycleComplete(
+      noShadowInventory,
+      settings.no_shadowban_target_stock
+    );
 
-  // TOP_SEARCH gets priority when both independent product stocks are low.
-  if(topInventory<=settings.reorder_point){
-    targetClass="TOP_SEARCH";
-    classInventory=topInventory;
-    classTarget=settings.target_stock;
-  }else if(noShadowInventory<=settings.no_shadowban_reorder_point){
-    targetClass="NO_SHADOWBAN";
-    classInventory=noShadowInventory;
-    classTarget=settings.no_shadowban_target_stock;
-  }else{
+  if(!settings.dry_run){
+    if(storedTopCycle&&!topCycleActive){
+      await setRestockCycle(env,"TOP_SEARCH",false);
+    }
+    if(storedNoShadowCycle&&!noShadowCycleActive){
+      await setRestockCycle(env,"NO_SHADOWBAN",false);
+    }
+  }
+
+  const decision=chooseRestockClass({
+    topInventory,
+    topReorderPoint:settings.reorder_point,
+    topTargetStock:settings.target_stock,
+    topCycleActive,
+    noShadowInventory,
+    noShadowReorderPoint:settings.no_shadowban_reorder_point,
+    noShadowTargetStock:settings.no_shadowban_target_stock,
+    noShadowCycleActive
+  });
+
+  if(!decision){
     return {
       action:"INVENTORY_OK",
       dryRun:settings.dry_run,
       inventory,
-      details:{topSearch:topInventory,noShadowban:noShadowInventory}
+      details:{
+        topSearch:topInventory,
+        noShadowban:noShadowInventory,
+        topCycleActive,
+        noShadowCycleActive
+      }
     };
+  }
+
+  const {targetClass,classTarget}=decision;
+  let classInventory=decision.classInventory;
+  const cycleWasActive=
+    targetClass==="TOP_SEARCH"
+      ?topCycleActive
+      :noShadowCycleActive;
+
+  if(decision.triggeredNow&&!settings.dry_run){
+    await setRestockCycle(env,targetClass,true);
+    if(targetClass==="TOP_SEARCH") topCycleActive=true;
+    else noShadowCycleActive=true;
   }
 
   const need=Math.max(0,classTarget-classInventory);
@@ -1083,6 +1374,10 @@ export async function runXProcurement(env:Env):Promise<XRunResult>{
     }).catch(()=>undefined);
     return {action:"HSTORA_API_BLOCKED",dryRun:settings.dry_run,inventory};
   }
+
+  // Product scanning can backfill previously unclassified existing stock.
+  // A newly-triggered cycle must be cancelled if that backfill shows the
+  // inventory was actually above its reorder point before we buy anything.
   const refreshedClassInventory=await readyInventoryCountByClass(
     env,
     targetClass
@@ -1091,7 +1386,11 @@ export async function runXProcurement(env:Env):Promise<XRunResult>{
     targetClass==="TOP_SEARCH"
       ?settings.reorder_point
       :settings.no_shadowban_reorder_point;
-  if(refreshedClassInventory>refreshedReorder){
+
+  if(refreshedClassInventory>=classTarget){
+    if(!settings.dry_run){
+      await setRestockCycle(env,targetClass,false);
+    }
     return {
       action:"INVENTORY_RECLASSIFIED_OK",
       dryRun:settings.dry_run,
@@ -1099,18 +1398,45 @@ export async function runXProcurement(env:Env):Promise<XRunResult>{
       details:{
         targetClass,
         before:classInventory,
-        after:refreshedClassInventory
+        after:refreshedClassInventory,
+        target:classTarget
       }
     };
   }
-  const refreshedNeed=Math.max(0,classTarget-refreshedClassInventory);
-  batch=Math.min(refreshedNeed,settings.max_batch_purchase);
-  if(batch<=0){
+
+  if(
+    decision.triggeredNow&&
+    !cycleWasActive&&
+    refreshedClassInventory>refreshedReorder
+  ){
+    if(!settings.dry_run){
+      await setRestockCycle(env,targetClass,false);
+    }
     return {
       action:"INVENTORY_RECLASSIFIED_OK",
       dryRun:settings.dry_run,
       inventory:await readyInventoryCount(env),
-      details:{targetClass,classInventory:refreshedClassInventory,classTarget}
+      details:{
+        targetClass,
+        before:classInventory,
+        after:refreshedClassInventory,
+        reorderPoint:refreshedReorder
+      }
+    };
+  }
+
+  classInventory=refreshedClassInventory;
+  const refreshedNeed=Math.max(0,classTarget-classInventory);
+  batch=Math.min(refreshedNeed,settings.max_batch_purchase);
+  if(batch<=0){
+    if(!settings.dry_run){
+      await setRestockCycle(env,targetClass,false);
+    }
+    return {
+      action:"INVENTORY_RECLASSIFIED_OK",
+      dryRun:settings.dry_run,
+      inventory:await readyInventoryCount(env),
+      details:{targetClass,classInventory,classTarget}
     };
   }
 
@@ -1273,7 +1599,36 @@ export async function runXProcurement(env:Env):Promise<XRunResult>{
     });
     const status=String(order.status??"SUBMITTED").toUpperCase();
     await allowExpectedHstoraDecrease(env,totalSource);
-    const added=order.delivery?.available
+    const hasDelivery=hstoraHasUsableDelivery(order);
+    if(hstoraStatusRequiresDelivery(status)&&!hasDelivery){
+      await updatePurchaseOrderRecord(env,recordId,{
+        status:"DELIVERY_INTEGRITY_FAILED",
+        supplierOrderId:String(order.id),
+        response:order,
+        errorCode:"TERMINAL_ORDER_WITHOUT_DELIVERY"
+      });
+      await setCircuitBreaker(
+        env,
+        "delivery_integrity",
+        "OPEN",
+        "TERMINAL_ORDER_WITHOUT_DELIVERY"
+      );
+      await notifyDiscord(env,{
+        title:"不良商品",
+        message:"HStora注文が完了状態なのに納品データを取得できないため、自動仕入れを停止しました。",
+        level:"error",
+        details:{productId:fresh.id,quantity,supplierOrderId:order.id,status}
+      }).catch(()=>undefined);
+      return {
+        action:"DELIVERY_INTEGRITY_FAILED",
+        dryRun:false,
+        inventory,
+        requested:quantity,
+        productId:Number(fresh.id),
+        details:{status,supplierOrderId:order.id,reason:"TERMINAL_ORDER_WITHOUT_DELIVERY"}
+      };
+    }
+    const added=hasDelivery
       ?await storeDeliveredAccounts(env,{
         purchaseOrderId:recordId,
         supplier:"hstora",
@@ -1290,10 +1645,10 @@ export async function runXProcurement(env:Env):Promise<XRunResult>{
         added
       ).catch(()=>undefined);
     }
-    const storedTotal=order.delivery?.available
+    const storedTotal=hasDelivery
       ?await purchasedAccountCountForOrder(env,recordId)
       :0;
-    if(order.delivery?.available&&storedTotal!==quantity){
+    if(hasDelivery&&storedTotal!==quantity){
       await updatePurchaseOrderRecord(env,recordId,{
         status:"DELIVERY_INTEGRITY_FAILED",
         supplierOrderId:String(order.id),
@@ -1317,19 +1672,19 @@ export async function runXProcurement(env:Env):Promise<XRunResult>{
       };
     }
     await updatePurchaseOrderRecord(env,recordId,{
-      status:order.delivery?.available?(status||"DELIVERED"):(status||"PROCESSING"),
+      status:hasDelivery?(status||"DELIVERED"):(status||"PROCESSING"),
       supplierOrderId:String(order.id),
       response:order
     });
     await notifyDiscord(env,{
-      title:order.delivery?.available?"仕入れ完了":"仕入れ処理中",
-      message:order.delivery?.available
+      title:hasDelivery?"仕入れ完了":"仕入れ処理中",
+      message:hasDelivery
         ?"購入データを暗号化し、READY_FOR_DELIVERYへ保存しました。"
         :"注文は作成済みです。次回実行時に公式Order Lookupで照合します。",
       details:{productId:fresh.id,quantity,insertedNow:added,storedTotal,status}
     }).catch(()=>undefined);
     return {
-      action:order.delivery?.available?"HSTORA_PURCHASE_DELIVERED":"HSTORA_PURCHASE_PROCESSING",
+      action:hasDelivery?"HSTORA_PURCHASE_DELIVERED":"HSTORA_PURCHASE_PROCESSING",
       dryRun:false,
       inventory,
       requested:quantity,
@@ -1344,7 +1699,36 @@ export async function runXProcurement(env:Env):Promise<XRunResult>{
       recovered=true;
       const status=String(order.status??"PROCESSING").toUpperCase();
       await allowExpectedHstoraDecrease(env,totalSource);
-      const added=order.delivery?.available
+      const hasDelivery=hstoraHasUsableDelivery(order);
+      if(hstoraStatusRequiresDelivery(status)&&!hasDelivery){
+        await updatePurchaseOrderRecord(env,recordId,{
+          status:"DELIVERY_INTEGRITY_FAILED",
+          supplierOrderId:String(order.id),
+          response:order,
+          errorCode:"TERMINAL_ORDER_WITHOUT_DELIVERY"
+        });
+        await setCircuitBreaker(
+          env,
+          "delivery_integrity",
+          "OPEN",
+          "TERMINAL_ORDER_WITHOUT_DELIVERY"
+        );
+        await notifyDiscord(env,{
+          title:"不良商品",
+          message:"照合したHStora注文が完了状態なのに納品データを取得できないため、自動仕入れを停止しました。",
+          level:"error",
+          details:{productId:fresh.id,quantity,supplierOrderId:order.id,status}
+        }).catch(()=>undefined);
+        return {
+          action:"DELIVERY_INTEGRITY_FAILED",
+          dryRun:false,
+          inventory,
+          requested:quantity,
+          productId:Number(fresh.id),
+          details:{status,supplierOrderId:order.id,reason:"TERMINAL_ORDER_WITHOUT_DELIVERY"}
+        };
+      }
+      const added=hasDelivery
         ?await storeDeliveredAccounts(env,{
           purchaseOrderId:recordId,
           supplier:"hstora",
@@ -1361,10 +1745,10 @@ export async function runXProcurement(env:Env):Promise<XRunResult>{
           added
         ).catch(()=>undefined);
       }
-      const recoveredStoredTotal=order.delivery?.available
+      const recoveredStoredTotal=hasDelivery
         ?await purchasedAccountCountForOrder(env,recordId)
         :0;
-      if(order.delivery?.available&&recoveredStoredTotal!==quantity){
+      if(hasDelivery&&recoveredStoredTotal!==quantity){
         await updatePurchaseOrderRecord(env,recordId,{
           status:"DELIVERY_INTEGRITY_FAILED",
           supplierOrderId:String(order.id),
@@ -1413,5 +1797,26 @@ export async function runXProcurement(env:Env):Promise<XRunResult>{
       }).catch(()=>undefined);
     }
     return {action:"HSTORA_PURCHASE_FAILED",dryRun:false,inventory,productId:Number(fresh.id)};
+  }
+}
+
+
+export async function runXProcurement(env:Env):Promise<XRunResult>{
+  const settings=await loadXSettings(env);
+  const leaseKey="x_procurement";
+  const leaseId=await acquireProcurementLease(env,leaseKey,30*60_000);
+  if(!leaseId){
+    return {
+      action:"PROCUREMENT_ALREADY_RUNNING",
+      dryRun:settings.dry_run
+    };
+  }
+
+  try{
+    return await runXProcurementUnlocked(env);
+  }finally{
+    await releaseProcurementLease(env,leaseKey,leaseId).catch(error=>{
+      console.error("failed to release X procurement lease",error);
+    });
   }
 }

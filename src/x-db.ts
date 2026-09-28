@@ -122,6 +122,12 @@ const SCHEMA=[
   received_at INTEGER NOT NULL
 )`,
 `CREATE INDEX IF NOT EXISTS idx_hstora_webhook_event ON hstora_webhook_deliveries(event_id)`,
+`CREATE TABLE IF NOT EXISTS procurement_leases (
+  key TEXT PRIMARY KEY,
+  lease_id TEXT NOT NULL,
+  expires_at INTEGER NOT NULL,
+  created_at INTEGER NOT NULL
+)`,
 `CREATE TABLE IF NOT EXISTS circuit_breakers (
   key TEXT PRIMARY KEY,
   state TEXT NOT NULL,
@@ -137,6 +143,32 @@ const SCHEMA=[
 `CREATE INDEX IF NOT EXISTS idx_audit_logs_created ON audit_logs(created_at)`
 ];
 
+export async function ensureD1Column(
+  env:Env,
+  table:string,
+  column:string,
+  type:string
+):Promise<void>{
+  const readColumns=async()=>(
+    await env.DB.prepare(
+      "PRAGMA table_info("+table+")"
+    ).all<{name:string}>()
+  ).results.map(row=>row.name);
+
+  if((await readColumns()).includes(column)) return;
+
+  try{
+    await env.DB.prepare(
+      "ALTER TABLE "+table+" ADD COLUMN "+column+" "+type
+    ).run();
+  }catch(error){
+    // Another isolate may have added the same column after our PRAGMA read.
+    // Re-read the schema before treating the ALTER failure as fatal.
+    if((await readColumns()).includes(column)) return;
+    throw error;
+  }
+}
+
 export async function ensureXSchema(env:Env){
   if(schemaReady) return;
   for(const sql of SCHEMA) await env.DB.prepare(sql).run();
@@ -147,17 +179,44 @@ export async function ensureXSchema(env:Env){
     ["purchased_accounts","procurement_class","TEXT"]
   ];
   for(const [table,column,type] of migrations){
-    const columns=(await env.DB.prepare(
-      "PRAGMA table_info("+table+")"
-    ).all<{name:string}>()).results.map(row=>row.name);
-    if(!columns.includes(column)){
-      await env.DB.prepare(
-        "ALTER TABLE "+table+" ADD COLUMN "+column+" "+type
-      ).run();
-    }
+    await ensureD1Column(env,table,column,type);
   }
 
   schemaReady=true;
+}
+
+export async function acquireProcurementLease(
+  env:Env,
+  key:string,
+  leaseMs:number
+):Promise<string|null>{
+  await ensureXSchema(env);
+  const now=Date.now();
+  const safeLeaseMs=Math.max(60_000,Math.min(30*60_000,Math.floor(leaseMs)));
+  const leaseId=randomId();
+
+  // Expired leases are safe to discard. INSERT OR IGNORE on the primary key
+  // is the atomic winner selection when cron/manual invocations race.
+  await env.DB.prepare(
+    "DELETE FROM procurement_leases WHERE key=? AND expires_at<=?"
+  ).bind(key,now).run();
+
+  const result=await env.DB.prepare(
+    "INSERT OR IGNORE INTO procurement_leases(key,lease_id,expires_at,created_at) VALUES(?,?,?,?)"
+  ).bind(key,leaseId,now+safeLeaseMs,now).run();
+
+  return Number(result.meta?.changes??0)===1?leaseId:null;
+}
+
+export async function releaseProcurementLease(
+  env:Env,
+  key:string,
+  leaseId:string
+):Promise<void>{
+  await ensureXSchema(env);
+  await env.DB.prepare(
+    "DELETE FROM procurement_leases WHERE key=? AND lease_id=?"
+  ).bind(key,leaseId).run();
 }
 
 export async function getXSetting<T>(env:Env,key:string):Promise<T|null>{
@@ -496,7 +555,10 @@ export async function purchaseStatsByClass(env:Env,since:number){
     "SELECT COALESCE(procurement_class,'UNCLASSIFIED') AS procurement_class,"+
     "COALESCE(SUM(CASE WHEN status IN ('DELIVERED','COMPLETED') THEN quantity ELSE 0 END),0) AS count,"+
     "COALESCE(SUM(CASE WHEN status IN ('DELIVERED','COMPLETED') THEN total_amount ELSE 0 END),0) AS amount,"+
-    "COALESCE(AVG(CASE WHEN status IN ('DELIVERED','COMPLETED') THEN unit_price END),0) AS average "+
+    "COALESCE("+
+    "SUM(CASE WHEN status IN ('DELIVERED','COMPLETED') THEN total_amount ELSE 0 END) / "+
+    "NULLIF(SUM(CASE WHEN status IN ('DELIVERED','COMPLETED') THEN quantity ELSE 0 END),0),"+
+    "0) AS average "+
     "FROM purchase_orders WHERE created_at>=? GROUP BY procurement_class"
   ).bind(since).all<any>();
   const out:Record<string,{count:number;amount:number;average:number}>={};
@@ -553,7 +615,11 @@ export async function todayPurchaseStats(env:Env,dayStart:number){
   const row=await env.DB.prepare(`SELECT
     COALESCE(SUM(CASE WHEN status IN ('DELIVERED','COMPLETED') THEN quantity ELSE 0 END),0) AS count,
     COALESCE(SUM(CASE WHEN status IN ('DELIVERED','COMPLETED') THEN total_amount ELSE 0 END),0) AS amount,
-    COALESCE(AVG(CASE WHEN status IN ('DELIVERED','COMPLETED') THEN unit_price END),0) AS avg
+    COALESCE(
+      SUM(CASE WHEN status IN ('DELIVERED','COMPLETED') THEN total_amount ELSE 0 END) /
+      NULLIF(SUM(CASE WHEN status IN ('DELIVERED','COMPLETED') THEN quantity ELSE 0 END),0),
+      0
+    ) AS avg
     FROM purchase_orders WHERE created_at>=?`).bind(dayStart).first<any>();
   return {count:Number(row?.count??0),amount:Number(row?.amount??0),average:Number(row?.avg??0)};
 }
