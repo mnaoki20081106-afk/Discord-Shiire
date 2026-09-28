@@ -30,7 +30,8 @@ import {
   getBinanceBalance,
   getBinanceOrder,
   getLtcJpyMarketStatus,
-  placeLtcJpyMarketBuy
+  placeLtcJpyMarketBuy,
+  BinanceApiError
 } from "./providers/binance";
 import {
   getHstoraBalance,
@@ -910,6 +911,45 @@ async function handleHstoraFundingNeed(
     }).catch(()=>undefined);
     return {action:"LTC_PURCHASE_SUBMITTED",dryRun:false,details:{orderId:order.orderId,status:order.status}};
   }catch(error){
+    if(
+      error instanceof BinanceApiError&&
+      error.status>=400&&
+      error.status<500&&
+      !error.retryable
+    ){
+      await updateFundingEventByProviderReference(env,"binance_japan",clientOrderId,{
+        status:"FAILED",
+        metadata:{
+          clientOrderId,
+          rejected:true,
+          code:error.code,
+          status:error.status
+        }
+      });
+      await setCircuitBreaker(
+        env,
+        "binance_purchase",
+        "OPEN",
+        error.code+":"+error.message.slice(0,160)
+      );
+      await auditX(env,{
+        level:"error",
+        kind:"BINANCE_ORDER_REJECTED",
+        message:"Binance explicitly rejected the LTCJPY order; no ambiguous retry will be attempted.",
+        details:{
+          clientOrderId,
+          status:error.status,
+          code:error.code,
+          message:error.message
+        }
+      });
+      return {
+        action:"LTC_PURCHASE_REJECTED",
+        dryRun:false,
+        details:{clientOrderId,status:error.status,code:error.code}
+      };
+    }
+
     try{
       const recovered=await getBinanceOrder(env,{origClientOrderId:clientOrderId});
       await updateFundingEventByProviderReference(env,"binance_japan",clientOrderId,{
