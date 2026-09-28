@@ -988,6 +988,7 @@ export async function runXProcurement(env:Env):Promise<XRunResult>{
     circuitState(env,"hstora"),
     circuitState(env,"binance"),
     circuitState(env,"binance_purchase"),
+    circuitState(env,"paypay_manual"),
     circuitState(env,"product_price"),
     circuitState(env,"ltc_price"),
     circuitState(env,"unexpected_balance"),
