@@ -4,6 +4,7 @@ import {
   calculateFundingAllowance,
   calculateLtcPurchaseAllowance,
   calculateSpendablePayPayJpy,
+  planManualPayPayPaths,
   splitPurchaseBatches,
   detectManualPayPayCompletion
 } from "../src/x-risk.ts";
@@ -195,4 +196,54 @@ test("spendable PayPay subtracts reserve and pending reservation",()=>{
     reserveJpy:20_000,
     pendingReservationJpy:7_000
   }),23_000);
+});
+
+
+test("PayPay path planner accounts for the 110 JPY deposit fee",()=>{
+  assert.deepEqual(planManualPayPayPaths({
+    desiredPurchaseJpy:7_000,
+    currentBinanceJpy:2_000,
+    spendablePayPayJpy:10_000,
+    directPurchaseMinJpy:1_000,
+    jpyDepositMinGrossJpy:1_000,
+    jpyDepositFeeJpy:110
+  }),{
+    desiredPurchaseJpy:7_000,
+    expectedNetJpyCredit:5_000,
+    grossJpyDepositRequired:5_110,
+    jpyDepositAvailable:true,
+    directLtcAvailable:true,
+    paypayReservationJpy:7_000
+  });
+});
+
+test("PayPay path planner can offer JPY deposit when direct LTC exceeds spendable cash",()=>{
+  const result=planManualPayPayPaths({
+    desiredPurchaseJpy:7_000,
+    currentBinanceJpy:2_000,
+    spendablePayPayJpy:6_000,
+    directPurchaseMinJpy:1_000,
+    jpyDepositMinGrossJpy:1_000,
+    jpyDepositFeeJpy:110
+  });
+  assert.equal(result.grossJpyDepositRequired,5_110);
+  assert.equal(result.jpyDepositAvailable,true);
+  assert.equal(result.directLtcAvailable,false);
+  assert.equal(result.paypayReservationJpy,5_110);
+});
+
+test("PayPay path planner honors the official 1000 JPY gross deposit minimum",()=>{
+  const result=planManualPayPayPaths({
+    desiredPurchaseJpy:500,
+    currentBinanceJpy:0,
+    spendablePayPayJpy:1_000,
+    directPurchaseMinJpy:1_000,
+    jpyDepositMinGrossJpy:1_000,
+    jpyDepositFeeJpy:110
+  });
+  assert.equal(result.expectedNetJpyCredit,500);
+  assert.equal(result.grossJpyDepositRequired,1_000);
+  assert.equal(result.jpyDepositAvailable,true);
+  assert.equal(result.directLtcAvailable,false);
+  assert.equal(result.paypayReservationJpy,1_000);
 });
