@@ -161,6 +161,23 @@ export function planManualPayPayPaths(input:{
   };
 }
 
+export function isPendingDirectLtcFundingReady(input:{
+  baselineLtc:number;
+  currentLtc:number;
+  requiredLtcAtRequest:number;
+  baselineCaptured:boolean;
+}):boolean{
+  if(!input.baselineCaptured) return false;
+  const baseline=Math.max(0,finiteNonNegative(input.baselineLtc));
+  const current=Math.max(0,finiteNonNegative(input.currentLtc));
+  const required=Math.max(0,finiteNonNegative(input.requiredLtcAtRequest));
+  return (
+    required>0&&
+    current>baseline+1e-12&&
+    current>=required
+  );
+}
+
 export function nextObservedPayPayBalance(input:{
   observedBalanceJpy:number;
   observedAt:number;

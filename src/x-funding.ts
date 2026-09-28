@@ -2,6 +2,7 @@ import type { Env } from "./types";
 import {
   calculateLtcPurchaseAllowance,
   calculateSpendablePayPayJpy,
+  isPendingDirectLtcFundingReady,
   nextObservedPayPayBalance
 } from "./x-risk";
 import { auditX, fundingSpendSince, recordFundingEvent } from "./x-db";
@@ -97,8 +98,12 @@ export async function getFundingPlan(env:Env,now=Date.now()){
       ),
       directLtcIncreaseDetected:
         settings.pending_paypay_direct_ltc_budget_jpy>0&&
-        settings.pending_paypay_ltc_baseline_captured&&
-        ltc.free+ltc.locked>settings.pending_paypay_binance_ltc_baseline+1e-12,
+        isPendingDirectLtcFundingReady({
+          baselineLtc:settings.pending_paypay_binance_ltc_baseline,
+          currentLtc:ltc.free+ltc.locked,
+          requiredLtcAtRequest:settings.pending_paypay_required_ltc,
+          baselineCaptured:settings.pending_paypay_ltc_baseline_captured
+        }),
       requiredLtcAtRequest:settings.pending_paypay_required_ltc,
       ltcBaselineCaptured:settings.pending_paypay_ltc_baseline_captured,
       requestedAt:settings.pending_paypay_requested_at
@@ -141,8 +146,13 @@ export async function confirmPendingDirectLtcFunding(env:Env){
   const currentTotal=Math.max(0,ltc.free+ltc.locked);
   const baseline=Math.max(0,settings.pending_paypay_binance_ltc_baseline);
   const increase=Math.max(0,currentTotal-baseline);
-  if(increase<=1e-12){
-    throw new Error("LTC_BALANCE_INCREASE_NOT_DETECTED");
+  if(!isPendingDirectLtcFundingReady({
+    baselineLtc:baseline,
+    currentLtc:currentTotal,
+    requiredLtcAtRequest:settings.pending_paypay_required_ltc,
+    baselineCaptured:settings.pending_paypay_ltc_baseline_captured
+  })){
+    throw new Error("LTC_REQUIRED_AMOUNT_NOT_REACHED");
   }
 
   const confirmedSpend=settings.pending_paypay_direct_ltc_budget_jpy;

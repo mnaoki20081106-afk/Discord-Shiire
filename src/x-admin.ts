@@ -224,7 +224,7 @@ export async function handleXAdminApi(
       const code=error instanceof Error?error.message:String(error);
       const status=
         code==="NO_PENDING_DIRECT_LTC_CONFIRMATION"?409:
-        code==="LTC_BALANCE_INCREASE_NOT_DETECTED"?409:
+        code==="LTC_REQUIRED_AMOUNT_NOT_REACHED"?409:
         500;
       return json({error:code},status);
     }
