@@ -183,27 +183,30 @@ export function detectManualPayPayCompletion(input:{
   binanceJpyBaseline:number;
   binanceLtcBaseline:number;
   ltcBaselineCaptured:boolean;
+  directLtcBudgetJpy:number;
   currentBinanceJpy:number;
   currentBinanceLtc:number;
-  requiredLtcAtRequest:number;
 }):ManualPayPayCompletion{
   const reserved=Math.max(0,input.pendingReservationJpy);
   if(reserved<=0) return "NONE";
 
-  const requiredLtcAtRequest=Math.max(0,input.requiredLtcAtRequest);
+  const directLtcBudgetJpy=Math.max(0,input.directLtcBudgetJpy);
   const ltcBaseline=Math.max(0,input.binanceLtcBaseline);
   const currentLtc=Math.max(0,input.currentBinanceLtc);
   const ltcIncreased=currentLtc>ltcBaseline+1e-12;
 
-  // Fail closed for legacy pending requests that were created before an LTC
-  // baseline was persisted. A changing LTC/JPY price or HStora requirement
-  // must never make an unchanged pre-existing LTC balance look like a newly
-  // completed PayPay -> LTC purchase.
+  // The direct-LTC path is considered complete only when that path was
+  // explicitly offered for this pending request and the LTC balance actually
+  // increased from the persisted baseline. It does not require the full
+  // HStora funding target to be reached in one purchase: configured purchase
+  // limits may intentionally split the funding into multiple iterations.
+  //
+  // Legacy requests without a captured baseline or without an explicit
+  // direct-LTC budget fail closed.
   if(
     input.ltcBaselineCaptured&&
-    requiredLtcAtRequest>0&&
-    ltcIncreased&&
-    currentLtc>=requiredLtcAtRequest
+    directLtcBudgetJpy>0&&
+    ltcIncreased
   ){
     return "LTC_PURCHASED";
   }
