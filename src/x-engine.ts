@@ -542,6 +542,10 @@ async function handleHstoraFundingNeed(
 
     if(completion!=="NONE"){
       const confirmedSpend=settings.pending_paypay_funding_jpy;
+      const ltcBaseline=settings.pending_paypay_binance_ltc_baseline;
+      const detectedLtcIncrease=ltcPurchaseDetected
+        ?Math.max(0,ltcFree-ltcBaseline)
+        :0;
       settings=await saveXSettings(env,{
         observed_paypay_balance_jpy:Math.max(
           0,
@@ -559,9 +563,16 @@ async function handleHstoraFundingNeed(
         kind:ltcPurchaseDetected?"DIRECT_LTC_PURCHASE_DETECTED":"JPY_DEPOSIT_DETECTED",
         amountJpy:confirmedSpend,
         asset:ltcPurchaseDetected?"LTC":undefined,
-        assetAmount:ltcPurchaseDetected?ltcFree:undefined,
+        assetAmount:ltcPurchaseDetected?detectedLtcIncrease:undefined,
         status:"COMPLETED",
-        metadata:{binanceJpyFree:jpyFree,binanceLtcFree:ltcFree}
+        metadata:{
+          binanceJpyFree:jpyFree,
+          binanceLtcFree:ltcFree,
+          binanceLtcBaseline:ltcBaseline,
+          detectedLtcIncrease,
+          binanceLtcBaseline:ltcBaseline,
+          detectedLtcIncrease
+        }
       });
       await auditX(env,{
         kind:"PAYPAY_FUNDING_CONFIRMED",
