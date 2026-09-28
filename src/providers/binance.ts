@@ -1,5 +1,6 @@
 import type { Env } from "../types";
 import { hmacHex, randomId } from "../crypto";
+import { marketNotionalBounds } from "./binance-market";
 
 const BASE_URL="https://api.binance.com";
 const SYMBOL="LTCJPY";
@@ -193,46 +194,6 @@ async function signedRequest<T>(
     if(error instanceof BinanceApiError) throw error;
     throw new BinanceApiError(0,"BINANCE_NETWORK_ERROR",true,error instanceof Error?error.message:"Binance network error");
   }finally{clearTimeout(timer);}
-}
-
-export function marketNotionalBounds(
-  filters:Array<Record<string,unknown>>|undefined
-):{min:number|null;max:number|null}{
-  const minimums:number[]=[];
-  const maximums:number[]=[];
-
-  for(const filter of filters??[]){
-    const type=String(filter.filterType??"");
-    if(type==="MIN_NOTIONAL"){
-      const min=Number(filter.minNotional);
-      if(
-        Number.isFinite(min)&&min>0&&
-        filter.applyToMarket!==false
-      ){
-        minimums.push(min);
-      }
-    }else if(type==="NOTIONAL"){
-      const min=Number(filter.minNotional);
-      const max=Number(filter.maxNotional);
-      if(
-        Number.isFinite(min)&&min>0&&
-        filter.applyMinToMarket!==false
-      ){
-        minimums.push(min);
-      }
-      if(
-        Number.isFinite(max)&&max>0&&
-        filter.applyMaxToMarket!==false
-      ){
-        maximums.push(max);
-      }
-    }
-  }
-
-  return {
-    min:minimums.length?Math.max(...minimums):null,
-    max:maximums.length?Math.min(...maximums):null
-  };
 }
 
 export async function getLtcJpyMarketStatus():Promise<BinanceMarketStatus>{
