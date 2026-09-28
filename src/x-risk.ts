@@ -87,15 +87,30 @@ export type ManualPayPayCompletion="NONE"|"JPY_FUNDED"|"LTC_PURCHASED";
 export function detectManualPayPayCompletion(input:{
   pendingJpy:number;
   binanceJpyBaseline:number;
+  binanceLtcBaseline:number;
+  ltcBaselineCaptured:boolean;
   currentBinanceJpy:number;
   currentBinanceLtc:number;
-  requiredLtc:number;
+  requiredLtcAtRequest:number;
 }):ManualPayPayCompletion{
   const pending=Math.max(0,input.pendingJpy);
   if(pending<=0) return "NONE";
 
-  const requiredLtc=Math.max(0,input.requiredLtc);
-  if(requiredLtc>0&&input.currentBinanceLtc>=requiredLtc){
+  const requiredLtcAtRequest=Math.max(0,input.requiredLtcAtRequest);
+  const ltcBaseline=Math.max(0,input.binanceLtcBaseline);
+  const currentLtc=Math.max(0,input.currentBinanceLtc);
+  const ltcIncreased=currentLtc>ltcBaseline+1e-12;
+
+  // Fail closed for legacy pending requests that were created before an LTC
+  // baseline was persisted. A changing LTC/JPY price or HStora requirement
+  // must never make an unchanged pre-existing LTC balance look like a newly
+  // completed PayPay -> LTC purchase.
+  if(
+    input.ltcBaselineCaptured&&
+    requiredLtcAtRequest>0&&
+    ltcIncreased&&
+    currentLtc>=requiredLtcAtRequest
+  ){
     return "LTC_PURCHASED";
   }
 
