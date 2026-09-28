@@ -26,6 +26,13 @@ const VISIBILITY_RULES:Array<{label:string;patterns:RegExp[]}>= [
 type VisibilityProduct=Pick<HstoraProduct,"name"|"slug"|"short_description">&
   Partial<Pick<HstoraProduct,"description">>;
 
+const NEGATED_TOP_PATTERNS:RegExp[]=[
+  /\b(?:no|not|without)\s+top\s+search(?:able)?\b/gi,
+  /\b(?:no|not|without)\s+top\s*(?:\+|and|&)\s*latest(?:\s+search)?\b/gi,
+  /\btop\s+search(?:able)?\s+(?:unavailable|disabled|unsupported|not\s+available)\b/gi,
+  /\btop\s*(?:\+|and|&)\s*latest(?:\s+search)?\s+(?:unavailable|disabled|unsupported|not\s+available)\b/gi
+];
+
 function productText(product:VisibilityProduct):string{
   return [product.name,product.short_description??"",product.description??""]
     .join("\n").replace(/\s+/g," ").trim();
@@ -45,10 +52,18 @@ export function isXAccountProduct(product:VisibilityProduct):boolean{
 
 export function detectSearchVisibility(product:VisibilityProduct){
   const text=productText(product);
+  const positiveTopText=NEGATED_TOP_PATTERNS.reduce(
+    (value,pattern)=>value.replace(pattern," "),
+    text
+  );
   const labels:string[]=[];
   const evidence:string[]=[];
   for(const rule of VISIBILITY_RULES){
-    if(rule.patterns.some(pattern=>pattern.test(text))){
+    const haystack=
+      rule.label==="TOP+Latest"||rule.label==="TOP Search"
+        ?positiveTopText
+        :text;
+    if(rule.patterns.some(pattern=>pattern.test(haystack))){
       labels.push(rule.label);
       evidence.push(rule.label);
     }
