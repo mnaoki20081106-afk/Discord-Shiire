@@ -620,11 +620,25 @@ async function deliverOrder(env:Env,order:ShiireVendingOrder):Promise<boolean>{
     await persistDeliverySent(env,order.id,dm.id,message.id);
 
     if(machine.role_id){
-      await discordFetch(
-        env,
-        "/guilds/"+order.guild_id+"/members/"+order.user_id+"/roles/"+machine.role_id,
-        {method:"PUT"}
-      ).catch(()=>undefined);
+      try{
+        await discordFetch(
+          env,
+          "/guilds/"+order.guild_id+"/members/"+order.user_id+"/roles/"+machine.role_id,
+          {method:"PUT"}
+        );
+      }catch(error){
+        await auditX(env,{
+          level:"warn",
+          kind:"SHIIRE_VENDING_ROLE_ASSIGN_FAILED",
+          message:"Buyer delivery succeeded, but the configured post-purchase Discord role could not be assigned.",
+          details:{
+            orderId:order.id,
+            guildId:order.guild_id,
+            roleId:machine.role_id,
+            error:error instanceof Error?error.message:String(error)
+          }
+        }).catch(()=>undefined);
+      }
     }
 
     const logPayload={

@@ -5,7 +5,13 @@ import fs from "node:fs";
 const manifest=JSON.parse(
   fs.readFileSync(new URL("../bot-factory.json",import.meta.url),"utf8")
 ) as {
-  setup:{fields:Array<{key:string;type:string;required?:boolean;pattern?:string}>};
+  setup:{
+    fields:Array<{key:string;type:string;required?:boolean;pattern?:string}>;
+    discord?:{
+      permissions?:Array<{id:string;required?:boolean}>;
+      checks?:Array<{id:string;required?:boolean}>;
+    };
+  };
 };
 
 function field(key:string){
@@ -41,4 +47,19 @@ test("Factory critical secret fields keep intended requirements",()=>{
   assert.equal(field("CREDENTIALS_ENCRYPTION_KEY").required,true);
   assert.equal(field("SHIIRE_BRIDGE_SECRET").required,true);
   assert.equal(field("XACCOUNT_BOT_BASE_URL").required,true);
+});
+
+
+test("Factory includes Manage Roles for vending buyer-role fulfillment",()=>{
+  const permission=manifest.setup.discord?.permissions?.find(
+    item=>item.id==="manage-roles"
+  );
+  assert.ok(permission);
+  assert.equal(permission.required,true);
+
+  const roleOrder=manifest.setup.discord?.checks?.find(
+    item=>item.id==="role-order-shiire"
+  );
+  assert.ok(roleOrder);
+  assert.equal(roleOrder.required,true);
 });
