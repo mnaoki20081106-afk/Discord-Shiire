@@ -199,9 +199,22 @@
           "label": "メッセージ履歴を読む",
           "required": true,
           "description": "設置済みパネルの更新・管理に使用します。"
+        },
+        {
+          "id": "manage-roles",
+          "label": "ロールの管理",
+          "required": true,
+          "description": "自販機で購入後ロールを付与する場合に必要です。Discord-Shiireロールを付与対象ロールより上に配置してください。"
         }
       ],
       "checks": [
+        {
+          "id": "role-order-shiire",
+          "label": "Discord-Shiireを付与対象ロールより上に配置",
+          "required": true,
+          "description": "自販機購入後ロールを付与できるよう、Discord-ShiireのBOTロールを購入後に付けるロールより上に配置します。",
+          "path": "Discord > サーバー設定 > ロール"
+        },
         {
           "id": "interaction-endpoint",
           "label": "初回デプロイ後: Interactions Endpoint URLを設定",
