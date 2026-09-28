@@ -115,7 +115,7 @@ test("does not resume before either manual completion condition is met",()=>{
     binanceLtcBaseline:0.1,
     ltcBaselineCaptured:true,
     currentBinanceJpy:7_999,
-    currentBinanceLtc:0.399,
+    currentBinanceLtc:0.1,
     directLtcBudgetJpy:7_000
   }),"NONE");
 });
