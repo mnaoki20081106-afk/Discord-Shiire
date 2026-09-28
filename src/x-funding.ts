@@ -1,5 +1,8 @@
 import type { Env } from "./types";
-import { calculateFundingAllowance } from "./x-risk";
+import {
+  calculateLtcPurchaseAllowance,
+  calculateSpendablePayPayJpy
+} from "./x-risk";
 import { fundingSpendSince } from "./x-db";
 import { loadXSettings } from "./x-settings";
 import { getBinanceBalance, getLtcJpyMarketStatus } from "./providers/binance";
@@ -40,21 +43,24 @@ export async function getFundingPlan(env:Env,now=Date.now()){
     settings.observed_paypay_balance_at>0&&
     now-settings.observed_paypay_balance_at<=settings.max_paypay_balance_age_ms;
 
-  const allowance=calculateFundingAllowance({
-    reserveJpy:settings.reserve_jpy,
+  const allowance=calculateLtcPurchaseAllowance({
     maxPurchaseJpy:settings.max_purchase_jpy,
     dailyRemainingJpy:Math.max(0,settings.daily_purchase_limit_jpy-today),
     weeklyRemainingJpy:Math.max(0,settings.weekly_purchase_limit_jpy-week),
     monthlyRemainingJpy:Math.max(0,settings.monthly_purchase_limit_jpy-month),
     minPurchaseJpy:settings.min_purchase_jpy,
-    paypayBalanceJpy:observedFresh
-      ?Math.max(0,settings.observed_paypay_balance_jpy-settings.pending_paypay_funding_jpy)
-      :0,
     currentLtc:ltc.free+ltc.locked,
     targetLtcBalance:settings.target_ltc_balance,
     maxLtcBalance:settings.max_ltc_balance,
     ltcJpy:market.priceJpy
   });
+  const spendablePayPayJpy=observedFresh
+    ?calculateSpendablePayPayJpy({
+      observedBalanceJpy:settings.observed_paypay_balance_jpy,
+      reserveJpy:settings.reserve_jpy,
+      pendingReservationJpy:settings.pending_paypay_funding_jpy
+    })
+    :0;
 
   return {
     observedPayPay:{
@@ -66,6 +72,7 @@ export async function getFundingPlan(env:Env,now=Date.now()){
       ),
       observedAt:settings.observed_paypay_balance_at,
       fresh:observedFresh,
+      spendableNewFundingJpy:spendablePayPayJpy,
       source:"manual_observation" as const
     },
     pendingManualFunding:settings.pending_paypay_funding_jpy>0?{
@@ -100,8 +107,11 @@ export async function getFundingPlan(env:Env,now=Date.now()){
       weekRemainingJpy:Math.max(0,settings.weekly_purchase_limit_jpy-week),
       monthRemainingJpy:Math.max(0,settings.monthly_purchase_limit_jpy-month)
     },
-    allowance:observedFresh
-      ?allowance
-      :{...allowance,allowedJpy:0,blockedReason:"PAYPAY_BALANCE_MISSING_OR_STALE"}
+    allowance,
+    paypayFunding:{
+      fresh:observedFresh,
+      spendableJpy:spendablePayPayJpy,
+      blockedReason:observedFresh?null:"PAYPAY_BALANCE_MISSING_OR_STALE"
+    }
   };
 }
