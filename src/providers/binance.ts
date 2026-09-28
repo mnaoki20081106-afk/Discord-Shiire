@@ -1,6 +1,7 @@
 import type { Env } from "../types";
 import { hmacHex, randomId } from "../crypto";
 import { marketNotionalBounds } from "./binance-market";
+import { isBinanceAutoFundingServerEnabled } from "../x-funding-mode";
 
 const BASE_URL="https://api.binance.com";
 const SYMBOL="LTCJPY";
@@ -298,6 +299,14 @@ export async function placeLtcJpyMarketBuy(env:Env,input:{
 }){
   const amount=Math.floor(input.quoteJpy);
   if(!Number.isFinite(amount)||amount<=0) throw new BinanceApiError(400,"PURCHASE_AMOUNT_INVALID",false,"JPY purchase amount must be positive");
+  if(input.live&&!isBinanceAutoFundingServerEnabled(env)){
+    throw new BinanceApiError(
+      409,
+      "BINANCE_AUTO_FUNDING_SERVER_LOCKED",
+      false,
+      "Live Binance LTC purchase is locked by BINANCE_AUTO_FUNDING_ENABLED."
+    );
+  }
   const market=await getLtcJpyMarketStatus();
   if(market.status!=="TRADING"||!market.isSpotTradingAllowed){
     throw new BinanceApiError(409,"LTCJPY_NOT_TRADING",false,"LTCJPY is not currently tradable");
