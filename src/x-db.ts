@@ -475,6 +475,69 @@ export async function purchasedAccountCountForOrder(
   return Math.max(0,Number(row?.count??0));
 }
 
+export async function inventoryClassSummary(env:Env){
+  await ensureXSchema(env);
+  const rows=await env.DB.prepare(
+    "SELECT COALESCE(procurement_class,'UNCLASSIFIED') AS procurement_class,status,COUNT(*) AS quantity "+
+    "FROM purchased_accounts GROUP BY procurement_class,status ORDER BY procurement_class,status"
+  ).all<any>();
+  const out:Record<string,Record<string,number>>={};
+  for(const row of rows.results as any[]){
+    const cls=String(row.procurement_class??"UNCLASSIFIED");
+    if(!out[cls]) out[cls]={};
+    out[cls]![String(row.status)]=Number(row.quantity??0);
+  }
+  return out;
+}
+
+export async function purchaseStatsByClass(env:Env,since:number){
+  await ensureXSchema(env);
+  const rows=await env.DB.prepare(
+    "SELECT COALESCE(procurement_class,'UNCLASSIFIED') AS procurement_class,"+
+    "COALESCE(SUM(CASE WHEN status NOT IN ('DRY_RUN','FAILED') THEN quantity ELSE 0 END),0) AS count,"+
+    "COALESCE(SUM(CASE WHEN status NOT IN ('DRY_RUN','FAILED') THEN total_amount ELSE 0 END),0) AS amount,"+
+    "COALESCE(AVG(CASE WHEN status NOT IN ('DRY_RUN','FAILED') THEN unit_price END),0) AS average "+
+    "FROM purchase_orders WHERE created_at>=? GROUP BY procurement_class"
+  ).bind(since).all<any>();
+  const out:Record<string,{count:number;amount:number;average:number}>={};
+  for(const row of rows.results as any[]){
+    out[String(row.procurement_class??"UNCLASSIFIED")]={
+      count:Number(row.count??0),
+      amount:Number(row.amount??0),
+      average:Number(row.average??0)
+    };
+  }
+  return out;
+}
+
+export async function purchaseOrderStatusSummary(env:Env){
+  await ensureXSchema(env);
+  const rows=await env.DB.prepare(
+    "SELECT status,COUNT(*) AS count FROM purchase_orders GROUP BY status ORDER BY status"
+  ).all<any>();
+  return Object.fromEntries(
+    (rows.results as any[]).map(row=>[String(row.status),Number(row.count??0)])
+  ) as Record<string,number>;
+}
+
+export async function recentFundingEvents(env:Env,limit=30){
+  await ensureXSchema(env);
+  const safe=Math.max(1,Math.min(100,Math.floor(limit)));
+  return (await env.DB.prepare(
+    "SELECT id,provider,kind,amount_jpy,asset,asset_amount,status,provider_reference,metadata_json,created_at,updated_at "+
+    "FROM funding_events ORDER BY created_at DESC LIMIT ?"
+  ).bind(safe).all<any>()).results;
+}
+
+export async function recentCryptoTransactions(env:Env,limit=30){
+  await ensureXSchema(env);
+  const safe=Math.max(1,Math.min(100,Math.floor(limit)));
+  return (await env.DB.prepare(
+    "SELECT id,provider,asset,kind,amount,fee,network,address_hash,provider_transaction_id,status,metadata_json,created_at,updated_at "+
+    "FROM crypto_transactions ORDER BY created_at DESC LIMIT ?"
+  ).bind(safe).all<any>()).results;
+}
+
 export async function inventorySummary(env:Env){
   await ensureXSchema(env);
   const rows=await env.DB.prepare(
