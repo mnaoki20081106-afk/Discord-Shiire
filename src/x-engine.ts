@@ -1454,7 +1454,7 @@ async function runXProcurementUnlocked(env:Env):Promise<XRunResult>{
 export async function runXProcurement(env:Env):Promise<XRunResult>{
   const settings=await loadXSettings(env);
   const leaseKey="x_procurement";
-  const leaseId=await acquireProcurementLease(env,leaseKey,15*60_000);
+  const leaseId=await acquireProcurementLease(env,leaseKey,30*60_000);
   if(!leaseId){
     return {
       action:"PROCUREMENT_ALREADY_RUNNING",
