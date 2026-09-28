@@ -877,7 +877,7 @@ async function handleHstoraFundingNeed(
     return {
       action:"DRY_RUN_LTC_PURCHASE",
       dryRun:true,
-      details:{wouldBuyJpy:desired,ltcJpy,estimatedLtc:desired/ltcJpy,allowance}
+      details:{wouldBuyJpy:desired,ltcJpy,estimatedLtc:desired/ltcJpy,purchaseAllowance}
     };
   }
 
