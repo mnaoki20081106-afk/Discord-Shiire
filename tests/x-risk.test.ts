@@ -1,6 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { calculateFundingAllowance, splitPurchaseBatches, detectManualPayPayCompletion } from "../src/x-risk.ts";
+import {
+  calculateFundingAllowance,
+  calculateLtcPurchaseAllowance,
+  calculateSpendablePayPayJpy,
+  splitPurchaseBatches,
+  detectManualPayPayCompletion
+} from "../src/x-risk.ts";
 
 function base(){
   return {
@@ -77,7 +83,7 @@ test("splits 42 units into 20, 20, 2",()=>{
 test("detects direct LTC purchase after a pending PayPay action",()=>{
   assert.equal(detectManualPayPayCompletion({
     pendingReservationJpy:7_000,
-    jpyDepositRequiredJpy:7_000,
+    jpyCreditRequiredJpy:7_000,
     binanceJpyBaseline:1_000,
     binanceLtcBaseline:0.1,
     ltcBaselineCaptured:true,
@@ -90,7 +96,7 @@ test("detects direct LTC purchase after a pending PayPay action",()=>{
 test("detects PayPay-funded Binance JPY increase",()=>{
   assert.equal(detectManualPayPayCompletion({
     pendingReservationJpy:7_000,
-    jpyDepositRequiredJpy:7_000,
+    jpyCreditRequiredJpy:7_000,
     binanceJpyBaseline:1_000,
     binanceLtcBaseline:0.1,
     ltcBaselineCaptured:true,
@@ -103,7 +109,7 @@ test("detects PayPay-funded Binance JPY increase",()=>{
 test("does not resume before either manual completion condition is met",()=>{
   assert.equal(detectManualPayPayCompletion({
     pendingReservationJpy:7_000,
-    jpyDepositRequiredJpy:7_000,
+    jpyCreditRequiredJpy:7_000,
     binanceJpyBaseline:1_000,
     binanceLtcBaseline:0.1,
     ltcBaselineCaptured:true,
@@ -117,7 +123,7 @@ test("does not resume before either manual completion condition is met",()=>{
 test("does not false-detect LTC purchase when requirement falls below the old balance",()=>{
   assert.equal(detectManualPayPayCompletion({
     pendingReservationJpy:7_000,
-    jpyDepositRequiredJpy:7_000,
+    jpyCreditRequiredJpy:7_000,
     binanceJpyBaseline:1_000,
     binanceLtcBaseline:0.5,
     ltcBaselineCaptured:true,
@@ -130,7 +136,7 @@ test("does not false-detect LTC purchase when requirement falls below the old ba
 test("legacy pending request without captured LTC baseline fails closed",()=>{
   assert.equal(detectManualPayPayCompletion({
     pendingReservationJpy:7_000,
-    jpyDepositRequiredJpy:7_000,
+    jpyCreditRequiredJpy:7_000,
     binanceJpyBaseline:1_000,
     binanceLtcBaseline:0,
     ltcBaselineCaptured:false,
@@ -144,7 +150,7 @@ test("legacy pending request without captured LTC baseline fails closed",()=>{
 test("partial Binance JPY uses only the explicit deposit requirement for JPY completion",()=>{
   assert.equal(detectManualPayPayCompletion({
     pendingReservationJpy:7_000,
-    jpyDepositRequiredJpy:5_000,
+    jpyCreditRequiredJpy:5_000,
     binanceJpyBaseline:2_000,
     binanceLtcBaseline:0.1,
     ltcBaselineCaptured:true,
@@ -157,7 +163,7 @@ test("partial Binance JPY uses only the explicit deposit requirement for JPY com
 test("partial Binance JPY does not reduce the direct-LTC PayPay accounting path",()=>{
   assert.equal(detectManualPayPayCompletion({
     pendingReservationJpy:7_000,
-    jpyDepositRequiredJpy:5_000,
+    jpyCreditRequiredJpy:5_000,
     binanceJpyBaseline:2_000,
     binanceLtcBaseline:0.1,
     ltcBaselineCaptured:true,
@@ -165,4 +171,28 @@ test("partial Binance JPY does not reduce the direct-LTC PayPay accounting path"
     currentBinanceLtc:0.5,
     requiredLtcAtRequest:0.5
   }),"LTC_PURCHASED");
+});
+
+
+test("existing Binance JPY purchase allowance is independent of PayPay balance",()=>{
+  const result=calculateLtcPurchaseAllowance({
+    maxPurchaseJpy:10_000,
+    dailyRemainingJpy:7_000,
+    weeklyRemainingJpy:20_000,
+    monthlyRemainingJpy:50_000,
+    minPurchaseJpy:1_000,
+    currentLtc:0,
+    targetLtcBalance:10,
+    maxLtcBalance:20,
+    ltcJpy:10_000
+  });
+  assert.equal(result.allowedJpy,7_000);
+});
+
+test("spendable PayPay subtracts reserve and pending reservation",()=>{
+  assert.equal(calculateSpendablePayPayJpy({
+    observedBalanceJpy:50_000,
+    reserveJpy:20_000,
+    pendingReservationJpy:7_000
+  }),23_000);
 });
