@@ -1,6 +1,7 @@
 import type { Env } from "./types";
 import { randomId } from "./crypto";
 import {
+  acquireProcurementLease,
   auditX,
   circuitState,
   createPurchaseOrderRecord,
@@ -12,6 +13,7 @@ import {
   readyInventoryCount,
   readyInventoryCountByClass,
   recordFundingEvent,
+  releaseProcurementLease,
   updateFundingEventByProviderReference,
   setCircuitBreaker,
   storeDeliveredAccounts,
@@ -993,7 +995,7 @@ async function handleHstoraFundingNeed(
   }
 }
 
-export async function runXProcurement(env:Env):Promise<XRunResult>{
+async function runXProcurementUnlocked(env:Env):Promise<XRunResult>{
   const settings=await loadXSettings(env);
   if(settings.emergency_stop) return {action:"EMERGENCY_STOP",dryRun:settings.dry_run};
 
@@ -1014,6 +1016,38 @@ export async function runXProcurement(env:Env):Promise<XRunResult>{
   }
 
   await reconcilePendingXOrders(env);
+
+  const unresolvedOrders=await pendingPurchaseOrders(env);
+  if(unresolvedOrders.length){
+    await auditX(env,{
+      kind:"HSTORA_ORDER_PENDING_BLOCK",
+      message:"A previous HStora order is still unresolved; no new purchase will be created.",
+      details:{
+        count:unresolvedOrders.length,
+        orders:unresolvedOrders.slice(0,10).map((row:any)=>({
+          id:row.id,
+          externalOrderId:row.external_order_id,
+          status:row.status,
+          procurementClass:row.procurement_class,
+          createdAt:row.created_at
+        }))
+      }
+    });
+    return {
+      action:"HSTORA_ORDER_PENDING",
+      dryRun:settings.dry_run,
+      details:{
+        count:unresolvedOrders.length,
+        orders:unresolvedOrders.slice(0,10).map((row:any)=>({
+          id:row.id,
+          externalOrderId:row.external_order_id,
+          status:row.status,
+          procurementClass:row.procurement_class,
+          createdAt:row.created_at
+        }))
+      }
+    };
+  }
 
   try{
     const observedHstora=await getHstoraBalance(env);
@@ -1413,5 +1447,26 @@ export async function runXProcurement(env:Env):Promise<XRunResult>{
       }).catch(()=>undefined);
     }
     return {action:"HSTORA_PURCHASE_FAILED",dryRun:false,inventory,productId:Number(fresh.id)};
+  }
+}
+
+
+export async function runXProcurement(env:Env):Promise<XRunResult>{
+  const settings=await loadXSettings(env);
+  const leaseKey="x_procurement";
+  const leaseId=await acquireProcurementLease(env,leaseKey,15*60_000);
+  if(!leaseId){
+    return {
+      action:"PROCUREMENT_ALREADY_RUNNING",
+      dryRun:settings.dry_run
+    };
+  }
+
+  try{
+    return await runXProcurementUnlocked(env);
+  }finally{
+    await releaseProcurementLease(env,leaseKey,leaseId).catch(error=>{
+      console.error("failed to release X procurement lease",error);
+    });
   }
 }
