@@ -499,6 +499,13 @@ function drawNav(){
 function card(title,data){return '<section class="card"><strong>'+esc(title)+'</strong><pre>'+esc(JSON.stringify(data,null,2))+'</pre></section>'}
 async function runNow(){const d=await api("/api/x/run",{method:"POST",body:"{}"});alert(JSON.stringify(d,null,2));await load()}
 async function runLtcNow(){const d=await api("/api/x/funding/auto-purchase/run",{method:"POST",body:"{}"});alert(JSON.stringify(d,null,2));await load()}
+async function saveFundingMode(){
+ const el=document.querySelector("#fundingMode");
+ const mode=String(el?.value||"manual_hstora");
+ if(mode==="binance_auto"&&!window.confirm("Binance自動LTC購入モードへ切り替えますか？ サーバー側ロックが解除済みの場合だけ有効になります。")) return;
+ await api("/api/x/funding/mode",{method:"POST",body:JSON.stringify({mode})});
+ await load();
+}
 async function cancelPendingFunding(){await api("/api/x/funding/pending/cancel",{method:"POST",body:"{}"});await load()}
 async function approveBulk(){await api("/api/x/bulk-approval",{method:"POST",body:JSON.stringify({minutes:10})});await load()}
 async function resetEmergency(){await api("/api/x/emergency-stop/reset",{method:"POST",body:"{}"});await load()}
@@ -508,9 +515,11 @@ function metrics(data){
  const err=(data.recentErrors?.length??0)+(data.circuitBreakers?.length??0);
  const todayJpy=data.today?.approximateJpy;
  const avgJpy=data.today?.approximateAverageJpy;
+ const manual=data.safety?.fundingMode==="manual_hstora";
  return '<div class="grid">'+
-  '<div class="metric"><small>LTC購入上限</small><strong>'+esc(f?.allowedJpy??0)+'円</strong></div>'+
-  '<div class="metric"><small>LTC残高</small><strong>'+esc(data.balances?.binanceLtc?.data?.free??"-")+' LTC</strong></div>'+
+  '<div class="metric"><small>資金モード</small><strong>'+esc(data.safety?.fundingModeLabel??"-")+'</strong></div>'+
+  '<div class="metric"><small>'+(manual?'補充先':'Binance LTC残高')+'</small><strong>'+(manual?'HStora Main Wallet':esc(data.balances?.binanceLtc?.data?.free??"-")+' LTC')+'</strong></div>'+
+  (manual?'':'<div class="metric"><small>LTC購入上限</small><strong>'+esc(f?.allowedJpy??0)+'円</strong></div>')+
   '<div class="metric"><small>HStora残高</small><strong>'+esc(data.balances?.hstora?.data?.balance??"-")+' USD</strong></div>'+
   '<div class="metric"><small>X垢在庫</small><strong>'+esc(ready)+'</strong></div>'+
   '<div class="metric"><small>本日の仕入数</small><strong>'+esc(data.today?.count??0)+'</strong></div>'+
@@ -547,33 +556,51 @@ async function load(){
     const s=data.settings||{};
     document.querySelector("#mode").textContent=s.dry_run?"DRY RUN":"LIVE";
     document.querySelector("#mode").className="status "+(s.dry_run?"good":"bad");
+    const binanceButton=s.funding_mode==="binance_auto"
+      ?'<button id="runLtcNow">LTC自動購入判定</button>'
+      :'';
     main.innerHTML=metrics(data)+
-      '<section class="card"><strong>手動実行</strong><p class="hint">Dry Run中は購入POSTを行いません。LTC自動購入は自動仕入れとは独立して実行できます。</p><div class="formrow"><button id="runLtcNow">LTC自動購入判定</button><button id="runNow">仕入れ判定を実行</button></div></section>'+
+      '<section class="card"><strong>手動実行</strong><p class="hint">Dry Run中は実購入POSTを行いません。手動LTC補充モードではHStora残高反映後に仕入れ処理が自動再開します。</p><div class="formrow">'+binanceButton+'<button id="runNow">仕入れ判定を実行</button></div></section>'+
       card(current,data);
-    document.querySelector("#runLtcNow").onclick=()=>runLtcNow().catch(e=>alert(e.message));
+    const runLtc=document.querySelector("#runLtcNow"); if(runLtc) runLtc.onclick=()=>runLtcNow().catch(e=>alert(e.message));
     document.querySelector("#runNow").onclick=()=>runNow().catch(e=>alert(e.message));
   }else if(current==="Funding"){
     data=await api("/api/x/dashboard");
     const s=data.settings||{};
-    main.innerHTML=metrics(data)+
-      '<section class="card"><strong>LTC自動購入</strong>'+
-      '<p class="hint">auto_purchase_enabled がONなら、自動仕入れとは独立して1分CronでBinance JPY残高からLTC/JPYを購入し、target_ltc_balanceまで補充します。1回・日・週・月・max_ltc_balance・Binanceの現行注文上限をすべて尊重します。</p>'+
+    const manual=s.funding_mode==="manual_hstora";
+    const unlocked=Boolean(data.safety?.binanceAutoFundingServerEnabled);
+    const modeCard=
+      '<section class="card"><strong>LTC補充方法</strong>'+
+      '<p class="hint">通常はHStora Main WalletへLTCを手動補充します。残高反映後はBOTが在庫判定→HStora購入→自販機納品まで自動再開します。Binanceモードはサーバー側ロックを解除した場合だけ選択できます。</p>'+
+      '<div class="formrow"><select id="fundingMode" style="flex:1;border:1px solid #353b49;border-radius:10px;padding:10px;background:#151922;color:#fff">'+
+      '<option value="manual_hstora" '+(manual?'selected':'')+'>HStoraへLTC手動補充</option>'+
+      '<option value="binance_auto" '+(!manual?'selected':'')+' '+(unlocked?'':'disabled')+'>Binance自動LTC購入'+(unlocked?'':'（ロック中）')+'</option>'+
+      '</select><button id="saveFundingMode">切り替え</button></div>'+
+      '<p class="status '+(unlocked?'good':'warn')+'">Binanceサーバーロック: '+(unlocked?'解除済み':'有効')+'</p></section>';
+    const manualCard=
+      '<section class="card"><strong>現在の運用: LTC手動補充</strong>'+
+      '<p class="hint">HStoraの Wallet → Add Funds からLTCで補充してください。BOTはHStora残高を1分Cronで確認し、必要残高が入れば人手を挟まず仕入れ処理へ戻ります。</p>'+
+      '<div class="grid"><div class="metric"><small>HStora Main Wallet</small><strong>'+esc(data.balances?.hstora?.data?.balance??"-")+' USD</strong></div><div class="metric"><small>自動仕入れ</small><strong>'+(data.safety?.autoProcurementEnabled?'ON':'OFF')+'</strong></div></div></section>';
+    const binanceCards=
+      '<section class="card"><strong>Binance自動LTC購入</strong>'+
+      '<p class="hint">auto_purchase_enabled がONなら1分CronでBinance JPY残高からLTC/JPYを購入します。1回・日・週・月・max_ltc_balance・現行注文上限を尊重し、実発注はサーバー側フラグでも二重ロックされています。</p>'+
       '<button id="runLtcFundingNow">今すぐLTC購入判定</button></section>'+
       '<section class="card"><strong>PayPay残高（手動観測）</strong>'+
-      '<p class="hint">PayPay操作はBinance Japanの公式Web/アプリ側で手動実行します。BOTはPayPay残高を直接取得せず、ここで観測した残高からreserve_jpy等の上限を計算します。古い観測値では新しいPayPay資金の投入を止めます。既にBinanceへあるJPYは別枠で利用できます。</p>'+
-      '<div class="formrow"><input id="paypayBalance" inputmode="numeric" type="number" min="0" step="1" value="'+esc(s.observed_paypay_balance_jpy??0)+'"><button id="savePayPay">観測値を保存</button></div>'+
-      '</section>'+
+      '<p class="hint">Binanceモード用の既存経路です。BOTはPayPayへログインせず、観測残高とreserve_jpyから新規投入可能額を計算します。</p>'+
+      '<div class="formrow"><input id="paypayBalance" inputmode="numeric" type="number" min="0" step="1" value="'+esc(s.observed_paypay_balance_jpy??0)+'"><button id="savePayPay">観測値を保存</button></div></section>';
+    const fxCard=
       '<section class="card"><strong>USD/JPY（手動観測）</strong>'+
-      '<p class="hint">HStoraのUSD建て価格をJPY上限と比較するための換算値です。期限切れなら価格判定を停止します。</p>'+
-      '<div class="formrow"><input id="usdJpy" inputmode="decimal" type="number" min="0" step="0.001" value="'+esc(s.usd_jpy_rate??0)+'"><button id="saveFx">換算値を保存</button></div>'+
-      '</section>'+
-      (data.funding?.data?.pendingManualFunding
-        ?'<section class="card"><strong>PayPay手動操作待ち</strong><p class="hint">最大予約額: '+esc(data.funding.data.pendingManualFunding.amountJpy)+'円。Binance Japan公式UIで表示された経路を実行してください。BOTは実際のJPY/LTC残高増加を検知して再開します。</p><button id="cancelPending" class="danger">この要求を取消</button></section>'
+      '<p class="hint">HStoraのUSD建て商品をJPY上限と比較するための換算値です。</p>'+
+      '<div class="formrow"><input id="usdJpy" inputmode="decimal" type="number" min="0" step="0.001" value="'+esc(s.usd_jpy_rate??0)+'"><button id="saveFx">換算値を保存</button></div></section>';
+    main.innerHTML=metrics(data)+modeCard+(manual?manualCard:binanceCards)+fxCard+
+      (!manual&&data.funding?.data?.pendingManualFunding
+        ?'<section class="card"><strong>PayPay手動操作待ち</strong><p class="hint">最大予約額: '+esc(data.funding.data.pendingManualFunding.amountJpy)+'円。残高増加を確認後に再開します。</p><button id="cancelPending" class="danger">この要求を取消</button></section>'
         :'')+
       card("Funding detail",data.funding);
+    document.querySelector("#saveFundingMode").onclick=()=>saveFundingMode().catch(e=>alert(e.message));
     const cancel=document.querySelector("#cancelPending"); if(cancel) cancel.onclick=()=>cancelPendingFunding().catch(e=>alert(e.message));
     const runLtcFunding=document.querySelector("#runLtcFundingNow"); if(runLtcFunding) runLtcFunding.onclick=()=>runLtcNow().catch(e=>alert(e.message));
-    document.querySelector("#savePayPay").onclick=()=>observePayPay().catch(e=>alert(e.message));
+    const savePayPay=document.querySelector("#savePayPay"); if(savePayPay) savePayPay.onclick=()=>observePayPay().catch(e=>alert(e.message));
     document.querySelector("#saveFx").onclick=()=>observeFx().catch(e=>alert(e.message));
   }else if(current==="Binance"){data=await api("/api/x/binance");main.innerHTML=card(current,data)}
   else if(current==="HStora"){data=await api("/api/x/hstora");main.innerHTML=card(current,data)}
@@ -581,7 +608,8 @@ async function load(){
   else if(current==="Orders"){data=await api("/api/x/orders");main.innerHTML=card(current,data)}
   else if(current==="Logs"){data=await api("/api/x/logs");main.innerHTML=card(current,data)}
   else if(current==="LTC Wallet"){
-    main.innerHTML='<section class="card"><strong>LTC Wallet</strong><p class="status">専用ホットウォレットは現在無効です。秘密鍵をCloudflare Workerへ保存しません。</p></section>';
+    data=await api("/api/x/dashboard");
+    main.innerHTML='<section class="card"><strong>LTC Wallet</strong><p class="hint">現在は専用ホットウォレットの秘密鍵をCloudflare Workerへ保存しません。手動補充モードの入金先はHStora Main Walletです。HStoraの公式APIに入金先取得/入金実行APIが追加されるまでは、ここから勝手にオンチェーン送金しません。</p><div class="grid"><div class="metric"><small>資金モード</small><strong>'+esc(data.safety?.fundingModeLabel??"-")+'</strong></div><div class="metric"><small>HStora残高</small><strong>'+esc(data.balances?.hstora?.data?.balance??"-")+' USD</strong></div></div></section>';
   }else{
     data=await api("/api/x/settings");
     main.innerHTML='<section class="card"><strong>Settings</strong><p class="hint">初期状態は dry_run=true / 自動購入OFF / 自動仕入れOFFです。設定変更だけでは秘密鍵やAPI Secretは保存されません。</p><textarea id="settingsJson"></textarea><div class="formrow"><button id="saveSettings">設定を保存</button></div><div class="formrow"><button id="approveBulk">大量購入を10分間承認</button><button id="resetEmergency">Emergency Stop解除</button></div></section>';
