@@ -85,7 +85,8 @@ export function splitPurchaseBatches(quantity:number,maxBatch:number):number[]{
 export type ManualPayPayCompletion="NONE"|"JPY_FUNDED"|"LTC_PURCHASED";
 
 export function detectManualPayPayCompletion(input:{
-  pendingJpy:number;
+  pendingReservationJpy:number;
+  jpyDepositRequiredJpy:number;
   binanceJpyBaseline:number;
   binanceLtcBaseline:number;
   ltcBaselineCaptured:boolean;
@@ -93,8 +94,8 @@ export function detectManualPayPayCompletion(input:{
   currentBinanceLtc:number;
   requiredLtcAtRequest:number;
 }):ManualPayPayCompletion{
-  const pending=Math.max(0,input.pendingJpy);
-  if(pending<=0) return "NONE";
+  const reserved=Math.max(0,input.pendingReservationJpy);
+  if(reserved<=0) return "NONE";
 
   const requiredLtcAtRequest=Math.max(0,input.requiredLtcAtRequest);
   const ltcBaseline=Math.max(0,input.binanceLtcBaseline);
@@ -114,9 +115,12 @@ export function detectManualPayPayCompletion(input:{
     return "LTC_PURCHASED";
   }
 
-  const expectedJpy=Math.max(0,input.binanceJpyBaseline)+pending;
-  if(input.currentBinanceJpy>=expectedJpy){
-    return "JPY_FUNDED";
+  const jpyNeeded=Math.max(0,input.jpyDepositRequiredJpy);
+  if(jpyNeeded>0){
+    const expectedJpy=Math.max(0,input.binanceJpyBaseline)+jpyNeeded;
+    if(input.currentBinanceJpy>=expectedJpy){
+      return "JPY_FUNDED";
+    }
   }
 
   return "NONE";
