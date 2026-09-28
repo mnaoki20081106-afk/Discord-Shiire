@@ -143,6 +143,32 @@ const SCHEMA=[
 `CREATE INDEX IF NOT EXISTS idx_audit_logs_created ON audit_logs(created_at)`
 ];
 
+export async function ensureD1Column(
+  env:Env,
+  table:string,
+  column:string,
+  type:string
+):Promise<void>{
+  const readColumns=async()=>(
+    await env.DB.prepare(
+      "PRAGMA table_info("+table+")"
+    ).all<{name:string}>()
+  ).results.map(row=>row.name);
+
+  if((await readColumns()).includes(column)) return;
+
+  try{
+    await env.DB.prepare(
+      "ALTER TABLE "+table+" ADD COLUMN "+column+" "+type
+    ).run();
+  }catch(error){
+    // Another isolate may have added the same column after our PRAGMA read.
+    // Re-read the schema before treating the ALTER failure as fatal.
+    if((await readColumns()).includes(column)) return;
+    throw error;
+  }
+}
+
 export async function ensureXSchema(env:Env){
   if(schemaReady) return;
   for(const sql of SCHEMA) await env.DB.prepare(sql).run();
@@ -153,14 +179,7 @@ export async function ensureXSchema(env:Env){
     ["purchased_accounts","procurement_class","TEXT"]
   ];
   for(const [table,column,type] of migrations){
-    const columns=(await env.DB.prepare(
-      "PRAGMA table_info("+table+")"
-    ).all<{name:string}>()).results.map(row=>row.name);
-    if(!columns.includes(column)){
-      await env.DB.prepare(
-        "ALTER TABLE "+table+" ADD COLUMN "+column+" "+type
-      ).run();
-    }
+    await ensureD1Column(env,table,column,type);
   }
 
   schemaReady=true;
