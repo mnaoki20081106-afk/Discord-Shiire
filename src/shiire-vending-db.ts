@@ -2,6 +2,7 @@ import type { Env } from "./types";
 import { randomId } from "./crypto";
 import { encryptSensitive, decryptSensitive, type EncryptedSecret } from "./x-crypto";
 import { ensureXSchema } from "./x-db";
+import { canReleaseReservedOrder, paymentPrice } from "./shiire-vending-policy";
 
 export type ShiireVendingMachine={
   id:string;
@@ -408,7 +409,8 @@ export async function reserveShiireOrder(
 ){
   await ensureShiireVendingSchema(env);
   const quantity=Math.max(1,Math.floor(input.quantity));
-  const unit=input.method==="kyash"?input.product.price_kyash:input.product.price_paypay;
+  const unit=paymentPrice(input.product,input.method);
+  if(unit<1) throw new Error("PAYMENT_METHOD_DISABLED_FOR_PRODUCT");
   const discount=Math.max(0,Math.floor(input.discount));
   const total=Math.max(0,(unit-discount)*quantity);
   const now=Date.now(),orderId=randomId(),until=now+10*60_000;
@@ -571,7 +573,7 @@ export async function finishShiireDelivery(env:Env,order:ShiireVendingOrder){
 
 export async function releaseShiireOrder(env:Env,orderId:string){
   const order=await getShiireOrder(env,orderId);
-  if(!order||!["awaiting_payment","reserving","failed"].includes(order.status)) return 0;
+  if(!order||!canReleaseReservedOrder(order.status)) return 0;
   const rows=(await env.DB.prepare(
     "SELECT account_id FROM shiire_vending_reservations WHERE order_id=?"
   ).bind(orderId).all<{account_id:string}>()).results;
