@@ -57,6 +57,7 @@ import {
 } from "./x-qualification";
 import { notifyDiscord } from "./x-alerts";
 import { chooseRestockClass, restockCycleComplete, type RestockClass } from "./x-restock-policy";
+import { hstoraHasUsableDelivery, hstoraStatusRequiresDelivery } from "./x-hstora-order-policy";
 import { notifyShiireVendingStockArrival } from "./shiire-vending";
 
 const PAYPAY_DIRECT_PURCHASE_MIN_JPY=1_000;
@@ -248,10 +249,32 @@ export async function reconcilePendingXOrders(env:Env){
       await allowExpectedHstoraDecrease(env,Number(row.total_amount));
     }
 
-    const hasDelivery=Boolean(
-      order.delivery?.available&&
-      Array.isArray(order.delivery?.items)
-    );
+    const hasDelivery=hstoraHasUsableDelivery(order);
+    if(hstoraStatusRequiresDelivery(status)&&!hasDelivery){
+      await updatePurchaseOrderRecord(env,String(row.id),{
+        status:"DELIVERY_INTEGRITY_FAILED",
+        supplierOrderId:String(order.id),
+        response:order,
+        errorCode:"TERMINAL_ORDER_WITHOUT_DELIVERY"
+      });
+      await setCircuitBreaker(
+        env,
+        "delivery_integrity",
+        "OPEN",
+        "TERMINAL_ORDER_WITHOUT_DELIVERY"
+      );
+      await notifyDiscord(env,{
+        title:"不良商品",
+        message:"HStora注文が完了状態なのに納品データを取得できないため、自動仕入れを停止しました。",
+        level:"error",
+        details:{
+          purchaseOrderId:row.id,
+          supplierOrderId:order.id,
+          status
+        }
+      }).catch(()=>undefined);
+      continue;
+    }
 
     if(hasDelivery){
       const added=await storeDeliveredAccounts(env,{
@@ -1559,7 +1582,36 @@ async function runXProcurementUnlocked(env:Env):Promise<XRunResult>{
     });
     const status=String(order.status??"SUBMITTED").toUpperCase();
     await allowExpectedHstoraDecrease(env,totalSource);
-    const added=order.delivery?.available
+    const hasDelivery=hstoraHasUsableDelivery(order);
+    if(hstoraStatusRequiresDelivery(status)&&!hasDelivery){
+      await updatePurchaseOrderRecord(env,recordId,{
+        status:"DELIVERY_INTEGRITY_FAILED",
+        supplierOrderId:String(order.id),
+        response:order,
+        errorCode:"TERMINAL_ORDER_WITHOUT_DELIVERY"
+      });
+      await setCircuitBreaker(
+        env,
+        "delivery_integrity",
+        "OPEN",
+        "TERMINAL_ORDER_WITHOUT_DELIVERY"
+      );
+      await notifyDiscord(env,{
+        title:"不良商品",
+        message:"HStora注文が完了状態なのに納品データを取得できないため、自動仕入れを停止しました。",
+        level:"error",
+        details:{productId:fresh.id,quantity,supplierOrderId:order.id,status}
+      }).catch(()=>undefined);
+      return {
+        action:"DELIVERY_INTEGRITY_FAILED",
+        dryRun:false,
+        inventory,
+        requested:quantity,
+        productId:Number(fresh.id),
+        details:{status,supplierOrderId:order.id,reason:"TERMINAL_ORDER_WITHOUT_DELIVERY"}
+      };
+    }
+    const added=hasDelivery
       ?await storeDeliveredAccounts(env,{
         purchaseOrderId:recordId,
         supplier:"hstora",
@@ -1576,10 +1628,10 @@ async function runXProcurementUnlocked(env:Env):Promise<XRunResult>{
         added
       ).catch(()=>undefined);
     }
-    const storedTotal=order.delivery?.available
+    const storedTotal=hasDelivery
       ?await purchasedAccountCountForOrder(env,recordId)
       :0;
-    if(order.delivery?.available&&storedTotal!==quantity){
+    if(hasDelivery&&storedTotal!==quantity){
       await updatePurchaseOrderRecord(env,recordId,{
         status:"DELIVERY_INTEGRITY_FAILED",
         supplierOrderId:String(order.id),
@@ -1603,19 +1655,19 @@ async function runXProcurementUnlocked(env:Env):Promise<XRunResult>{
       };
     }
     await updatePurchaseOrderRecord(env,recordId,{
-      status:order.delivery?.available?(status||"DELIVERED"):(status||"PROCESSING"),
+      status:hasDelivery?(status||"DELIVERED"):(status||"PROCESSING"),
       supplierOrderId:String(order.id),
       response:order
     });
     await notifyDiscord(env,{
-      title:order.delivery?.available?"仕入れ完了":"仕入れ処理中",
-      message:order.delivery?.available
+      title:hasDelivery?"仕入れ完了":"仕入れ処理中",
+      message:hasDelivery
         ?"購入データを暗号化し、READY_FOR_DELIVERYへ保存しました。"
         :"注文は作成済みです。次回実行時に公式Order Lookupで照合します。",
       details:{productId:fresh.id,quantity,insertedNow:added,storedTotal,status}
     }).catch(()=>undefined);
     return {
-      action:order.delivery?.available?"HSTORA_PURCHASE_DELIVERED":"HSTORA_PURCHASE_PROCESSING",
+      action:hasDelivery?"HSTORA_PURCHASE_DELIVERED":"HSTORA_PURCHASE_PROCESSING",
       dryRun:false,
       inventory,
       requested:quantity,
@@ -1630,7 +1682,36 @@ async function runXProcurementUnlocked(env:Env):Promise<XRunResult>{
       recovered=true;
       const status=String(order.status??"PROCESSING").toUpperCase();
       await allowExpectedHstoraDecrease(env,totalSource);
-      const added=order.delivery?.available
+      const hasDelivery=hstoraHasUsableDelivery(order);
+      if(hstoraStatusRequiresDelivery(status)&&!hasDelivery){
+        await updatePurchaseOrderRecord(env,recordId,{
+          status:"DELIVERY_INTEGRITY_FAILED",
+          supplierOrderId:String(order.id),
+          response:order,
+          errorCode:"TERMINAL_ORDER_WITHOUT_DELIVERY"
+        });
+        await setCircuitBreaker(
+          env,
+          "delivery_integrity",
+          "OPEN",
+          "TERMINAL_ORDER_WITHOUT_DELIVERY"
+        );
+        await notifyDiscord(env,{
+          title:"不良商品",
+          message:"照合したHStora注文が完了状態なのに納品データを取得できないため、自動仕入れを停止しました。",
+          level:"error",
+          details:{productId:fresh.id,quantity,supplierOrderId:order.id,status}
+        }).catch(()=>undefined);
+        return {
+          action:"DELIVERY_INTEGRITY_FAILED",
+          dryRun:false,
+          inventory,
+          requested:quantity,
+          productId:Number(fresh.id),
+          details:{status,supplierOrderId:order.id,reason:"TERMINAL_ORDER_WITHOUT_DELIVERY"}
+        };
+      }
+      const added=hasDelivery
         ?await storeDeliveredAccounts(env,{
           purchaseOrderId:recordId,
           supplier:"hstora",
@@ -1647,10 +1728,10 @@ async function runXProcurementUnlocked(env:Env):Promise<XRunResult>{
           added
         ).catch(()=>undefined);
       }
-      const recoveredStoredTotal=order.delivery?.available
+      const recoveredStoredTotal=hasDelivery
         ?await purchasedAccountCountForOrder(env,recordId)
         :0;
-      if(order.delivery?.available&&recoveredStoredTotal!==quantity){
+      if(hasDelivery&&recoveredStoredTotal!==quantity){
         await updatePurchaseOrderRecord(env,recordId,{
           status:"DELIVERY_INTEGRITY_FAILED",
           supplierOrderId:String(order.id),
