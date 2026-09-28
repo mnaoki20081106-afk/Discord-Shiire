@@ -249,7 +249,7 @@ auto_purchase_enabled = false
 auto_procurement_enabled = false
 dedicated_ltc_wallet = disabled (no signer connected)
 emergency_stop = false
-seller_quality_mode = strict_api
+seller_quality_mode = trial_only
 ```
 
 Turning Dry Run off through the admin API requires an explicit live-mode confirmation.
@@ -349,16 +349,18 @@ BINANCE_API_KEY
 BINANCE_API_SECRET
 HSTORA_API_KEY
 HSTORA_API_SECRET
-HSTORA_WEBHOOK_SECRET
 CREDENTIALS_ENCRYPTION_KEY
 ```
 
 Optional / feature-specific:
 
 ```text
+HSTORA_WEBHOOK_SECRET
 BINANCE_TRAVEL_RULE_QUESTIONNAIRE
 DISCORD_NOTIFY_WEBHOOK_URL
 ```
+
+`HSTORA_WEBHOOK_SECRET` はWebhook即時反映を使う場合に設定します。未設定でも1分Cronの注文照合は動作します。
 
 For live withdrawal support, use a **separate** Binance API key rather than expanding the trading key:
 
@@ -562,3 +564,21 @@ When both classes are below their reorder points, TOP_SEARCH is replenished firs
 Within each class, qualified HStora listings are sorted cheapest-first. TOP_SEARCH is sorted by effective JPY unit price and NO_SHADOWBAN is sorted by effective USD unit price. The price tier is recalculated using the quantity that will actually be ordered, including first-product trial limits.
 
 Existing purchased accounts are backfilled into the new procurement classes when their HStora product is re-evaluated. The engine recounts class inventory after this backfill before placing a new order, preventing a migration-time extra batch.
+
+
+## Production deployment checklist
+
+現在、このリポジトリの GitHub Actions は CI（typecheck / test）のみで、Cloudflare Worker の本番デプロイは自動ではありません。
+
+初回に必要な外部設定:
+
+1. `npm run deploy` または Cloudflare Workers Builds で Discord-Shiire をデプロイし、実際の Worker HTTPS origin を確認する。
+2. Xaccount-Bot Worker に `SHIIRE_API_BASE_URL=<Discord-Shiireの実URL>` を設定する。
+3. Discord-Shiire Worker に `XACCOUNT_BOT_BASE_URL=<Xaccount-Botの実URL>` を設定する。
+4. 両Workerに同一の32文字以上の `SHIIRE_BRIDGE_SECRET` を Secret として設定する。
+5. Discord-Shiire Worker に `ADMIN_TOKEN`, `DISCORD_APPLICATION_ID`, `DISCORD_PUBLIC_KEY`, `DISCORD_BOT_TOKEN`, `BINANCE_API_KEY`, `BINANCE_API_SECRET`, `HSTORA_API_KEY`, `HSTORA_API_SECRET`, `CREDENTIALS_ENCRYPTION_KEY` を設定する。
+6. Discord Developer Portal の Interactions Endpoint URL を `https://<Discord-Shiire Worker>/interactions` に設定する。
+7. HStora Webhook を使う場合だけ、Webhook URLを `https://<Discord-Shiire Worker>/webhooks/hstora` に設定し、同じ署名Secretを `HSTORA_WEBHOOK_SECRET` として保存する。
+8. Xaccount-Bot の GitHub Repository Variable `VITE_API_BASE_URL` を実際の Xaccount-Bot Worker origin に設定する。
+
+なお、現在のXアカウント仕入れフローでは HStora Main Wallet へのLTC入金は手動境界です。Binance出金APIの安全チェック実装はありますが、HStoraの入金先を公式APIから取得できないため、自動仕入れエンジンから出金関数を呼びません。専用LTC Walletも未接続です。
