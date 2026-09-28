@@ -515,3 +515,50 @@ The main dashboard can then manage:
 - stock-arrival channel + mention role
 - coupons
 - order history
+
+
+### Procurement classes
+
+HStora X-account procurement is separated into two independent inventory classes.
+
+#### TOP_SEARCH
+
+Requirements:
+
+- the listing must be an X/Twitter account product
+- the HStora listing text must explicitly state `TOP Search`, `TOP+Latest`, or equivalent TOP+Latest wording
+- the effective price for the quantity actually being ordered must be at or below `max_unit_price_jpy`
+- default ceiling: `80 JPY / account`
+
+`Search Visible`, `Latest Search`, or `No Shadowban` alone do not qualify an item as TOP_SEARCH.
+
+#### NO_SHADOWBAN
+
+Requirements:
+
+- the listing must be an X/Twitter account product
+- it must explicitly state `No Shadowban` / `No Shadow Ban`
+- it must **not** contain TOP Search / TOP+Latest evidence
+- the effective HStora USD unit price must be at or below `max_no_shadowban_unit_price_usd`
+- default ceiling: `0.60 USD / account`
+- the configurable ceiling is restricted to `0.50 - 0.60 USD`
+
+If a listing contains both TOP Search and No Shadowban wording, it belongs to **TOP_SEARCH only** and is not double-counted.
+
+Each class has independent inventory controls:
+
+```text
+TOP_SEARCH
+  reorder_point
+  target_stock
+
+NO_SHADOWBAN
+  no_shadowban_reorder_point
+  no_shadowban_target_stock
+```
+
+When both classes are below their reorder points, TOP_SEARCH is replenished first.
+
+Within each class, qualified HStora listings are sorted cheapest-first. TOP_SEARCH is sorted by effective JPY unit price and NO_SHADOWBAN is sorted by effective USD unit price. The price tier is recalculated using the quantity that will actually be ordered, including first-product trial limits.
+
+Existing purchased accounts are backfilled into the new procurement classes when their HStora product is re-evaluated. The engine recounts class inventory after this backfill before placing a new order, preventing a migration-time extra batch.
