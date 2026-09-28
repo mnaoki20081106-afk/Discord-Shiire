@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  SHIIRE_DISCORD_BOT_PERMISSIONS,
   canReleaseReservedOrder,
   deliveryNonce,
   paymentMethodEnabled,
@@ -46,4 +47,21 @@ test("delivery nonce is stable and Discord-sized",()=>{
   assert.equal(a,b);
   assert.ok(a.length<=25);
   assert.match(a,/^[A-Za-z0-9]+$/);
+});
+
+
+test("Discord invite permission mask contains every vending permission",()=>{
+  const mask=BigInt(SHIIRE_DISCORD_BOT_PERMISSIONS);
+  const required=[
+    1n<<10n, // View Channel
+    1n<<11n, // Send Messages
+    1n<<14n, // Embed Links
+    1n<<15n, // Attach Files
+    1n<<16n, // Read Message History
+    1n<<28n  // Manage Roles
+  ];
+  for(const permission of required){
+    assert.notEqual(mask&permission,0n);
+  }
+  assert.equal(mask&(1n<<17n),0n,"Mention Everyone remains intentionally disabled");
 });
