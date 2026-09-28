@@ -1,4 +1,5 @@
 import type { Env } from "./types";
+import type { FundingMode } from "./x-funding-mode";
 import { getXSetting, setXSetting } from "./x-db";
 
 export type XSettings={
@@ -6,6 +7,7 @@ export type XSettings={
   emergency_stop:boolean;
   auto_purchase_enabled:boolean;
   auto_procurement_enabled:boolean;
+  funding_mode:FundingMode;
 
   reserve_jpy:number;
   max_purchase_jpy:number;
@@ -69,6 +71,7 @@ export const DEFAULT_X_SETTINGS:XSettings={
   emergency_stop:false,
   auto_purchase_enabled:false,
   auto_procurement_enabled:false,
+  funding_mode:"manual_hstora",
 
   reserve_jpy:0,
   max_purchase_jpy:0,
@@ -175,7 +178,11 @@ function sanitizeStoredSettings(value:unknown):Partial<XSettings>{
       if(typeof v==="number"&&Number.isFinite(v)&&v>=0) out[key]=v;
       continue;
     }
-    if(key==="funding_mode"){\n      if(v==="manual_hstora"||v==="binance_auto") out[key]=v;\n      continue;\n    }\n    if(key==="seller_quality_mode"){
+    if(key==="funding_mode"){
+      if(v==="manual_hstora"||v==="binance_auto") out[key]=v;
+      continue;
+    }
+    if(key==="seller_quality_mode"){
       if(v==="strict_api"||v==="manual_product_approval"||v==="trial_only") out[key]=v;
       continue;
     }
@@ -227,7 +234,12 @@ export async function loadXSettings(env:Env):Promise<XSettings>{
   // One-way policy migration for installations created before the
   // cheapest-first TOP-search strategy existed. Dry Run and all funding
   // safeguards remain unchanged.
-  if(raw&&!Object.prototype.hasOwnProperty.call(raw,"funding_mode")){\n    sanitized.funding_mode="manual_hstora";\n    sanitized.auto_purchase_enabled=false;\n  }\n\n  if(raw&&!Object.prototype.hasOwnProperty.call(raw,"procurement_strategy")){
+  if(raw&&!Object.prototype.hasOwnProperty.call(raw,"funding_mode")){
+    sanitized.funding_mode="manual_hstora";
+    sanitized.auto_purchase_enabled=false;
+  }
+
+  if(raw&&!Object.prototype.hasOwnProperty.call(raw,"procurement_strategy")){
     sanitized.max_unit_price_jpy=80;
     sanitized.procurement_strategy="cheapest_first";
     sanitized.search_visibility_requirement="top";
@@ -241,6 +253,8 @@ export async function saveXSettings(env:Env,patch:Partial<XSettings>):Promise<XS
   const current=await loadXSettings(env);
   const normalized=validatePatch(patch);
   const next={...current,...normalized};
+  // Manual HStora funding must never leave the Binance auto-buy switch armed.
+  if(next.funding_mode==="manual_hstora") next.auto_purchase_enabled=false;
   if(next.target_stock<next.reorder_point) throw new Error("TARGET_STOCK_BELOW_REORDER_POINT");
   if(next.no_shadowban_target_stock<next.no_shadowban_reorder_point){
     throw new Error("NO_SHADOWBAN_TARGET_STOCK_BELOW_REORDER_POINT");
