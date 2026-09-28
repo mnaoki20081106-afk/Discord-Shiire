@@ -18,7 +18,9 @@ function settings(overrides={}){
     max_ltc_balance:2,
     wallet_target_ltc:0,
     wallet_max_ltc:0,
-    max_unit_price_jpy:100,
+    max_unit_price_jpy:80,
+    procurement_strategy:"cheapest_first",
+    search_visibility_requirement:"top",
     reorder_point:10,
     target_stock:50,
     max_batch_purchase:20,
@@ -28,8 +30,8 @@ function settings(overrides={}){
     max_dispute_rate:0,
     minimum_stock:1,
     trial_purchase_count:10,
-    seller_quality_mode:"manual_product_approval",
-    approved_hstora_product_ids:[123],
+    seller_quality_mode:"trial_only",
+    approved_hstora_product_ids:[],
     observed_paypay_balance_jpy:50_000,
     observed_paypay_balance_at:Date.now(),
     max_paypay_balance_age_ms:86_400_000,
@@ -72,12 +74,55 @@ function product(overrides={}){
   };
 }
 
-test("approved visible product under 100 JPY qualifies",()=>{
+test("X TOP-search product under 80 JPY qualifies in trial-only discovery",()=>{
   const q=qualifyHstoraProduct(product(),settings(),1);
   assert.equal(q.qualified,true);
   assert.equal(q.unit_price_jpy,75);
   assert.ok(q.search_visibility.includes("TOP+Latest"));
-  assert.equal(q.seller_quality,"manual_approval");
+  assert.equal(q.seller_quality,"trial_only");
+});
+
+test("latest-only X product is rejected because TOP search is required",()=>{
+  const q=qualifyHstoraProduct(
+    product({
+      name:"Twitter X Latest Search",
+      short_description:"Latest Search visible",
+      description:"Latest Search only."
+    }),
+    settings(),
+    1
+  );
+  assert.equal(q.qualified,false);
+  assert.ok(q.reasons.includes("TOP_SEARCH_NOT_CONFIRMED"));
+});
+
+test("non-X product is rejected even if it says TOP Search",()=>{
+  const q=qualifyHstoraProduct(
+    product({
+      name:"Instagram TOP Search account",
+      slug:"instagram-top-search",
+      short_description:"TOP Search",
+      description:"Search visible."
+    }),
+    settings(),
+    1
+  );
+  assert.equal(q.qualified,false);
+  assert.ok(q.reasons.includes("NOT_X_ACCOUNT_PRODUCT"));
+});
+
+test("actual trial quantity must qualify for the tier price",()=>{
+  const tiered=product({
+    price:0.60,
+    price_tiers:[{min_quantity:20,unit_price:0.40}]
+  });
+  const trial=qualifyHstoraProduct(tiered,settings({usd_jpy_rate:150}),10);
+  const bulk=qualifyHstoraProduct(tiered,settings({usd_jpy_rate:150}),20);
+  assert.equal(trial.unit_price_jpy,90);
+  assert.equal(trial.qualified,false);
+  assert.ok(trial.reasons.includes("UNIT_PRICE_ABOVE_LIMIT"));
+  assert.equal(bulk.unit_price_jpy,60);
+  assert.equal(bulk.qualified,true);
 });
 
 test("strict seller-quality mode blocks when HStora API has no seller metrics",()=>{
