@@ -58,6 +58,7 @@ import {
 import { notifyDiscord } from "./x-alerts";
 import { chooseRestockClass, restockCycleComplete, type RestockClass } from "./x-restock-policy";
 import { hstoraHasUsableDelivery, hstoraStatusRequiresDelivery } from "./x-hstora-order-policy";
+import { comparableEffectivePriceJumpPercent } from "./x-price-policy";
 import { notifyShiireVendingStockArrival } from "./shiire-vending";
 
 const PAYPAY_DIRECT_PURCHASE_MIN_JPY=1_000;
@@ -501,9 +502,6 @@ async function selectCandidate(
     const previous=await getSupplierProductRecord(env,String(full.id));
     const previousPrice=Number(previous?.unit_price??0);
     const currentPrice=Number(q.unit_price_source);
-    const sameCurrency=
-      String(previous?.currency??"").toUpperCase()===
-      String(full.currency??"").toUpperCase();
     let previousPlannedQuantity:number|null=null;
     if(previous?.structured_json){
       try{
@@ -514,16 +512,18 @@ async function selectCandidate(
         }
       }catch{}
     }
-    const comparableQuantity=previousPlannedQuantity===plannedQuantity;
+    const jump=previous
+      ?comparableEffectivePriceJumpPercent({
+        previousUnitPrice:previousPrice,
+        previousCurrency:String(previous.currency??""),
+        previousPlannedQuantity,
+        currentUnitPrice:currentPrice,
+        currentCurrency:String(full.currency??""),
+        currentPlannedQuantity:plannedQuantity
+      })
+      :null;
 
-    if(
-      previous&&
-      sameCurrency&&
-      comparableQuantity&&
-      previousPrice>0&&
-      currentPrice>0
-    ){
-      const jump=Math.abs(currentPrice-previousPrice)/previousPrice*100;
+    if(jump!==null){
       if(jump>settings.max_price_jump_percent){
         await setCircuitBreaker(
           env,
