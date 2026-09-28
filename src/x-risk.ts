@@ -121,6 +121,46 @@ export function calculateSpendablePayPayJpy(input:{
   ));
 }
 
+export function planManualPayPayPaths(input:{
+  desiredPurchaseJpy:number;
+  currentBinanceJpy:number;
+  spendablePayPayJpy:number;
+  directPurchaseMinJpy:number;
+  jpyDepositMinGrossJpy:number;
+  jpyDepositFeeJpy:number;
+}){
+  const desired=Math.floor(finiteNonNegative(input.desiredPurchaseJpy));
+  const binanceJpy=finiteNonNegative(input.currentBinanceJpy);
+  const spendable=Math.floor(finiteNonNegative(input.spendablePayPayJpy));
+  const directMin=Math.ceil(finiteNonNegative(input.directPurchaseMinJpy));
+  const depositMin=Math.ceil(finiteNonNegative(input.jpyDepositMinGrossJpy));
+  const depositFee=Math.ceil(finiteNonNegative(input.jpyDepositFeeJpy));
+
+  const expectedNetJpyCredit=Math.ceil(Math.max(0,desired-binanceJpy));
+  const grossJpyDepositRequired=expectedNetJpyCredit>0
+    ?Math.max(depositMin,expectedNetJpyCredit+depositFee)
+    :0;
+  const jpyDepositAvailable=
+    grossJpyDepositRequired>0&&
+    grossJpyDepositRequired<=spendable;
+  const directLtcAvailable=
+    desired>=directMin&&
+    desired<=spendable;
+  const paypayReservationJpy=Math.max(
+    jpyDepositAvailable?grossJpyDepositRequired:0,
+    directLtcAvailable?desired:0
+  );
+
+  return {
+    desiredPurchaseJpy:desired,
+    expectedNetJpyCredit,
+    grossJpyDepositRequired,
+    jpyDepositAvailable,
+    directLtcAvailable,
+    paypayReservationJpy
+  };
+}
+
 export function splitPurchaseBatches(quantity:number,maxBatch:number):number[]{
   const total=Math.max(0,Math.floor(quantity));
   const cap=Math.max(1,Math.floor(maxBatch));
