@@ -76,7 +76,8 @@ test("splits 42 units into 20, 20, 2",()=>{
 
 test("detects direct LTC purchase after a pending PayPay action",()=>{
   assert.equal(detectManualPayPayCompletion({
-    pendingJpy:7_000,
+    pendingReservationJpy:7_000,
+    jpyDepositRequiredJpy:7_000,
     binanceJpyBaseline:1_000,
     binanceLtcBaseline:0.1,
     ltcBaselineCaptured:true,
@@ -88,7 +89,8 @@ test("detects direct LTC purchase after a pending PayPay action",()=>{
 
 test("detects PayPay-funded Binance JPY increase",()=>{
   assert.equal(detectManualPayPayCompletion({
-    pendingJpy:7_000,
+    pendingReservationJpy:7_000,
+    jpyDepositRequiredJpy:7_000,
     binanceJpyBaseline:1_000,
     binanceLtcBaseline:0.1,
     ltcBaselineCaptured:true,
@@ -100,7 +102,8 @@ test("detects PayPay-funded Binance JPY increase",()=>{
 
 test("does not resume before either manual completion condition is met",()=>{
   assert.equal(detectManualPayPayCompletion({
-    pendingJpy:7_000,
+    pendingReservationJpy:7_000,
+    jpyDepositRequiredJpy:7_000,
     binanceJpyBaseline:1_000,
     binanceLtcBaseline:0.1,
     ltcBaselineCaptured:true,
@@ -113,7 +116,8 @@ test("does not resume before either manual completion condition is met",()=>{
 
 test("does not false-detect LTC purchase when requirement falls below the old balance",()=>{
   assert.equal(detectManualPayPayCompletion({
-    pendingJpy:7_000,
+    pendingReservationJpy:7_000,
+    jpyDepositRequiredJpy:7_000,
     binanceJpyBaseline:1_000,
     binanceLtcBaseline:0.5,
     ltcBaselineCaptured:true,
@@ -125,7 +129,8 @@ test("does not false-detect LTC purchase when requirement falls below the old ba
 
 test("legacy pending request without captured LTC baseline fails closed",()=>{
   assert.equal(detectManualPayPayCompletion({
-    pendingJpy:7_000,
+    pendingReservationJpy:7_000,
+    jpyDepositRequiredJpy:7_000,
     binanceJpyBaseline:1_000,
     binanceLtcBaseline:0,
     ltcBaselineCaptured:false,
@@ -133,4 +138,31 @@ test("legacy pending request without captured LTC baseline fails closed",()=>{
     currentBinanceLtc:1,
     requiredLtcAtRequest:0
   }),"NONE");
+});
+
+
+test("partial Binance JPY uses only the explicit deposit requirement for JPY completion",()=>{
+  assert.equal(detectManualPayPayCompletion({
+    pendingReservationJpy:7_000,
+    jpyDepositRequiredJpy:5_000,
+    binanceJpyBaseline:2_000,
+    binanceLtcBaseline:0.1,
+    ltcBaselineCaptured:true,
+    currentBinanceJpy:7_000,
+    currentBinanceLtc:0.1,
+    requiredLtcAtRequest:0.5
+  }),"JPY_FUNDED");
+});
+
+test("partial Binance JPY does not reduce the direct-LTC PayPay accounting path",()=>{
+  assert.equal(detectManualPayPayCompletion({
+    pendingReservationJpy:7_000,
+    jpyDepositRequiredJpy:5_000,
+    binanceJpyBaseline:2_000,
+    binanceLtcBaseline:0.1,
+    ltcBaselineCaptured:true,
+    currentBinanceJpy:2_000,
+    currentBinanceLtc:0.5,
+    requiredLtcAtRequest:0.5
+  }),"LTC_PURCHASED");
 });
