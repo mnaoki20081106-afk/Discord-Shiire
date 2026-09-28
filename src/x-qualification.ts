@@ -1,13 +1,16 @@
 import type { HstoraProduct } from "./providers/hstora";
 import type { XSettings } from "./x-settings";
 
+export type ProcurementClass="TOP_SEARCH"|"NO_SHADOWBAN";
+
 export type ProductQualification={
   qualified:boolean;
+  procurement_class:ProcurementClass|null;
   unit_price_source:number;
   unit_price_jpy:number|null;
   stock:number;
   search_visibility:string[];
-  seller_quality:"api"|"manual_approval"|"unavailable";
+  seller_quality:"api"|"manual_approval"|"trial_only"|"unavailable";
   reasons:string[];
   evidence:string[];
 };
@@ -20,12 +23,27 @@ const VISIBILITY_RULES:Array<{label:string;patterns:RegExp[]}>= [
   {label:"Search Visible",patterns:[/\bsearch\s+visible\b/i,/\bvisible\s+in\s+search\b/i]}
 ];
 
-function productText(product:HstoraProduct):string{
+type VisibilityProduct=Pick<HstoraProduct,"name"|"slug"|"short_description">&
+  Partial<Pick<HstoraProduct,"description">>;
+
+function productText(product:VisibilityProduct):string{
   return [product.name,product.short_description??"",product.description??""]
     .join("\n").replace(/\s+/g," ").trim();
 }
 
-export function detectSearchVisibility(product:HstoraProduct){
+export function isXAccountProduct(product:VisibilityProduct):boolean{
+  const identity=[product.name,product.slug,product.short_description??""]
+    .join(" ")
+    .replace(/[_-]+/g," ");
+  return (
+    /\btwitter\b/i.test(identity)||
+    /\bx\s+accounts?\b/i.test(identity)||
+    /\bx\s+top\b/i.test(identity)||
+    /\btwitter\s*\/\s*x\b/i.test(identity)
+  );
+}
+
+export function detectSearchVisibility(product:VisibilityProduct){
   const text=productText(product);
   const labels:string[]=[];
   const evidence:string[]=[];
@@ -36,6 +54,19 @@ export function detectSearchVisibility(product:HstoraProduct){
     }
   }
   return {labels,evidence,text};
+}
+
+export function classifyProcurementClass(
+  product:VisibilityProduct
+):ProcurementClass|null{
+  if(!isXAccountProduct(product)) return null;
+  const visibility=detectSearchVisibility(product);
+  const hasTop=
+    visibility.labels.includes("TOP+Latest")||
+    visibility.labels.includes("TOP Search");
+  if(hasTop) return "TOP_SEARCH";
+  if(visibility.labels.includes("No Shadowban")) return "NO_SHADOWBAN";
+  return null;
 }
 
 export function tierUnitPrice(product:HstoraProduct,quantity:number):number{
@@ -60,6 +91,7 @@ export function qualifyHstoraProduct(
 ):ProductQualification{
   const reasons:string[]=[];
   const visibility=detectSearchVisibility(product);
+  const procurementClass=classifyProcurementClass(product);
   const unitSource=tierUnitPrice(product,quantity);
   const currency=String(product.currency??"").toUpperCase();
 
@@ -77,17 +109,35 @@ export function qualifyHstoraProduct(
     reasons.push("UNSUPPORTED_CURRENCY_"+currency);
   }
 
-  if(!visibility.labels.length) reasons.push("SEARCH_VISIBILITY_NOT_CONFIRMED");
+  if(!isXAccountProduct(product)) reasons.push("NOT_X_ACCOUNT_PRODUCT");
+  if(!procurementClass){
+    reasons.push("SUPPORTED_X_PRODUCT_CLASS_NOT_CONFIRMED");
+  }
   if(product.stock_available<settings.minimum_stock) reasons.push("STOCK_BELOW_MINIMUM");
-  if(unitJpy===null||!Number.isFinite(unitJpy)||unitJpy<=0){
-    reasons.push("UNIT_PRICE_JPY_UNAVAILABLE");
-  }else if(unitJpy>settings.max_unit_price_jpy){
-    reasons.push("UNIT_PRICE_ABOVE_LIMIT");
+
+  if(procurementClass==="TOP_SEARCH"){
+    if(unitJpy===null||!Number.isFinite(unitJpy)||unitJpy<=0){
+      reasons.push("UNIT_PRICE_JPY_UNAVAILABLE");
+    }else if(unitJpy>settings.max_unit_price_jpy){
+      reasons.push("TOP_SEARCH_UNIT_PRICE_ABOVE_JPY_LIMIT");
+    }
+  }else if(procurementClass==="NO_SHADOWBAN"){
+    if(currency!=="USD"){
+      reasons.push("NO_SHADOWBAN_REQUIRES_USD_PRICE");
+    }else if(
+      !Number.isFinite(unitSource)||
+      unitSource<=0||
+      unitSource>settings.max_no_shadowban_unit_price_usd
+    ){
+      reasons.push("NO_SHADOWBAN_UNIT_PRICE_ABOVE_USD_LIMIT");
+    }
   }
 
   let sellerQuality:ProductQualification["seller_quality"]="unavailable";
   if(settings.seller_quality_mode==="strict_api"){
     reasons.push("SELLER_QUALITY_FIELDS_UNAVAILABLE_IN_HSTORA_API");
+  }else if(settings.seller_quality_mode==="trial_only"){
+    sellerQuality="trial_only";
   }else if(settings.approved_hstora_product_ids.includes(Number(product.id))){
     sellerQuality="manual_approval";
   }else{
@@ -96,6 +146,7 @@ export function qualifyHstoraProduct(
 
   return {
     qualified:reasons.length===0,
+    procurement_class:procurementClass,
     unit_price_source:unitSource,
     unit_price_jpy:unitJpy,
     stock:Number(product.stock_available??0),

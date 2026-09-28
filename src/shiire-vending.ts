@@ -1,5 +1,6 @@
 import type { Env } from "./types";
 import { hmacHex, sha256Hex } from "./crypto";
+import { loadXSettings, saveXSettings } from "./x-settings";
 import { deliveryNonce, paymentMethodEnabled, paymentPrice } from "./shiire-vending-policy";
 import { receiveMainPayment, getMainPaymentStatus } from "./main-bot";
 import {
@@ -887,6 +888,67 @@ export async function handleShiireMainBridge(
     });
   }
 
+  if(suffix==="/procurement-settings"){
+    if(request.method==="GET"){
+      const settings=await loadXSettings(env);
+      return responseJson({
+        max_unit_price_jpy:settings.max_unit_price_jpy,
+        max_no_shadowban_unit_price_usd:settings.max_no_shadowban_unit_price_usd,
+        reorder_point:settings.reorder_point,
+        target_stock:settings.target_stock,
+        no_shadowban_reorder_point:settings.no_shadowban_reorder_point,
+        no_shadowban_target_stock:settings.no_shadowban_target_stock,
+        trial_purchase_count:settings.trial_purchase_count,
+        max_batch_purchase:settings.max_batch_purchase,
+        dry_run:settings.dry_run,
+        auto_procurement_enabled:settings.auto_procurement_enabled
+      });
+    }
+    if(request.method==="PATCH"){
+      const input=await parseBridgeJson(rawBody);
+      const patch:Record<string,number>={};
+      const numberKeys=[
+        "max_unit_price_jpy",
+        "max_no_shadowban_unit_price_usd",
+        "reorder_point",
+        "target_stock",
+        "no_shadowban_reorder_point",
+        "no_shadowban_target_stock",
+        "trial_purchase_count",
+        "max_batch_purchase"
+      ] as const;
+      for(const key of numberKeys){
+        if(input[key]===undefined) continue;
+        const value=Number(input[key]);
+        if(!Number.isFinite(value)||value<0){
+          throw new ShiireVendingError(400,"INVALID_PROCUREMENT_SETTING_"+key.toUpperCase());
+        }
+        patch[key]=value;
+      }
+      try{
+        const settings=await saveXSettings(env,patch);
+        return responseJson({
+          ok:true,
+          settings:{
+            max_unit_price_jpy:settings.max_unit_price_jpy,
+            max_no_shadowban_unit_price_usd:settings.max_no_shadowban_unit_price_usd,
+            reorder_point:settings.reorder_point,
+            target_stock:settings.target_stock,
+            no_shadowban_reorder_point:settings.no_shadowban_reorder_point,
+            no_shadowban_target_stock:settings.no_shadowban_target_stock,
+            trial_purchase_count:settings.trial_purchase_count,
+            max_batch_purchase:settings.max_batch_purchase
+          }
+        });
+      }catch(error){
+        throw new ShiireVendingError(
+          400,
+          error instanceof Error?error.message:"PROCUREMENT_SETTINGS_INVALID"
+        );
+      }
+    }
+  }
+
   if(suffix==="/source-products"&&request.method==="GET"){
     return responseJson({products:await listShiireSourceProducts(env)});
   }
@@ -992,17 +1054,25 @@ export async function handleShiireMainBridge(
       }
       const name=String(input.name??"").trim();
       const supplierProductId=String(input.supplierProductId??"").trim();
+      const procurementClass=
+        input.procurementClass==="TOP_SEARCH"||
+        input.procurementClass==="NO_SHADOWBAN"
+          ?input.procurementClass
+          :null;
       const pricePayPay=Number(input.pricePayPay??0);
       const priceKyash=Number(input.priceKyash??0);
       if(
-        !name||name.length>80||!supplierProductId||
+        !name||name.length>80||
+        (!supplierProductId&&!procurementClass)||
+        (supplierProductId&&procurementClass)||
         !Number.isSafeInteger(pricePayPay)||pricePayPay<0||
         !Number.isSafeInteger(priceKyash)||priceKyash<0
       ){
         throw new ShiireVendingError(400,"INVALID_PRODUCT");
       }
       const product=await createShiireProduct(env,machine.id,{
-        supplierProductId,
+        supplierProductId:supplierProductId||undefined,
+        procurementClass,
         name,
         description:String(input.description??"").slice(0,500),
         pricePayPay,
@@ -1021,8 +1091,24 @@ export async function handleShiireMainBridge(
     if(request.method==="PATCH"){
       const input=await parseBridgeJson(rawBody);
       const patch:any={};
+      if(input.procurementClass!==undefined){
+        if(
+          input.procurementClass!==null&&
+          input.procurementClass!=="TOP_SEARCH"&&
+          input.procurementClass!=="NO_SHADOWBAN"
+        ){
+          throw new ShiireVendingError(400,"INVALID_PROCUREMENT_CLASS");
+        }
+        patch.procurementClass=input.procurementClass;
+      }
       if(input.supplierProductId!==undefined){
         patch.supplierProductId=String(input.supplierProductId).trim();
+      }
+      if(
+        input.procurementClass!==undefined&&
+        input.supplierProductId!==undefined
+      ){
+        throw new ShiireVendingError(400,"VENDING_SOURCE_CONFLICT");
       }
       if(input.name!==undefined){
         const name=String(input.name).trim();

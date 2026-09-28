@@ -10,6 +10,7 @@ import {
   pendingPurchaseOrders,
   purchasedAccountCountForOrder,
   readyInventoryCount,
+  readyInventoryCountByClass,
   recordFundingEvent,
   updateFundingEventByProviderReference,
   setCircuitBreaker,
@@ -36,7 +37,12 @@ import {
   type HstoraProduct,
   type HstoraCatalogItem
 } from "./providers/hstora";
-import { qualifyHstoraProduct } from "./x-qualification";
+import {
+  detectSearchVisibility,
+  isXAccountProduct,
+  qualifyHstoraProduct,
+  type ProcurementClass
+} from "./x-qualification";
 import { notifyDiscord } from "./x-alerts";
 import { notifyShiireVendingStockArrival } from "./shiire-vending";
 
@@ -77,6 +83,11 @@ export async function reconcilePendingXOrders(env:Env){
           supplier:"hstora",
           supplierProductId:String(row.supplier_product_id),
           purchasePrice:Number(row.unit_price),
+          procurementClass:
+            row.procurement_class==="TOP_SEARCH"||
+            row.procurement_class==="NO_SHADOWBAN"
+              ?row.procurement_class
+              :null,
           orderResponse:order
         });
         if(added>0){
@@ -154,18 +165,100 @@ async function catalogProducts(env:Env,approvedIds:number[]):Promise<HstoraCatal
   do{
     const response=await listHstoraCatalog(env,page,20);
     out.push(...(response.items??[]));
-    pages=Math.min(20,Math.max(1,Number(response.pagination?.pages??1)));
+    const reportedPages=Math.max(
+      1,
+      Math.floor(Number(response.pagination?.pages??1))
+    );
+    // Fail closed instead of silently scanning only part of a catalog if the
+    // API suddenly reports an implausibly large page count.
+    if(reportedPages>200){
+      throw new Error("HSTORA_CATALOG_PAGE_COUNT_UNEXPECTED");
+    }
+    pages=reportedPages;
     page++;
   }while(page<=pages);
   return out;
 }
 
-async function selectCandidate(env:Env,quantity:number){
+function hasTopSearchEvidence(product:HstoraCatalogItem|HstoraProduct){
+  const labels=detectSearchVisibility(product).labels;
+  return labels.includes("TOP+Latest")||labels.includes("TOP Search");
+}
+
+function catalogBasePriceJpy(
+  product:HstoraCatalogItem,
+  settings:Awaited<ReturnType<typeof loadXSettings>>
+):number|null{
+  const currency=String(product.currency??"").toUpperCase();
+  const price=Number(product.price);
+  if(!Number.isFinite(price)||price<=0) return null;
+  if(currency==="JPY") return price;
+  if(
+    currency==="USD"&&
+    settings.usd_jpy_rate>0&&
+    settings.usd_jpy_rate_updated_at>0&&
+    Date.now()-settings.usd_jpy_rate_updated_at<=settings.max_fx_age_ms
+  ){
+    return price*settings.usd_jpy_rate;
+  }
+  return null;
+}
+
+async function selectCandidate(
+  env:Env,
+  quantityLimit:number,
+  targetClass:ProcurementClass
+){
   const settings=await loadXSettings(env);
-  const products=await catalogProducts(env,settings.approved_hstora_product_ids);
-  const candidates:Array<{product:HstoraProduct;q:ReturnType<typeof qualifyHstoraProduct>}>=[];
+  const approvedIds=
+    settings.seller_quality_mode==="manual_product_approval"
+      ?settings.approved_hstora_product_ids
+      :[];
+  const products=await catalogProducts(env,approvedIds);
+  const candidates:Array<{
+    product:HstoraProduct;
+    q:ReturnType<typeof qualifyHstoraProduct>;
+    plannedQuantity:number;
+    priorPurchases:number;
+  }> = [];
 
   for(const product of products){
+    if(!isXAccountProduct(product)) continue;
+
+    const visibility=detectSearchVisibility(product);
+    const hasTop=
+      visibility.labels.includes("TOP+Latest")||
+      visibility.labels.includes("TOP Search");
+    const hasNoShadow=visibility.labels.includes("No Shadowban");
+    const baseJpy=catalogBasePriceJpy(product,settings);
+    const baseUsd=
+      String(product.currency??"").toUpperCase()==="USD"
+        ?Number(product.price)
+        :null;
+
+    if(targetClass==="TOP_SEARCH"){
+      if(
+        !hasTop&&
+        (baseJpy===null||baseJpy>settings.max_unit_price_jpy)
+      ){
+        continue;
+      }
+    }else{
+      // No Shadowban is a separate product class. Listings that already state
+      // TOP Search belong to TOP_SEARCH and are never double-counted here.
+      if(hasTop) continue;
+      if(
+        !hasNoShadow&&
+        (
+          baseUsd===null||
+          !Number.isFinite(baseUsd)||
+          baseUsd>settings.max_no_shadowban_unit_price_usd
+        )
+      ){
+        continue;
+      }
+    }
+
     let full:HstoraProduct;
     try{
       full=await getHstoraProduct(env,Number(product.id));
@@ -174,15 +267,34 @@ async function selectCandidate(env:Env,quantity:number){
         level:"warn",
         kind:"HSTORA_PRODUCT_DETAIL_FAILED",
         message:error instanceof Error?error.message:String(error),
-        details:{productId:product.id}
+        details:{productId:product.id,targetClass}
       });
       continue;
     }
-    const q=qualifyHstoraProduct(full,settings,quantity);
+
+    const priorPurchases=await successfulPurchaseCountForProduct(
+      env,
+      String(full.id)
+    );
+    const trialCap=
+      priorPurchases===0
+        ?settings.trial_purchase_count
+        :quantityLimit;
+    const plannedQuantity=Math.min(
+      quantityLimit,
+      Math.max(1,trialCap),
+      Math.max(0,Number(full.stock_available??0))
+    );
+    if(plannedQuantity<=0) continue;
+
+    const q=qualifyHstoraProduct(full,settings,plannedQuantity);
     const previous=await getSupplierProductRecord(env,String(full.id));
     const previousPrice=Number(previous?.unit_price??0);
     const currentPrice=Number(full.price??0);
-    const sameCurrency=String(previous?.currency??"").toUpperCase()===String(full.currency??"").toUpperCase();
+    const sameCurrency=
+      String(previous?.currency??"").toUpperCase()===
+      String(full.currency??"").toUpperCase();
+
     if(previous&&sameCurrency&&previousPrice>0&&currentPrice>0){
       const jump=Math.abs(currentPrice-previousPrice)/previousPrice*100;
       if(jump>settings.max_price_jump_percent){
@@ -196,33 +308,88 @@ async function selectCandidate(env:Env,quantity:number){
           level:"error",
           kind:"PRODUCT_PRICE_JUMP",
           message:"HStora product price changed beyond configured threshold",
-          details:{productId:full.id,previousPrice,currentPrice,jumpPercent:jump}
+          details:{
+            productId:full.id,
+            previousPrice,
+            currentPrice,
+            jumpPercent:jump,
+            targetClass
+          }
         });
         throw new Error("PRODUCT_PRICE_JUMP");
       }
     }
+
     await upsertSupplierProduct(env,{
       supplier:"hstora",
       supplierProductId:String(full.id),
       title:String(full.name??""),
       description:String(full.description??full.short_description??""),
       currency:String(full.currency??""),
-      unitPrice:Number(full.price??0),
+      unitPrice:Number(q.unit_price_source??full.price??0),
       stockAvailable:Number(full.stock_available??0),
       productUrl:full.product_url,
       structured:{
         delivery_type:full.delivery_type,
         price_tiers:full.price_tiers,
-        rules:full.rules
+        rules:full.rules,
+        procurement_strategy:settings.procurement_strategy,
+        planned_quantity:plannedQuantity,
+        procurement_class:q.procurement_class
       },
       qualification:q,
+      procurementClass:q.procurement_class,
       qualified:q.qualified,
       seller:null
     });
-    if(q.qualified) candidates.push({product:full,q});
+
+    if(q.qualified&&q.procurement_class===targetClass){
+      candidates.push({product:full,q,plannedQuantity,priorPurchases});
+    }
   }
 
-  candidates.sort((a,b)=>(a.q.unit_price_jpy??Infinity)-(b.q.unit_price_jpy??Infinity));
+  candidates.sort((a,b)=>{
+    const aPrice=
+      targetClass==="NO_SHADOWBAN"
+        ?Number(a.q.unit_price_source)
+        :Number(a.q.unit_price_jpy??Infinity);
+    const bPrice=
+      targetClass==="NO_SHADOWBAN"
+        ?Number(b.q.unit_price_source)
+        :Number(b.q.unit_price_jpy??Infinity);
+    const price=aPrice-bPrice;
+    if(price!==0) return price;
+    const stock=
+      Number(b.product.stock_available??0)-
+      Number(a.product.stock_available??0);
+    if(stock!==0) return stock;
+    return Number(a.product.id)-Number(b.product.id);
+  });
+
+  await auditX(env,{
+    kind:"HSTORA_CHEAPEST_FIRST_SCAN",
+    message:"HStora candidates ranked within procurement class",
+    details:{
+      targetClass,
+      scannedCatalogItems:products.length,
+      qualifiedCandidates:candidates.length,
+      maxUnitPrice:
+        targetClass==="TOP_SEARCH"
+          ?{currency:"JPY",value:settings.max_unit_price_jpy}
+          :{currency:"USD",value:settings.max_no_shadowban_unit_price_usd},
+      strategy:settings.procurement_strategy,
+      cheapest:candidates.slice(0,10).map(candidate=>({
+        productId:candidate.product.id,
+        procurementClass:candidate.q.procurement_class,
+        unitPriceSource:candidate.q.unit_price_source,
+        unitPriceJpy:candidate.q.unit_price_jpy,
+        plannedQuantity:candidate.plannedQuantity,
+        stock:candidate.product.stock_available,
+        searchVisibility:candidate.q.search_visibility
+      }))
+    }
+  });
+
   return candidates[0]??null;
 }
 
@@ -637,17 +804,47 @@ export async function runXProcurement(env:Env):Promise<XRunResult>{
     return {action:"HSTORA_BALANCE_ERROR",dryRun:settings.dry_run};
   }
 
-  const inventory=await readyInventoryCount(env);
-  if(inventory>settings.reorder_point){
-    return {action:"INVENTORY_OK",dryRun:settings.dry_run,inventory};
+  const [inventory,topInventory,noShadowInventory]=await Promise.all([
+    readyInventoryCount(env),
+    readyInventoryCountByClass(env,"TOP_SEARCH"),
+    readyInventoryCountByClass(env,"NO_SHADOWBAN")
+  ]);
+
+  let targetClass:ProcurementClass|null=null;
+  let classInventory=0;
+  let classTarget=0;
+
+  // TOP_SEARCH gets priority when both independent product stocks are low.
+  if(topInventory<=settings.reorder_point){
+    targetClass="TOP_SEARCH";
+    classInventory=topInventory;
+    classTarget=settings.target_stock;
+  }else if(noShadowInventory<=settings.no_shadowban_reorder_point){
+    targetClass="NO_SHADOWBAN";
+    classInventory=noShadowInventory;
+    classTarget=settings.no_shadowban_target_stock;
+  }else{
+    return {
+      action:"INVENTORY_OK",
+      dryRun:settings.dry_run,
+      inventory,
+      details:{topSearch:topInventory,noShadowban:noShadowInventory}
+    };
   }
 
-  const need=Math.max(0,settings.target_stock-inventory);
-  const batch=Math.min(need,settings.max_batch_purchase);
-  if(batch<=0) return {action:"INVENTORY_OK",dryRun:settings.dry_run,inventory};
+  const need=Math.max(0,classTarget-classInventory);
+  let batch=Math.min(need,settings.max_batch_purchase);
+  if(batch<=0){
+    return {
+      action:"INVENTORY_OK",
+      dryRun:settings.dry_run,
+      inventory,
+      details:{targetClass,classInventory,classTarget}
+    };
+  }
 
   let candidate;
-  try{candidate=await selectCandidate(env,batch);}
+  try{candidate=await selectCandidate(env,batch,targetClass);}
   catch(error){
     const message=error instanceof Error?error.message:String(error);
     if(message==="PRODUCT_PRICE_JUMP"){
@@ -661,6 +858,37 @@ export async function runXProcurement(env:Env):Promise<XRunResult>{
     }).catch(()=>undefined);
     return {action:"HSTORA_API_BLOCKED",dryRun:settings.dry_run,inventory};
   }
+  const refreshedClassInventory=await readyInventoryCountByClass(
+    env,
+    targetClass
+  );
+  const refreshedReorder=
+    targetClass==="TOP_SEARCH"
+      ?settings.reorder_point
+      :settings.no_shadowban_reorder_point;
+  if(refreshedClassInventory>refreshedReorder){
+    return {
+      action:"INVENTORY_RECLASSIFIED_OK",
+      dryRun:settings.dry_run,
+      inventory:await readyInventoryCount(env),
+      details:{
+        targetClass,
+        before:classInventory,
+        after:refreshedClassInventory
+      }
+    };
+  }
+  const refreshedNeed=Math.max(0,classTarget-refreshedClassInventory);
+  batch=Math.min(refreshedNeed,settings.max_batch_purchase);
+  if(batch<=0){
+    return {
+      action:"INVENTORY_RECLASSIFIED_OK",
+      dryRun:settings.dry_run,
+      inventory:await readyInventoryCount(env),
+      details:{targetClass,classInventory:refreshedClassInventory,classTarget}
+    };
+  }
+
   if(!candidate){
     return {
       action:"NO_QUALIFIED_HSTORA_PRODUCT",
@@ -668,22 +896,57 @@ export async function runXProcurement(env:Env):Promise<XRunResult>{
       inventory,
       details:{
         sellerQualityMode:settings.seller_quality_mode,
-        note:"HStora v1 APIにはseller rating/reviews/sales/dispute rateがないためstrict_apiでは自動購入しません。"
+        strategy:settings.procurement_strategy,
+        targetClass,
+        maxUnitPrice:
+          targetClass==="TOP_SEARCH"
+            ?{currency:"JPY",value:settings.max_unit_price_jpy}
+            :{currency:"USD",value:settings.max_no_shadowban_unit_price_usd},
+        searchVisibilityRequirement:
+          targetClass==="TOP_SEARCH"?"TOP Search / TOP+Latest":"No Shadowban without TOP Search",
+        note:settings.seller_quality_mode==="strict_api"
+          ?"HStora v1 APIにはseller rating/reviews/sales/dispute rateがないためstrict_apiでは自動購入しません。"
+          :"80円以下のX TOP-search条件に一致する商品が見つかりませんでした。"
       }
     };
   }
 
   const fresh=await getHstoraProduct(env,Number(candidate.product.id));
-  const q=qualifyHstoraProduct(fresh,settings,batch);
-  if(!q.qualified){
-    await setCircuitBreaker(env,"product_price","OPEN","PRODUCT_REQUALIFICATION_FAILED");
-    return {action:"PRODUCT_REQUALIFICATION_FAILED",dryRun:settings.dry_run,inventory,productId:Number(fresh.id),details:q};
-  }
-
   const prior=await successfulPurchaseCountForProduct(env,String(fresh.id));
   const trialCap=prior===0?settings.trial_purchase_count:batch;
-  const quantity=Math.min(batch,Math.max(1,trialCap),Number(fresh.stock_available??0));
-  if(quantity<=0) return {action:"PRODUCT_OUT_OF_STOCK",dryRun:settings.dry_run,inventory,productId:Number(fresh.id)};
+  const quantity=Math.min(
+    batch,
+    Math.max(1,trialCap),
+    Math.max(0,Number(fresh.stock_available??0))
+  );
+  if(quantity<=0){
+    return {
+      action:"PRODUCT_OUT_OF_STOCK",
+      dryRun:settings.dry_run,
+      inventory,
+      productId:Number(fresh.id)
+    };
+  }
+
+  // Recalculate the effective tier price using the quantity that will really
+  // be ordered. This prevents a 20-unit discount from qualifying a 10-unit
+  // trial purchase above the JPY ceiling.
+  const q=qualifyHstoraProduct(fresh,settings,quantity);
+  if(!q.qualified||q.procurement_class!==targetClass){
+    await setCircuitBreaker(
+      env,
+      "product_price",
+      "OPEN",
+      "PRODUCT_REQUALIFICATION_FAILED"
+    );
+    return {
+      action:"PRODUCT_REQUALIFICATION_FAILED",
+      dryRun:settings.dry_run,
+      inventory,
+      productId:Number(fresh.id),
+      details:q
+    };
+  }
 
   if(
     !settings.dry_run&&
@@ -742,6 +1005,7 @@ export async function runXProcurement(env:Env):Promise<XRunResult>{
       message:"Qualified HStora product would be purchased",
       details:{
         productId:fresh.id,quantity,unitPriceJpy:q.unit_price_jpy,totalSource,
+        procurementClass:q.procurement_class,
         searchVisibility:q.search_visibility,trial:prior===0,dryRun:settings.dry_run
       }
     });
@@ -765,6 +1029,7 @@ export async function runXProcurement(env:Env):Promise<XRunResult>{
     currency:String(fresh.currency),
     externalOrderId,
     idempotencyKey,
+    procurementClass:q.procurement_class,
     dryRun:false
   });
 
@@ -789,6 +1054,7 @@ export async function runXProcurement(env:Env):Promise<XRunResult>{
         supplier:"hstora",
         supplierProductId:String(fresh.id),
         purchasePrice:unitSource,
+        procurementClass:q.procurement_class,
         orderResponse:order
       })
       :0;
@@ -859,6 +1125,7 @@ export async function runXProcurement(env:Env):Promise<XRunResult>{
           supplier:"hstora",
           supplierProductId:String(fresh.id),
           purchasePrice:unitSource,
+          procurementClass:q.procurement_class,
           orderResponse:order
         })
         :0;

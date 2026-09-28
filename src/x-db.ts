@@ -23,6 +23,7 @@ const SCHEMA=[
   dispute_rate REAL,
   structured_json TEXT NOT NULL DEFAULT '{}',
   qualification_json TEXT NOT NULL DEFAULT '{}',
+  procurement_class TEXT,
   qualified INTEGER NOT NULL DEFAULT 0,
   last_seen_at INTEGER NOT NULL,
   created_at INTEGER NOT NULL,
@@ -41,6 +42,7 @@ const SCHEMA=[
   external_order_id TEXT NOT NULL UNIQUE,
   idempotency_key TEXT NOT NULL UNIQUE,
   supplier_order_id TEXT,
+  procurement_class TEXT,
   dry_run INTEGER NOT NULL DEFAULT 1,
   response_meta_json TEXT NOT NULL DEFAULT '{}',
   error_code TEXT,
@@ -58,6 +60,7 @@ const SCHEMA=[
   email_ciphertext TEXT,
   two_factor_ciphertext TEXT,
   credential_fingerprint TEXT NOT NULL UNIQUE,
+  procurement_class TEXT,
   status TEXT NOT NULL,
   delivered_at INTEGER,
   created_at INTEGER NOT NULL
@@ -137,6 +140,23 @@ const SCHEMA=[
 export async function ensureXSchema(env:Env){
   if(schemaReady) return;
   for(const sql of SCHEMA) await env.DB.prepare(sql).run();
+
+  const migrations:Array<[string,string,string]>= [
+    ["supplier_products","procurement_class","TEXT"],
+    ["purchase_orders","procurement_class","TEXT"],
+    ["purchased_accounts","procurement_class","TEXT"]
+  ];
+  for(const [table,column,type] of migrations){
+    const columns=(await env.DB.prepare(
+      "PRAGMA table_info("+table+")"
+    ).all<{name:string}>()).results.map(row=>row.name);
+    if(!columns.includes(column)){
+      await env.DB.prepare(
+        "ALTER TABLE "+table+" ADD COLUMN "+column+" "+type
+      ).run();
+    }
+  }
+
   schemaReady=true;
 }
 
@@ -293,6 +313,7 @@ export async function upsertSupplierProduct(env:Env,input:{
   productUrl?:string;
   structured?:unknown;
   qualification?:unknown;
+  procurementClass?:"TOP_SEARCH"|"NO_SHADOWBAN"|null;
   qualified:boolean;
   seller?:{
     id?:string;name?:string;rating?:number;reviews?:number;sales?:number;disputeRate?:number;
@@ -305,22 +326,37 @@ export async function upsertSupplierProduct(env:Env,input:{
   await env.DB.prepare(`INSERT INTO supplier_products(
     id,supplier,supplier_product_id,title,description,currency,unit_price,stock_available,product_url,
     seller_id,seller_name,seller_rating,product_reviews,sales_count,dispute_rate,
-    structured_json,qualification_json,qualified,last_seen_at,created_at,updated_at
-  ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+    structured_json,qualification_json,procurement_class,qualified,last_seen_at,created_at,updated_at
+  ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
   ON CONFLICT(supplier,supplier_product_id) DO UPDATE SET
     title=excluded.title,description=excluded.description,currency=excluded.currency,
     unit_price=excluded.unit_price,stock_available=excluded.stock_available,product_url=excluded.product_url,
     seller_id=excluded.seller_id,seller_name=excluded.seller_name,seller_rating=excluded.seller_rating,
     product_reviews=excluded.product_reviews,sales_count=excluded.sales_count,dispute_rate=excluded.dispute_rate,
     structured_json=excluded.structured_json,qualification_json=excluded.qualification_json,
+    procurement_class=excluded.procurement_class,
     qualified=excluded.qualified,last_seen_at=excluded.last_seen_at,updated_at=excluded.updated_at`
   ).bind(
     id,input.supplier,input.supplierProductId,input.title,input.description,input.currency,input.unitPrice,
     Math.max(0,Math.floor(input.stockAvailable)),input.productUrl??null,
     s.id??null,s.name??null,s.rating??null,s.reviews??null,s.sales??null,s.disputeRate??null,
     JSON.stringify(redact(input.structured??{})),JSON.stringify(input.qualification??{}),
-    input.qualified?1:0,now,now,now
+    input.procurementClass??null,input.qualified?1:0,now,now,now
   ).run();
+
+  if(input.procurementClass){
+    await env.DB.batch([
+      env.DB.prepare(
+        "UPDATE purchase_orders SET procurement_class=? "+
+        "WHERE supplier=? AND supplier_product_id=? AND procurement_class IS NULL"
+      ).bind(input.procurementClass,input.supplier,input.supplierProductId),
+      env.DB.prepare(
+        "UPDATE purchased_accounts SET procurement_class=? "+
+        "WHERE supplier=? AND supplier_product_id=? AND procurement_class IS NULL"
+      ).bind(input.procurementClass,input.supplier,input.supplierProductId)
+    ]);
+  }
+
   return id;
 }
 
@@ -340,6 +376,7 @@ export async function createPurchaseOrderRecord(env:Env,input:{
   currency:string;
   externalOrderId:string;
   idempotencyKey:string;
+  procurementClass?:"TOP_SEARCH"|"NO_SHADOWBAN"|null;
   dryRun:boolean;
 }){
   await ensureXSchema(env);
@@ -347,10 +384,11 @@ export async function createPurchaseOrderRecord(env:Env,input:{
   const id=randomId();
   await env.DB.prepare(`INSERT INTO purchase_orders(
     id,supplier,supplier_product_id,quantity,unit_price,total_amount,currency,status,
-    external_order_id,idempotency_key,dry_run,created_at,updated_at
-  ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(
+    external_order_id,idempotency_key,procurement_class,dry_run,created_at,updated_at
+  ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(
     id,input.supplier,input.supplierProductId,input.quantity,input.unitPrice,input.totalAmount,input.currency,
-    input.dryRun?"DRY_RUN":"CREATED",input.externalOrderId,input.idempotencyKey,input.dryRun?1:0,now,now
+    input.dryRun?"DRY_RUN":"CREATED",input.externalOrderId,input.idempotencyKey,
+    input.procurementClass??null,input.dryRun?1:0,now,now
   ).run();
   return id;
 }
@@ -390,6 +428,7 @@ export async function storeDeliveredAccounts(env:Env,input:{
   supplier:string;
   supplierProductId:string;
   purchasePrice:number;
+  procurementClass?:"TOP_SEARCH"|"NO_SHADOWBAN"|null;
   orderResponse:unknown;
 }):Promise<number>{
   await ensureXSchema(env);
@@ -408,10 +447,10 @@ export async function storeDeliveredAccounts(env:Env,input:{
     const id=randomId();
     const result=await env.DB.prepare(`INSERT OR IGNORE INTO purchased_accounts(
       id,supplier,supplier_product_id,purchase_order_id,purchase_price,purchased_at,
-      credentials_ciphertext,email_ciphertext,two_factor_ciphertext,credential_fingerprint,status,created_at
-    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`).bind(
+      credentials_ciphertext,email_ciphertext,two_factor_ciphertext,credential_fingerprint,procurement_class,status,created_at
+    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(
       id,input.supplier,input.supplierProductId,input.purchaseOrderId,input.purchasePrice,now,
-      JSON.stringify(encrypted),null,null,fingerprint,"READY_FOR_DELIVERY",now
+      JSON.stringify(encrypted),null,null,fingerprint,input.procurementClass??null,"READY_FOR_DELIVERY",now
     ).run();
     if((result.meta?.changes??0)>0) inserted++;
   }
@@ -481,6 +520,18 @@ export async function listPurchaseOrders(env:Env,limit=100){
   return result.results;
 }
 
+
+export async function readyInventoryCountByClass(
+  env:Env,
+  procurementClass:"TOP_SEARCH"|"NO_SHADOWBAN"
+):Promise<number>{
+  await ensureXSchema(env);
+  const row=await env.DB.prepare(
+    "SELECT COUNT(*) AS quantity FROM purchased_accounts "+
+    "WHERE procurement_class=? AND status IN ('READY_FOR_DELIVERY','VENDING_RESERVED')"
+  ).bind(procurementClass).first<{quantity:number}>();
+  return Math.max(0,Number(row?.quantity??0));
+}
 
 export async function readyInventoryCount(env:Env):Promise<number>{
   await ensureXSchema(env);

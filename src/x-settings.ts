@@ -20,8 +20,13 @@ export type XSettings={
   wallet_max_ltc:number;
 
   max_unit_price_jpy:number;
+  max_no_shadowban_unit_price_usd:number;
+  procurement_strategy:"cheapest_first";
+  search_visibility_requirement:"top";
   reorder_point:number;
   target_stock:number;
+  no_shadowban_reorder_point:number;
+  no_shadowban_target_stock:number;
   max_batch_purchase:number;
 
   min_seller_rating:number;
@@ -30,7 +35,7 @@ export type XSettings={
   max_dispute_rate:number;
   minimum_stock:number;
   trial_purchase_count:number;
-  seller_quality_mode:"strict_api"|"manual_product_approval";
+  seller_quality_mode:"strict_api"|"manual_product_approval"|"trial_only";
   approved_hstora_product_ids:number[];
 
   observed_paypay_balance_jpy:number;
@@ -70,9 +75,14 @@ export const DEFAULT_X_SETTINGS:XSettings={
   wallet_target_ltc:0,
   wallet_max_ltc:0,
 
-  max_unit_price_jpy:100,
+  max_unit_price_jpy:80,
+  max_no_shadowban_unit_price_usd:0.60,
+  procurement_strategy:"cheapest_first",
+  search_visibility_requirement:"top",
   reorder_point:10,
   target_stock:50,
+  no_shadowban_reorder_point:10,
+  no_shadowban_target_stock:50,
   max_batch_purchase:20,
 
   min_seller_rating:0,
@@ -81,7 +91,7 @@ export const DEFAULT_X_SETTINGS:XSettings={
   max_dispute_rate:0,
   minimum_stock:1,
   trial_purchase_count:10,
-  seller_quality_mode:"strict_api",
+  seller_quality_mode:"trial_only",
   approved_hstora_product_ids:[],
 
   observed_paypay_balance_jpy:0,
@@ -111,7 +121,8 @@ const BOOLEAN_KEYS=new Set<keyof XSettings>([
 const INTEGER_KEYS=new Set<keyof XSettings>([
   "reserve_jpy","max_purchase_jpy","daily_purchase_limit_jpy",
   "weekly_purchase_limit_jpy","monthly_purchase_limit_jpy","min_purchase_jpy",
-  "reorder_point","target_stock","max_batch_purchase","min_product_reviews",
+  "reorder_point","target_stock","no_shadowban_reorder_point","no_shadowban_target_stock",
+  "max_batch_purchase","min_product_reviews",
   "min_sales_count","minimum_stock","trial_purchase_count",
   "observed_paypay_balance_jpy","observed_paypay_balance_at",
   "max_paypay_balance_age_ms","pending_paypay_funding_jpy",
@@ -122,7 +133,7 @@ const INTEGER_KEYS=new Set<keyof XSettings>([
 
 const NUMBER_KEYS=new Set<keyof XSettings>([
   "target_ltc_balance","max_ltc_balance","wallet_target_ltc","wallet_max_ltc",
-  "max_unit_price_jpy","min_seller_rating","max_dispute_rate","usd_jpy_rate",
+  "max_unit_price_jpy","max_no_shadowban_unit_price_usd","min_seller_rating","max_dispute_rate","usd_jpy_rate",
   "max_fx_jump_percent","max_price_jump_percent","max_ltc_price_jump_percent"
 ]);
 
@@ -147,7 +158,15 @@ function sanitizeStoredSettings(value:unknown):Partial<XSettings>{
       continue;
     }
     if(key==="seller_quality_mode"){
-      if(v==="strict_api"||v==="manual_product_approval") out[key]=v;
+      if(v==="strict_api"||v==="manual_product_approval"||v==="trial_only") out[key]=v;
+      continue;
+    }
+    if(key==="procurement_strategy"){
+      if(v==="cheapest_first") out[key]=v;
+      continue;
+    }
+    if(key==="search_visibility_requirement"){
+      if(v==="top") out[key]=v;
       continue;
     }
     if(key==="approved_hstora_product_ids"){
@@ -181,7 +200,23 @@ function validatePatch(patch:Partial<XSettings>):Partial<XSettings>{
 
 export async function loadXSettings(env:Env):Promise<XSettings>{
   const stored=await getXSetting<unknown>(env,"x_procurement");
-  return {...DEFAULT_X_SETTINGS,...sanitizeStoredSettings(stored)};
+  const sanitized=sanitizeStoredSettings(stored);
+  const raw=
+    stored&&typeof stored==="object"&&!Array.isArray(stored)
+      ?stored as Record<string,unknown>
+      :null;
+
+  // One-way policy migration for installations created before the
+  // cheapest-first TOP-search strategy existed. Dry Run and all funding
+  // safeguards remain unchanged.
+  if(raw&&!Object.prototype.hasOwnProperty.call(raw,"procurement_strategy")){
+    sanitized.max_unit_price_jpy=80;
+    sanitized.procurement_strategy="cheapest_first";
+    sanitized.search_visibility_requirement="top";
+    sanitized.seller_quality_mode="trial_only";
+  }
+
+  return {...DEFAULT_X_SETTINGS,...sanitized};
 }
 
 export async function saveXSettings(env:Env,patch:Partial<XSettings>):Promise<XSettings>{
@@ -189,6 +224,9 @@ export async function saveXSettings(env:Env,patch:Partial<XSettings>):Promise<XS
   const normalized=validatePatch(patch);
   const next={...current,...normalized};
   if(next.target_stock<next.reorder_point) throw new Error("TARGET_STOCK_BELOW_REORDER_POINT");
+  if(next.no_shadowban_target_stock<next.no_shadowban_reorder_point){
+    throw new Error("NO_SHADOWBAN_TARGET_STOCK_BELOW_REORDER_POINT");
+  }
   if(next.max_batch_purchase<1) throw new Error("MAX_BATCH_PURCHASE_INVALID");
   if(
     next.reserve_jpy<0||next.max_purchase_jpy<0||
@@ -196,6 +234,12 @@ export async function saveXSettings(env:Env,patch:Partial<XSettings>):Promise<XS
     next.monthly_purchase_limit_jpy<0||next.min_purchase_jpy<0
   ) throw new Error("FUNDING_LIMIT_INVALID");
   if(next.max_unit_price_jpy<=0) throw new Error("MAX_UNIT_PRICE_INVALID");
+  if(
+    next.max_no_shadowban_unit_price_usd<0.50||
+    next.max_no_shadowban_unit_price_usd>0.60
+  ){
+    throw new Error("NO_SHADOWBAN_USD_LIMIT_OUT_OF_RANGE");
+  }
   if(next.min_seller_rating<0||next.max_dispute_rate<0) throw new Error("SELLER_FILTER_INVALID");
   if(next.max_price_jump_percent<=0||next.max_ltc_price_jump_percent<=0){
     throw new Error("PRICE_JUMP_LIMIT_INVALID");
