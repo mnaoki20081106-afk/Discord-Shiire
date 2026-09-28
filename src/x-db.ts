@@ -249,7 +249,7 @@ export async function fundingSpendSince(env:Env,since:number):Promise<number>{
   await ensureXSchema(env);
   const row=await env.DB.prepare(
     "SELECT COALESCE(SUM(amount_jpy),0) AS total FROM funding_events "+
-    "WHERE kind='LTC_PURCHASE' "+
+    "WHERE kind IN ('LTC_PURCHASE','DIRECT_LTC_PURCHASE_DETECTED') "+
     "AND status NOT IN ('FAILED','REJECTED','CANCELED','CANCELLED','EXPIRED','VOID') "+
     "AND created_at>=?"
   ).bind(since).first<{total:number}>();
