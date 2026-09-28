@@ -11,7 +11,11 @@ import {
   listOpenCircuitBreakers,
   setCircuitBreaker
 } from "./x-db";
-import { getFundingPlan, jstPeriodStarts } from "./x-funding";
+import {
+  confirmPendingDirectLtcFunding,
+  getFundingPlan,
+  jstPeriodStarts
+} from "./x-funding";
 import { runXProcurement } from "./x-engine";
 import {
   getBinanceApiRestrictions,
@@ -207,6 +211,23 @@ export async function handleXAdminApi(
       bulk_approval_until:Date.now()+minutes*60_000
     });
     return json({ok:true,approvedUntil:settings.bulk_approval_until});
+  }
+
+  if(
+    url.pathname==="/api/x/funding/pending/confirm-direct-ltc"&&
+    request.method==="POST"
+  ){
+    try{
+      const result=await confirmPendingDirectLtcFunding(env);
+      return json(result);
+    }catch(error){
+      const code=error instanceof Error?error.message:String(error);
+      const status=
+        code==="NO_PENDING_DIRECT_LTC_CONFIRMATION"?409:
+        code==="LTC_BALANCE_INCREASE_NOT_DETECTED"?409:
+        500;
+      return json({error:code},status);
+    }
   }
 
   if(url.pathname==="/api/x/funding/pending/cancel"&&request.method==="POST"){
