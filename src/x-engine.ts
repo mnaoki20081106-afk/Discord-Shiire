@@ -24,6 +24,7 @@ import { loadXSettings, saveXSettings } from "./x-settings";
 import {
   calculateLtcPurchaseAllowance,
   calculateSpendablePayPayJpy,
+  nextObservedPayPayBalance,
   planManualPayPayPaths,
   detectManualPayPayCompletion
 } from "./x-risk";
@@ -561,14 +562,31 @@ async function handleHstoraFundingNeed(
       ltcBaselineCaptured:settings.pending_paypay_ltc_baseline_captured,
       directLtcBudgetJpy:directLtcBudget,
       currentBinanceJpy:jpyFree,
-      currentBinanceLtc:ltcFree
+      currentBinanceLtc:ltcFree+ltcLocked
     });
-    const ltcPurchaseDetected=completion==="LTC_PURCHASED";
+    const ltcIncreaseDetected=completion==="LTC_INCREASE_DETECTED";
 
-    if(completion!=="NONE"){
-      const confirmedSpend=ltcPurchaseDetected
-        ?directLtcBudget
-        :jpyDepositGross;
+    if(ltcIncreaseDetected){
+      const currentTotal=ltcFree+ltcLocked;
+      return {
+        action:"MANUAL_PAYPAY_LTC_CONFIRMATION_REQUIRED",
+        dryRun:settings.dry_run,
+        details:{
+          paypayReservationJpy:settings.pending_paypay_funding_jpy,
+          directLtcBudgetJpy:directLtcBudget,
+          binanceLtcBaseline:settings.pending_paypay_binance_ltc_baseline,
+          currentBinanceLtcTotal:currentTotal,
+          detectedLtcIncrease:Math.max(
+            0,
+            currentTotal-settings.pending_paypay_binance_ltc_baseline
+          ),
+          requestedAt:settings.pending_paypay_requested_at
+        }
+      };
+    }
+
+    if(completion==="JPY_FUNDED"){
+      const confirmedSpend=jpyDepositGross;
       if(confirmedSpend<=0){
         await setCircuitBreaker(
           env,
@@ -582,14 +600,14 @@ async function handleHstoraFundingNeed(
         };
       }
       const ltcBaseline=settings.pending_paypay_binance_ltc_baseline;
-      const detectedLtcIncrease=ltcPurchaseDetected
-        ?Math.max(0,ltcFree-ltcBaseline)
-        :0;
+      const detectedLtcIncrease=0;
       settings=await saveXSettings(env,{
-        observed_paypay_balance_jpy:Math.max(
-          0,
-          settings.observed_paypay_balance_jpy-confirmedSpend
-        ),
+        observed_paypay_balance_jpy:nextObservedPayPayBalance({
+          observedBalanceJpy:settings.observed_paypay_balance_jpy,
+          observedAt:settings.observed_paypay_balance_at,
+          pendingRequestedAt:settings.pending_paypay_requested_at,
+          confirmedSpendJpy:confirmedSpend
+        }),
         pending_paypay_funding_jpy:0,
         pending_paypay_jpy_deposit_required_jpy:0,
         pending_paypay_jpy_credit_required_jpy:0,
@@ -603,10 +621,8 @@ async function handleHstoraFundingNeed(
       });
       await recordFundingEvent(env,{
         provider:"paypay_manual",
-        kind:ltcPurchaseDetected?"DIRECT_LTC_PURCHASE_DETECTED":"JPY_DEPOSIT_DETECTED",
+        kind:"JPY_DEPOSIT_DETECTED",
         amountJpy:confirmedSpend,
-        asset:ltcPurchaseDetected?"LTC":undefined,
-        assetAmount:ltcPurchaseDetected?detectedLtcIncrease:undefined,
         status:"COMPLETED",
         metadata:{
           binanceJpyFree:jpyFree,
@@ -619,11 +635,9 @@ async function handleHstoraFundingNeed(
       });
       await auditX(env,{
         kind:"PAYPAY_FUNDING_CONFIRMED",
-        message:ltcPurchaseDetected
-          ?"Binance LTC balance now covers the required amount after the pending manual PayPay step."
-          :"Binance JPY balance increase satisfied the pending manual PayPay funding request.",
+        message:"Binance JPY balance increase satisfied the pending manual PayPay funding request.",
         details:{
-          completionMode:ltcPurchaseDetected?"direct_ltc_purchase":"jpy_deposit",
+          completionMode:"jpy_deposit",
           confirmedSpendJpy:confirmedSpend,
           binanceJpyFree:jpyFree,
           binanceLtcFree:ltcFree,
@@ -633,13 +647,6 @@ async function handleHstoraFundingNeed(
           expectedJpyCreditJpy:jpyCreditRequired
         }
       });
-      if(ltcPurchaseDetected){
-        return {
-          action:"MANUAL_PAYPAY_LTC_PURCHASE_DETECTED",
-          dryRun:settings.dry_run,
-          details:{requiredLtc,binanceLtcFree:ltcFree}
-        };
-      }
     }else{
       return {
         action:"WAITING_MANUAL_PAYPAY_ACTION",
@@ -785,7 +792,7 @@ async function handleHstoraFundingNeed(
         directLtcAvailable?desired:0,
       pending_paypay_path_amounts_captured:true,
       pending_paypay_binance_jpy_baseline:Math.floor(jpyFree),
-      pending_paypay_binance_ltc_baseline:ltcFree,
+      pending_paypay_binance_ltc_baseline:ltcFree+ltcLocked,
       pending_paypay_required_ltc:requiredLtc,
       pending_paypay_ltc_baseline_captured:true,
       pending_paypay_requested_at:Date.now()
