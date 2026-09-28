@@ -2,7 +2,7 @@ import type { Env } from "./types";
 import { randomId } from "./crypto";
 import { encryptSensitive, decryptSensitive, type EncryptedSecret } from "./x-crypto";
 import { ensureXSchema } from "./x-db";
-import { canReleaseReservedOrder, paymentPrice } from "./shiire-vending-policy";
+import { canReleaseReservedOrder, paymentPrice, shouldExpireUnpaidOrder } from "./shiire-vending-policy";
 
 export type ShiireVendingMachine={
   id:string;
@@ -597,10 +597,11 @@ export async function releaseShiireOrder(env:Env,orderId:string){
 export async function cleanShiireVendingExpired(env:Env){
   await ensureShiireVendingSchema(env);
   const now=Date.now();
-  const expired=(await env.DB.prepare(
-    "SELECT id FROM shiire_vending_orders WHERE status='awaiting_payment' AND reserved_until IS NOT NULL AND reserved_until<? ORDER BY reserved_until ASC LIMIT 50"
-  ).bind(now).all<{id:string}>()).results;
-  for(const row of expired){
+  const expiredCandidates=(await env.DB.prepare(
+    "SELECT id,status,reserved_until FROM shiire_vending_orders WHERE reserved_until IS NOT NULL AND reserved_until<? ORDER BY reserved_until ASC LIMIT 50"
+  ).bind(now).all<{id:string;status:string;reserved_until:number|null}>()).results;
+  for(const row of expiredCandidates){
+    if(!shouldExpireUnpaidOrder(row.status,row.reserved_until,now)) continue;
     await releaseShiireOrder(env,row.id);
     await env.DB.prepare(
       "UPDATE shiire_vending_orders SET status='expired',updated_at=? WHERE id=? AND status='awaiting_payment'"
