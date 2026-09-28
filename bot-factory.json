@@ -87,7 +87,7 @@
         "required": false,
         "placeholder": "https://<actual-main-bot>.workers.dev",
         "help": "Xアカウント以外の従来型商品をMain Bot有限在庫へ自動納品する場合だけ設定します。未使用なら空欄で構いません。",
-        "pattern": "^https://[^\\s]+$"
+        "pattern": "^https://[^\\s/]+/?$"
       },
       {
         "key": "XACCOUNT_BOT_BASE_URL",
@@ -96,7 +96,7 @@
         "required": true,
         "placeholder": "https://<actual-worker>.workers.dev",
         "help": "Main BOTの実際のCloudflare Worker HTTPS origin。仕入れbot自販機の決済委譲に使用します。",
-        "pattern": "^https://[^\\s]+$"
+        "pattern": "^https://[^\\s/]+/?$"
       },
       {
         "key": "BINANCE_API_KEY",
