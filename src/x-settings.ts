@@ -43,6 +43,7 @@ export type XSettings={
   max_paypay_balance_age_ms:number;
   pending_paypay_funding_jpy:number;
   pending_paypay_jpy_deposit_required_jpy:number;
+  pending_paypay_jpy_credit_required_jpy:number;
   pending_paypay_direct_ltc_budget_jpy:number;
   pending_paypay_path_amounts_captured:boolean;
   pending_paypay_binance_jpy_baseline:number;
@@ -105,6 +106,7 @@ export const DEFAULT_X_SETTINGS:XSettings={
   max_paypay_balance_age_ms:24*60*60*1000,
   pending_paypay_funding_jpy:0,
   pending_paypay_jpy_deposit_required_jpy:0,
+  pending_paypay_jpy_credit_required_jpy:0,
   pending_paypay_direct_ltc_budget_jpy:0,
   pending_paypay_path_amounts_captured:false,
   pending_paypay_binance_jpy_baseline:0,
@@ -139,7 +141,8 @@ const INTEGER_KEYS=new Set<keyof XSettings>([
   "min_sales_count","minimum_stock","trial_purchase_count",
   "observed_paypay_balance_jpy","observed_paypay_balance_at",
   "max_paypay_balance_age_ms","pending_paypay_funding_jpy",
-  "pending_paypay_jpy_deposit_required_jpy","pending_paypay_direct_ltc_budget_jpy",
+  "pending_paypay_jpy_deposit_required_jpy","pending_paypay_jpy_credit_required_jpy",
+  "pending_paypay_direct_ltc_budget_jpy",
   "pending_paypay_binance_jpy_baseline","pending_paypay_requested_at",
   "usd_jpy_rate_updated_at","max_fx_age_ms",
   "bulk_confirmation_threshold","bulk_approval_until"
