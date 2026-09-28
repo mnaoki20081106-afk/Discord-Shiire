@@ -4,6 +4,7 @@ import {
   calculateFundingAllowance,
   calculateLtcPurchaseAllowance,
   calculateSpendablePayPayJpy,
+  nextObservedPayPayBalance,
   planManualPayPayPaths,
   splitPurchaseBatches,
   detectManualPayPayCompletion
@@ -91,7 +92,7 @@ test("detects direct LTC purchase after a pending PayPay action",()=>{
     currentBinanceJpy:1_000,
     currentBinanceLtc:0.5,
     directLtcBudgetJpy:7_000
-  }),"LTC_PURCHASED");
+  }),"LTC_INCREASE_DETECTED");
 });
 
 test("detects PayPay-funded Binance JPY increase",()=>{
@@ -171,7 +172,7 @@ test("partial Binance JPY does not reduce the direct-LTC PayPay accounting path"
     currentBinanceJpy:2_000,
     currentBinanceLtc:0.5,
     directLtcBudgetJpy:0.5
-  }),"LTC_PURCHASED");
+  }),"LTC_INCREASE_DETECTED");
 });
 
 
@@ -259,7 +260,7 @@ test("detects a capped direct LTC tranche before the full HStora target is reach
     directLtcBudgetJpy:3_000,
     currentBinanceJpy:0,
     currentBinanceLtc:0.2
-  }),"LTC_PURCHASED");
+  }),"LTC_INCREASE_DETECTED");
 });
 
 test("does not treat an LTC increase as PayPay completion when direct LTC was not offered",()=>{
@@ -273,4 +274,23 @@ test("does not treat an LTC increase as PayPay completion when direct LTC was no
     currentBinanceJpy:2_000,
     currentBinanceLtc:0.2
   }),"NONE");
+});
+
+
+test("newer PayPay observation prevents double deduction",()=>{
+  assert.equal(nextObservedPayPayBalance({
+    observedBalanceJpy:23_000,
+    observedAt:2_000,
+    pendingRequestedAt:1_000,
+    confirmedSpendJpy:7_000
+  }),23_000);
+});
+
+test("older PayPay observation is reduced by the confirmed spend",()=>{
+  assert.equal(nextObservedPayPayBalance({
+    observedBalanceJpy:30_000,
+    observedAt:500,
+    pendingRequestedAt:1_000,
+    confirmedSpendJpy:7_000
+  }),23_000);
 });
