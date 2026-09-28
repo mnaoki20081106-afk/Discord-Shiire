@@ -3,7 +3,9 @@
   "name": "discord-shiire",
   "main": "src/index.ts",
   "compatibility_date": "2026-09-01",
-  "compatibility_flags": ["nodejs_compat"],
+  "compatibility_flags": [
+    "nodejs_compat"
+  ],
   "workers_dev": true,
   "preview_urls": true,
   "d1_databases": [
@@ -12,9 +14,8 @@
     }
   ],
   "triggers": {
-    "crons": ["* * * * *"]
-  },
-  "vars": {
-    "MAIN_BOT_BASE_URL": "https://discord-bot.c53gftun651-tiktok.workers.dev"
+    "crons": [
+      "* * * * *"
+    ]
   }
 }
