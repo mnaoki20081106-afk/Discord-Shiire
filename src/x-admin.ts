@@ -189,6 +189,7 @@ export async function handleXAdminApi(
     const settings=await saveXSettings(env,{
       pending_paypay_funding_jpy:0,
       pending_paypay_jpy_deposit_required_jpy:0,
+      pending_paypay_jpy_credit_required_jpy:0,
       pending_paypay_direct_ltc_budget_jpy:0,
       pending_paypay_path_amounts_captured:false,
       pending_paypay_binance_jpy_baseline:0,
