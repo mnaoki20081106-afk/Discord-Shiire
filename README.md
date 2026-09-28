@@ -604,3 +604,20 @@ Existing purchased accounts are backfilled into the new procurement classes when
 `ADMIN_TOKEN` と `CREDENTIALS_ENCRYPTION_KEY` はFactoryが安全なランダム値を生成し、同じリポジトリ + Cloudflareアカウントへの再デプロイ時にも再利用します。
 
 Binance出金用APIキー・固定送信元IP確認・Travel Rule JSONは現在の仕入れフローでは任意です。HStoraへのLTC入金が手動境界のため、出金自動化を接続するまでは設定しないでください。
+
+
+## Main dashboard operations
+
+通常運用では Discord-Shiire の `/x-admin` に ADMIN_TOKEN を入力する必要はありません。Xaccount-Bot の「仕入れbot > 資金・LTC / ログ・障害」から、署名付きBridge経由で次を操作できます。
+
+- reserve_jpy / 1回・日・週・月のLTC購入上限 / 最低購入額
+- Binance LTC目標残高 / 最大残高
+- PayPay残高の手動観測
+- USD/JPYの手動観測
+- Dry Run / LTC自動購入 / 自動仕入れ
+- Emergency Stop / 解除
+- PayPay手動操作待ちの取消
+- Circuit Breaker解除
+- 大量購入の10分間一時承認
+
+`/x-admin` は低レベル診断用として残します。Settings JSONからは、pending PayPayスナップショット、観測時刻、FX観測値、大量購入承認期限などのruntime-owned状態を直接編集できないよう制限しています。
