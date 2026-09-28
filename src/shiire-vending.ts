@@ -1,7 +1,11 @@
 import type { Env } from "./types";
 import { hmacHex, sha256Hex } from "./crypto";
 import { loadXSettings, saveXSettings } from "./x-settings";
-import { getFundingPlan, jstPeriodStarts } from "./x-funding";
+import {
+  confirmPendingDirectLtcFunding,
+  getFundingPlan,
+  jstPeriodStarts
+} from "./x-funding";
 import {
   getBinanceApiRestrictions,
   getBinanceBalance,
@@ -1116,6 +1120,23 @@ export async function handleShiireMainBridge(
 
   if(suffix==="/operations/overview"&&request.method==="GET"){
     return responseJson(await operationsOverview(env));
+  }
+
+  if(
+    suffix==="/operations/funding/confirm-direct-ltc"&&
+    request.method==="POST"
+  ){
+    try{
+      return responseJson(await confirmPendingDirectLtcFunding(env));
+    }catch(error){
+      const code=error instanceof Error?error.message:String(error);
+      const status=
+        code==="NO_PENDING_DIRECT_LTC_CONFIRMATION"||
+        code==="LTC_BALANCE_INCREASE_NOT_DETECTED"
+          ?409
+          :500;
+      return responseJson({error:code},status);
+    }
   }
 
   if(suffix==="/operations/binance"&&request.method==="GET"){
