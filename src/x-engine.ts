@@ -83,6 +83,11 @@ export async function reconcilePendingXOrders(env:Env){
           supplier:"hstora",
           supplierProductId:String(row.supplier_product_id),
           purchasePrice:Number(row.unit_price),
+          procurementClass:
+            row.procurement_class==="TOP_SEARCH"||
+            row.procurement_class==="NO_SHADOWBAN"
+              ?row.procurement_class
+              :null,
           orderResponse:order
         });
         if(added>0){
