@@ -10,6 +10,7 @@ import {
   pendingPurchaseOrders,
   purchasedAccountCountForOrder,
   readyInventoryCount,
+  readyInventoryCountByClass,
   recordFundingEvent,
   updateFundingEventByProviderReference,
   setCircuitBreaker,
@@ -39,7 +40,8 @@ import {
 import {
   detectSearchVisibility,
   isXAccountProduct,
-  qualifyHstoraProduct
+  qualifyHstoraProduct,
+  type ProcurementClass
 } from "./x-qualification";
 import { notifyDiscord } from "./x-alerts";
 import { notifyShiireVendingStockArrival } from "./shiire-vending";
@@ -197,7 +199,11 @@ function catalogBasePriceJpy(
   return null;
 }
 
-async function selectCandidate(env:Env,quantityLimit:number){
+async function selectCandidate(
+  env:Env,
+  quantityLimit:number,
+  targetClass:ProcurementClass
+){
   const settings=await loadXSettings(env);
   const approvedIds=
     settings.seller_quality_mode==="manual_product_approval"
@@ -214,15 +220,38 @@ async function selectCandidate(env:Env,quantityLimit:number){
   for(const product of products){
     if(!isXAccountProduct(product)) continue;
 
-    // TOP-search evidence normally appears in the catalog title/summary. If it
-    // does not, still inspect cheap X listings because the full description may
-    // carry the evidence. Do not use undocumented HStora search parameters.
+    const visibility=detectSearchVisibility(product);
+    const hasTop=
+      visibility.labels.includes("TOP+Latest")||
+      visibility.labels.includes("TOP Search");
+    const hasNoShadow=visibility.labels.includes("No Shadowban");
     const baseJpy=catalogBasePriceJpy(product,settings);
-    if(
-      !hasTopSearchEvidence(product)&&
-      (baseJpy===null||baseJpy>settings.max_unit_price_jpy)
-    ){
-      continue;
+    const baseUsd=
+      String(product.currency??"").toUpperCase()==="USD"
+        ?Number(product.price)
+        :null;
+
+    if(targetClass==="TOP_SEARCH"){
+      if(
+        !hasTop&&
+        (baseJpy===null||baseJpy>settings.max_unit_price_jpy)
+      ){
+        continue;
+      }
+    }else{
+      // No Shadowban is a separate product class. Listings that already state
+      // TOP Search belong to TOP_SEARCH and are never double-counted here.
+      if(hasTop) continue;
+      if(
+        !hasNoShadow&&
+        (
+          baseUsd===null||
+          !Number.isFinite(baseUsd)||
+          baseUsd>settings.max_no_shadowban_unit_price_usd
+        )
+      ){
+        continue;
+      }
     }
 
     let full:HstoraProduct;
@@ -233,7 +262,7 @@ async function selectCandidate(env:Env,quantityLimit:number){
         level:"warn",
         kind:"HSTORA_PRODUCT_DETAIL_FAILED",
         message:error instanceof Error?error.message:String(error),
-        details:{productId:product.id}
+        details:{productId:product.id,targetClass}
       });
       continue;
     }
@@ -260,6 +289,7 @@ async function selectCandidate(env:Env,quantityLimit:number){
     const sameCurrency=
       String(previous?.currency??"").toUpperCase()===
       String(full.currency??"").toUpperCase();
+
     if(previous&&sameCurrency&&previousPrice>0&&currentPrice>0){
       const jump=Math.abs(currentPrice-previousPrice)/previousPrice*100;
       if(jump>settings.max_price_jump_percent){
@@ -273,7 +303,13 @@ async function selectCandidate(env:Env,quantityLimit:number){
           level:"error",
           kind:"PRODUCT_PRICE_JUMP",
           message:"HStora product price changed beyond configured threshold",
-          details:{productId:full.id,previousPrice,currentPrice,jumpPercent:jump}
+          details:{
+            productId:full.id,
+            previousPrice,
+            currentPrice,
+            jumpPercent:jump,
+            targetClass
+          }
         });
         throw new Error("PRODUCT_PRICE_JUMP");
       }
@@ -293,35 +329,54 @@ async function selectCandidate(env:Env,quantityLimit:number){
         price_tiers:full.price_tiers,
         rules:full.rules,
         procurement_strategy:settings.procurement_strategy,
-        planned_quantity:plannedQuantity
+        planned_quantity:plannedQuantity,
+        procurement_class:q.procurement_class
       },
       qualification:q,
+      procurementClass:q.procurement_class,
       qualified:q.qualified,
       seller:null
     });
-    if(q.qualified){
+
+    if(q.qualified&&q.procurement_class===targetClass){
       candidates.push({product:full,q,plannedQuantity,priorPurchases});
     }
   }
 
   candidates.sort((a,b)=>{
-    const price=(a.q.unit_price_jpy??Infinity)-(b.q.unit_price_jpy??Infinity);
+    const aPrice=
+      targetClass==="NO_SHADOWBAN"
+        ?Number(a.q.unit_price_source)
+        :Number(a.q.unit_price_jpy??Infinity);
+    const bPrice=
+      targetClass==="NO_SHADOWBAN"
+        ?Number(b.q.unit_price_source)
+        :Number(b.q.unit_price_jpy??Infinity);
+    const price=aPrice-bPrice;
     if(price!==0) return price;
-    const stock=Number(b.product.stock_available??0)-Number(a.product.stock_available??0);
+    const stock=
+      Number(b.product.stock_available??0)-
+      Number(a.product.stock_available??0);
     if(stock!==0) return stock;
     return Number(a.product.id)-Number(b.product.id);
   });
 
   await auditX(env,{
     kind:"HSTORA_CHEAPEST_FIRST_SCAN",
-    message:"HStora TOP-search candidates ranked by effective JPY unit price",
+    message:"HStora candidates ranked within procurement class",
     details:{
+      targetClass,
       scannedCatalogItems:products.length,
       qualifiedCandidates:candidates.length,
-      maxUnitPriceJpy:settings.max_unit_price_jpy,
+      maxUnitPrice:
+        targetClass==="TOP_SEARCH"
+          ?{currency:"JPY",value:settings.max_unit_price_jpy}
+          :{currency:"USD",value:settings.max_no_shadowban_unit_price_usd},
       strategy:settings.procurement_strategy,
       cheapest:candidates.slice(0,10).map(candidate=>({
         productId:candidate.product.id,
+        procurementClass:candidate.q.procurement_class,
+        unitPriceSource:candidate.q.unit_price_source,
         unitPriceJpy:candidate.q.unit_price_jpy,
         plannedQuantity:candidate.plannedQuantity,
         stock:candidate.product.stock_available,
@@ -744,17 +799,47 @@ export async function runXProcurement(env:Env):Promise<XRunResult>{
     return {action:"HSTORA_BALANCE_ERROR",dryRun:settings.dry_run};
   }
 
-  const inventory=await readyInventoryCount(env);
-  if(inventory>settings.reorder_point){
-    return {action:"INVENTORY_OK",dryRun:settings.dry_run,inventory};
+  const [inventory,topInventory,noShadowInventory]=await Promise.all([
+    readyInventoryCount(env),
+    readyInventoryCountByClass(env,"TOP_SEARCH"),
+    readyInventoryCountByClass(env,"NO_SHADOWBAN")
+  ]);
+
+  let targetClass:ProcurementClass|null=null;
+  let classInventory=0;
+  let classTarget=0;
+
+  // TOP_SEARCH gets priority when both independent product stocks are low.
+  if(topInventory<=settings.reorder_point){
+    targetClass="TOP_SEARCH";
+    classInventory=topInventory;
+    classTarget=settings.target_stock;
+  }else if(noShadowInventory<=settings.no_shadowban_reorder_point){
+    targetClass="NO_SHADOWBAN";
+    classInventory=noShadowInventory;
+    classTarget=settings.no_shadowban_target_stock;
+  }else{
+    return {
+      action:"INVENTORY_OK",
+      dryRun:settings.dry_run,
+      inventory,
+      details:{topSearch:topInventory,noShadowban:noShadowInventory}
+    };
   }
 
-  const need=Math.max(0,settings.target_stock-inventory);
+  const need=Math.max(0,classTarget-classInventory);
   const batch=Math.min(need,settings.max_batch_purchase);
-  if(batch<=0) return {action:"INVENTORY_OK",dryRun:settings.dry_run,inventory};
+  if(batch<=0){
+    return {
+      action:"INVENTORY_OK",
+      dryRun:settings.dry_run,
+      inventory,
+      details:{targetClass,classInventory,classTarget}
+    };
+  }
 
   let candidate;
-  try{candidate=await selectCandidate(env,batch);}
+  try{candidate=await selectCandidate(env,batch,targetClass);}
   catch(error){
     const message=error instanceof Error?error.message:String(error);
     if(message==="PRODUCT_PRICE_JUMP"){
@@ -776,8 +861,13 @@ export async function runXProcurement(env:Env):Promise<XRunResult>{
       details:{
         sellerQualityMode:settings.seller_quality_mode,
         strategy:settings.procurement_strategy,
-        maxUnitPriceJpy:settings.max_unit_price_jpy,
-        searchVisibilityRequirement:settings.search_visibility_requirement,
+        targetClass,
+        maxUnitPrice:
+          targetClass==="TOP_SEARCH"
+            ?{currency:"JPY",value:settings.max_unit_price_jpy}
+            :{currency:"USD",value:settings.max_no_shadowban_unit_price_usd},
+        searchVisibilityRequirement:
+          targetClass==="TOP_SEARCH"?"TOP Search / TOP+Latest":"No Shadowban without TOP Search",
         note:settings.seller_quality_mode==="strict_api"
           ?"HStora v1 APIにはseller rating/reviews/sales/dispute rateがないためstrict_apiでは自動購入しません。"
           :"80円以下のX TOP-search条件に一致する商品が見つかりませんでした。"
@@ -806,7 +896,7 @@ export async function runXProcurement(env:Env):Promise<XRunResult>{
   // be ordered. This prevents a 20-unit discount from qualifying a 10-unit
   // trial purchase above the JPY ceiling.
   const q=qualifyHstoraProduct(fresh,settings,quantity);
-  if(!q.qualified){
+  if(!q.qualified||q.procurement_class!==targetClass){
     await setCircuitBreaker(
       env,
       "product_price",
@@ -879,6 +969,7 @@ export async function runXProcurement(env:Env):Promise<XRunResult>{
       message:"Qualified HStora product would be purchased",
       details:{
         productId:fresh.id,quantity,unitPriceJpy:q.unit_price_jpy,totalSource,
+        procurementClass:q.procurement_class,
         searchVisibility:q.search_visibility,trial:prior===0,dryRun:settings.dry_run
       }
     });
@@ -902,6 +993,7 @@ export async function runXProcurement(env:Env):Promise<XRunResult>{
     currency:String(fresh.currency),
     externalOrderId,
     idempotencyKey,
+    procurementClass:q.procurement_class,
     dryRun:false
   });
 
@@ -926,6 +1018,7 @@ export async function runXProcurement(env:Env):Promise<XRunResult>{
         supplier:"hstora",
         supplierProductId:String(fresh.id),
         purchasePrice:unitSource,
+        procurementClass:q.procurement_class,
         orderResponse:order
       })
       :0;
@@ -996,6 +1089,7 @@ export async function runXProcurement(env:Env):Promise<XRunResult>{
           supplier:"hstora",
           supplierProductId:String(fresh.id),
           purchasePrice:unitSource,
+          procurementClass:q.procurement_class,
           orderResponse:order
         })
         :0;
