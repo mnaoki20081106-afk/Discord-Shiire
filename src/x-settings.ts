@@ -175,7 +175,7 @@ function sanitizeStoredSettings(value:unknown):Partial<XSettings>{
       if(typeof v==="number"&&Number.isFinite(v)&&v>=0) out[key]=v;
       continue;
     }
-    if(key==="seller_quality_mode"){
+    if(key==="funding_mode"){\n      if(v==="manual_hstora"||v==="binance_auto") out[key]=v;\n      continue;\n    }\n    if(key==="seller_quality_mode"){
       if(v==="strict_api"||v==="manual_product_approval"||v==="trial_only") out[key]=v;
       continue;
     }
@@ -227,7 +227,7 @@ export async function loadXSettings(env:Env):Promise<XSettings>{
   // One-way policy migration for installations created before the
   // cheapest-first TOP-search strategy existed. Dry Run and all funding
   // safeguards remain unchanged.
-  if(raw&&!Object.prototype.hasOwnProperty.call(raw,"procurement_strategy")){
+  if(raw&&!Object.prototype.hasOwnProperty.call(raw,"funding_mode")){\n    sanitized.funding_mode="manual_hstora";\n    sanitized.auto_purchase_enabled=false;\n  }\n\n  if(raw&&!Object.prototype.hasOwnProperty.call(raw,"procurement_strategy")){
     sanitized.max_unit_price_jpy=80;
     sanitized.procurement_strategy="cheapest_first";
     sanitized.search_visibility_requirement="top";
