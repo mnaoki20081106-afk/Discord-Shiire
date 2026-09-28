@@ -16,7 +16,7 @@ import {
   getFundingPlan,
   jstPeriodStarts
 } from "./x-funding";
-import { runXProcurement } from "./x-engine";
+import { runLtcAutoPurchase, runXProcurement } from "./x-engine";
 import {
   getBinanceApiRestrictions,
   getBinanceBalance,
@@ -125,6 +125,13 @@ export async function handleXAdminApi(
 
   if(url.pathname==="/api/x/run"&&request.method==="POST"){
     return json(await runXProcurement(env));
+  }
+
+  if(
+    url.pathname==="/api/x/funding/auto-purchase/run"&&
+    request.method==="POST"
+  ){
+    return json(await runLtcAutoPurchase(env));
   }
 
   if(url.pathname==="/api/x/products"&&request.method==="GET"){
@@ -442,6 +449,7 @@ function drawNav(){
 }
 function card(title,data){return '<section class="card"><strong>'+esc(title)+'</strong><pre>'+esc(JSON.stringify(data,null,2))+'</pre></section>'}
 async function runNow(){const d=await api("/api/x/run",{method:"POST",body:"{}"});alert(JSON.stringify(d,null,2));await load()}
+async function runLtcNow(){const d=await api("/api/x/funding/auto-purchase/run",{method:"POST",body:"{}"});alert(JSON.stringify(d,null,2));await load()}
 async function cancelPendingFunding(){await api("/api/x/funding/pending/cancel",{method:"POST",body:"{}"});await load()}
 async function approveBulk(){await api("/api/x/bulk-approval",{method:"POST",body:JSON.stringify({minutes:10})});await load()}
 async function resetEmergency(){await api("/api/x/emergency-stop/reset",{method:"POST",body:"{}"});await load()}
@@ -491,13 +499,17 @@ async function load(){
     document.querySelector("#mode").textContent=s.dry_run?"DRY RUN":"LIVE";
     document.querySelector("#mode").className="status "+(s.dry_run?"good":"bad");
     main.innerHTML=metrics(data)+
-      '<section class="card"><strong>手動実行</strong><p class="hint">Dry Run中は購入POSTを行いません。</p><button id="runNow">仕入れ判定を実行</button></section>'+
+      '<section class="card"><strong>手動実行</strong><p class="hint">Dry Run中は購入POSTを行いません。LTC自動購入は自動仕入れとは独立して実行できます。</p><div class="formrow"><button id="runLtcNow">LTC自動購入判定</button><button id="runNow">仕入れ判定を実行</button></div></section>'+
       card(current,data);
+    document.querySelector("#runLtcNow").onclick=()=>runLtcNow().catch(e=>alert(e.message));
     document.querySelector("#runNow").onclick=()=>runNow().catch(e=>alert(e.message));
   }else if(current==="Funding"){
     data=await api("/api/x/dashboard");
     const s=data.settings||{};
     main.innerHTML=metrics(data)+
+      '<section class="card"><strong>LTC自動購入</strong>'+
+      '<p class="hint">auto_purchase_enabled がONなら、自動仕入れとは独立して1分CronでBinance JPY残高からLTC/JPYを購入し、target_ltc_balanceまで補充します。1回・日・週・月・max_ltc_balance・Binanceの現行注文上限をすべて尊重します。</p>'+
+      '<button id="runLtcFundingNow">今すぐLTC購入判定</button></section>'+
       '<section class="card"><strong>PayPay残高（手動観測）</strong>'+
       '<p class="hint">PayPay操作はBinance Japanの公式Web/アプリ側で手動実行します。BOTはPayPay残高を直接取得せず、ここで観測した残高からreserve_jpy等の上限を計算します。古い観測値では新しいPayPay資金の投入を止めます。既にBinanceへあるJPYは別枠で利用できます。</p>'+
       '<div class="formrow"><input id="paypayBalance" inputmode="numeric" type="number" min="0" step="1" value="'+esc(s.observed_paypay_balance_jpy??0)+'"><button id="savePayPay">観測値を保存</button></div>'+
@@ -511,6 +523,7 @@ async function load(){
         :'')+
       card("Funding detail",data.funding);
     const cancel=document.querySelector("#cancelPending"); if(cancel) cancel.onclick=()=>cancelPendingFunding().catch(e=>alert(e.message));
+    const runLtcFunding=document.querySelector("#runLtcFundingNow"); if(runLtcFunding) runLtcFunding.onclick=()=>runLtcNow().catch(e=>alert(e.message));
     document.querySelector("#savePayPay").onclick=()=>observePayPay().catch(e=>alert(e.message));
     document.querySelector("#saveFx").onclick=()=>observeFx().catch(e=>alert(e.message));
   }else if(current==="Binance"){data=await api("/api/x/binance");main.innerHTML=card(current,data)}

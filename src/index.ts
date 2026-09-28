@@ -14,7 +14,7 @@ import {
 import { getMainCatalog, getMainStock } from "./main-bot";
 import { runAllProducts, runProduct } from "./engine";
 import { handleXAdminApi, xAdminPage } from "./x-admin";
-import { runXProcurement } from "./x-engine";
+import { runLtcAutoPurchase, runXProcurement } from "./x-engine";
 import { loadXSettings } from "./x-settings";
 import { handleHstoraWebhook } from "./x-webhooks";
 import {
@@ -455,11 +455,22 @@ export default {
 
       try{
         const settings=await loadXSettings(env);
+        if(settings.auto_purchase_enabled){
+          try{
+            await runLtcAutoPurchase(env);
+          }catch(error){
+            console.error("scheduled LTC auto-purchase failed",error);
+          }
+        }
         if(settings.auto_procurement_enabled){
-          await runXProcurement(env);
+          try{
+            await runXProcurement(env);
+          }catch(error){
+            console.error("scheduled X procurement failed",error);
+          }
         }
       }catch(error){
-        console.error("scheduled X procurement failed",error);
+        console.error("scheduled X automation settings load failed",error);
       }
 
       try{
