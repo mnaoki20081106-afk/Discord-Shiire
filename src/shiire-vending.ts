@@ -1,5 +1,6 @@
 import type { Env } from "./types";
 import { hmacHex, sha256Hex } from "./crypto";
+import { loadXSettings, saveXSettings } from "./x-settings";
 import { deliveryNonce, paymentMethodEnabled, paymentPrice } from "./shiire-vending-policy";
 import { receiveMainPayment, getMainPaymentStatus } from "./main-bot";
 import {
@@ -885,6 +886,67 @@ export async function handleShiireMainBridge(
           "&permissions=268487680&integration_type=0&scope=bot%20applications.commands"
         :null
     });
+  }
+
+  if(suffix==="/procurement-settings"){
+    if(request.method==="GET"){
+      const settings=await loadXSettings(env);
+      return responseJson({
+        max_unit_price_jpy:settings.max_unit_price_jpy,
+        max_no_shadowban_unit_price_usd:settings.max_no_shadowban_unit_price_usd,
+        reorder_point:settings.reorder_point,
+        target_stock:settings.target_stock,
+        no_shadowban_reorder_point:settings.no_shadowban_reorder_point,
+        no_shadowban_target_stock:settings.no_shadowban_target_stock,
+        trial_purchase_count:settings.trial_purchase_count,
+        max_batch_purchase:settings.max_batch_purchase,
+        dry_run:settings.dry_run,
+        auto_procurement_enabled:settings.auto_procurement_enabled
+      });
+    }
+    if(request.method==="PATCH"){
+      const input=await parseBridgeJson(rawBody);
+      const patch:Record<string,number>={};
+      const numberKeys=[
+        "max_unit_price_jpy",
+        "max_no_shadowban_unit_price_usd",
+        "reorder_point",
+        "target_stock",
+        "no_shadowban_reorder_point",
+        "no_shadowban_target_stock",
+        "trial_purchase_count",
+        "max_batch_purchase"
+      ] as const;
+      for(const key of numberKeys){
+        if(input[key]===undefined) continue;
+        const value=Number(input[key]);
+        if(!Number.isFinite(value)||value<0){
+          throw new ShiireVendingError(400,"INVALID_PROCUREMENT_SETTING_"+key.toUpperCase());
+        }
+        patch[key]=value;
+      }
+      try{
+        const settings=await saveXSettings(env,patch);
+        return responseJson({
+          ok:true,
+          settings:{
+            max_unit_price_jpy:settings.max_unit_price_jpy,
+            max_no_shadowban_unit_price_usd:settings.max_no_shadowban_unit_price_usd,
+            reorder_point:settings.reorder_point,
+            target_stock:settings.target_stock,
+            no_shadowban_reorder_point:settings.no_shadowban_reorder_point,
+            no_shadowban_target_stock:settings.no_shadowban_target_stock,
+            trial_purchase_count:settings.trial_purchase_count,
+            max_batch_purchase:settings.max_batch_purchase
+          }
+        });
+      }catch(error){
+        throw new ShiireVendingError(
+          400,
+          error instanceof Error?error.message:"PROCUREMENT_SETTINGS_INVALID"
+        );
+      }
+    }
   }
 
   if(suffix==="/source-products"&&request.method==="GET"){
