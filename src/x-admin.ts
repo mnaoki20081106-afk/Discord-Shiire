@@ -1,5 +1,5 @@
 import type { Env } from "./types";
-import { loadXSettings, saveXSettings, DEFAULT_X_SETTINGS, type XSettings } from "./x-settings";
+import { loadXSettings, saveXSettings, type XSettings } from "./x-settings";
 import {
   inventorySummary,
   listAuditLogs,
@@ -41,15 +41,40 @@ async function requestJson(request:Request){
   catch{return null;}
 }
 
+const DIRECT_EDITABLE_SETTING_KEYS=new Set<keyof XSettings>([
+  "dry_run","emergency_stop","auto_purchase_enabled","auto_procurement_enabled",
+  "reserve_jpy","max_purchase_jpy","daily_purchase_limit_jpy",
+  "weekly_purchase_limit_jpy","monthly_purchase_limit_jpy","min_purchase_jpy",
+  "target_ltc_balance","max_ltc_balance","wallet_target_ltc","wallet_max_ltc",
+  "max_unit_price_jpy","max_no_shadowban_unit_price_usd",
+  "procurement_strategy","search_visibility_requirement",
+  "reorder_point","target_stock","no_shadowban_reorder_point",
+  "no_shadowban_target_stock","max_batch_purchase",
+  "min_seller_rating","min_product_reviews","min_sales_count",
+  "max_dispute_rate","minimum_stock","trial_purchase_count",
+  "seller_quality_mode","approved_hstora_product_ids",
+  "max_paypay_balance_age_ms","max_fx_age_ms","max_fx_jump_percent",
+  "max_price_jump_percent","max_ltc_price_jump_percent",
+  "require_bulk_confirmation","bulk_confirmation_threshold"
+]);
+
 function publicSettings(settings:XSettings){
-  return settings;
+  const out:Record<string,unknown>={};
+  for(const [key,value] of Object.entries(settings)){
+    // Pending funding snapshots are runtime-owned state. They are exposed via
+    // getFundingPlan(), not as editable Settings JSON.
+    if(key.startsWith("pending_paypay_")) continue;
+    out[key]=value;
+  }
+  return out;
 }
 
 function safePatch(input:Record<string,unknown>):Partial<XSettings>{
-  const allowed=new Set(Object.keys(DEFAULT_X_SETTINGS));
   const out:Record<string,unknown>={};
   for(const [key,value] of Object.entries(input)){
-    if(allowed.has(key)) out[key]=value;
+    if(DIRECT_EDITABLE_SETTING_KEYS.has(key as keyof XSettings)){
+      out[key]=value;
+    }
   }
   return out as Partial<XSettings>;
 }
@@ -406,7 +431,7 @@ function metrics(data){
  const todayJpy=data.today?.approximateJpy;
  const avgJpy=data.today?.approximateAverageJpy;
  return '<div class="grid">'+
-  '<div class="metric"><small>PayPay使用可能額</small><strong>'+esc(f?.allowedJpy??0)+'円</strong></div>'+
+  '<div class="metric"><small>LTC購入上限</small><strong>'+esc(f?.allowedJpy??0)+'円</strong></div>'+
   '<div class="metric"><small>LTC残高</small><strong>'+esc(data.balances?.binanceLtc?.data?.free??"-")+' LTC</strong></div>'+
   '<div class="metric"><small>HStora残高</small><strong>'+esc(data.balances?.hstora?.data?.balance??"-")+' USD</strong></div>'+
   '<div class="metric"><small>X垢在庫</small><strong>'+esc(ready)+'</strong></div>'+
@@ -460,8 +485,8 @@ async function load(){
       '<p class="hint">HStoraのUSD建て価格をJPY上限と比較するための換算値です。期限切れなら価格判定を停止します。</p>'+
       '<div class="formrow"><input id="usdJpy" inputmode="decimal" type="number" min="0" step="0.001" value="'+esc(s.usd_jpy_rate??0)+'"><button id="saveFx">換算値を保存</button></div>'+
       '</section>'+
-      (s.pending_paypay_funding_jpy>0
-        ?'<section class="card"><strong>PayPay手動操作待ち</strong><p class="hint">最大使用額: '+esc(s.pending_paypay_funding_jpy)+'円。Binance Japan公式UIでPayPay→JPY即時入金、またはLTCがPayPay購入対象として表示される場合はLTC直接購入を行ってください。BOTはJPY増加または必要量までのLTC増加を検知して再開します。</p><button id="cancelPending" class="danger">この要求を取消</button></section>'
+      (data.funding?.data?.pendingManualFunding
+        ?'<section class="card"><strong>PayPay手動操作待ち</strong><p class="hint">最大予約額: '+esc(data.funding.data.pendingManualFunding.amountJpy)+'円。Binance Japan公式UIで表示された経路を実行してください。BOTは実際のJPY/LTC残高増加を検知して再開します。</p><button id="cancelPending" class="danger">この要求を取消</button></section>'
         :'')+
       card("Funding detail",data.funding);
     const cancel=document.querySelector("#cancelPending"); if(cancel) cancel.onclick=()=>cancelPendingFunding().catch(e=>alert(e.message));
