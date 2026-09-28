@@ -18,7 +18,7 @@ import {
   listHstoraCatalog
 } from "./providers/hstora";
 import { DisabledHotWalletProvider } from "./providers/manual";
-import { deliveryNonce, paymentMethodEnabled, paymentPrice } from "./shiire-vending-policy";
+import { SHIIRE_DISCORD_BOT_PERMISSIONS, deliveryNonce, paymentMethodEnabled, paymentPrice } from "./shiire-vending-policy";
 import {
   inventorySummary,
   inventoryClassSummary,
@@ -1127,7 +1127,7 @@ export async function handleShiireMainBridge(
       inviteUrl:env.DISCORD_APPLICATION_ID
         ?"https://discord.com/oauth2/authorize?client_id="+
           encodeURIComponent(env.DISCORD_APPLICATION_ID)+
-          "&permissions=268487680&integration_type=0&scope=bot%20applications.commands"
+          "&permissions="+encodeURIComponent(String(SHIIRE_DISCORD_BOT_PERMISSIONS))+"&integration_type=0&scope=bot%20applications.commands"
         :null
     });
   }

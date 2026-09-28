@@ -1,3 +1,5 @@
+export const SHIIRE_DISCORD_BOT_PERMISSIONS=268553216;
+
 export type ShiirePaymentMethod="paypay"|"kyash";
 
 export type ShiirePricedProduct={
