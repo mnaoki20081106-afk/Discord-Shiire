@@ -23,6 +23,7 @@ export type ShiireVendingProduct={
   id:string;
   vending_machine_id:string;
   supplier_product_id:string;
+  procurement_class:"TOP_SEARCH"|"NO_SHADOWBAN"|null;
   name:string;
   description:string;
   price_paypay:number;
@@ -61,7 +62,7 @@ let ready=false;
 const SCHEMA=[
   "CREATE TABLE IF NOT EXISTS shiire_vending_machines (id TEXT PRIMARY KEY,guild_id TEXT NOT NULL,name TEXT NOT NULL,public_log_channel_id TEXT,private_log_channel_id TEXT,role_id TEXT,panel_title TEXT,panel_description TEXT,panel_image_url TEXT,panel_image_mime TEXT,panel_image_base64 TEXT,active INTEGER NOT NULL DEFAULT 1,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL)",
   "CREATE INDEX IF NOT EXISTS shiire_vending_machines_guild_idx ON shiire_vending_machines(guild_id,active)",
-  "CREATE TABLE IF NOT EXISTS shiire_vending_products (id TEXT PRIMARY KEY,vending_machine_id TEXT NOT NULL,supplier_product_id TEXT NOT NULL,name TEXT NOT NULL,description TEXT NOT NULL DEFAULT '',price_paypay INTEGER NOT NULL DEFAULT 0,price_kyash INTEGER NOT NULL DEFAULT 0,emoji TEXT,sales_count INTEGER NOT NULL DEFAULT 0,active INTEGER NOT NULL DEFAULT 1,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL)",
+  "CREATE TABLE IF NOT EXISTS shiire_vending_products (id TEXT PRIMARY KEY,vending_machine_id TEXT NOT NULL,supplier_product_id TEXT NOT NULL,procurement_class TEXT,name TEXT NOT NULL,description TEXT NOT NULL DEFAULT '',price_paypay INTEGER NOT NULL DEFAULT 0,price_kyash INTEGER NOT NULL DEFAULT 0,emoji TEXT,sales_count INTEGER NOT NULL DEFAULT 0,active INTEGER NOT NULL DEFAULT 1,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL)",
   "CREATE INDEX IF NOT EXISTS shiire_vending_products_vm_idx ON shiire_vending_products(vending_machine_id,active)",
   "CREATE INDEX IF NOT EXISTS shiire_vending_products_supplier_idx ON shiire_vending_products(supplier_product_id,active)",
   "CREATE TABLE IF NOT EXISTS shiire_vending_coupons (code TEXT NOT NULL,vending_machine_id TEXT NOT NULL,discount INTEGER NOT NULL,active INTEGER NOT NULL DEFAULT 1,created_at INTEGER NOT NULL,PRIMARY KEY(vending_machine_id,code))",
@@ -90,6 +91,15 @@ export async function ensureShiireVendingSchema(env:Env){
         "ALTER TABLE shiire_vending_machines ADD COLUMN "+name+" "+type
       ).run();
     }
+  }
+
+  const productColumns=(await env.DB.prepare(
+    "PRAGMA table_info(shiire_vending_products)"
+  ).all<{name:string}>()).results.map(row=>row.name);
+  if(!productColumns.includes("procurement_class")){
+    await env.DB.prepare(
+      "ALTER TABLE shiire_vending_products ADD COLUMN procurement_class TEXT"
+    ).run();
   }
 
   const orderColumns=(await env.DB.prepare(
@@ -203,14 +213,24 @@ export async function listShiireSourceProducts(env:Env){
   ).all()).results;
 }
 
-export async function availableShiireAccounts(env:Env,supplierProductId:string):Promise<number>{
+export async function availableShiireAccounts(
+  env:Env,
+  product:Pick<ShiireVendingProduct,"supplier_product_id"|"procurement_class">
+):Promise<number>{
   await ensureShiireVendingSchema(env);
+  if(product.procurement_class){
+    const row=await env.DB.prepare(
+      "SELECT COUNT(*) AS count FROM purchased_accounts "+
+      "WHERE procurement_class=? AND status='READY_FOR_DELIVERY'"
+    ).bind(product.procurement_class).first<{count:number}>();
+    return Math.max(0,Number(row?.count??0));
+  }
   const row=await env.DB.prepare(
-    "SELECT COUNT(*) AS count FROM purchased_accounts WHERE supplier_product_id=? AND status='READY_FOR_DELIVERY'"
-  ).bind(supplierProductId).first<{count:number}>();
+    "SELECT COUNT(*) AS count FROM purchased_accounts "+
+    "WHERE supplier_product_id=? AND status='READY_FOR_DELIVERY'"
+  ).bind(product.supplier_product_id).first<{count:number}>();
   return Math.max(0,Number(row?.count??0));
 }
-
 export async function listShiireProducts(env:Env,machineId:string){
   await ensureShiireVendingSchema(env);
   const products=(await env.DB.prepare(
@@ -218,7 +238,7 @@ export async function listShiireProducts(env:Env,machineId:string){
   ).bind(machineId).all<ShiireVendingProduct>()).results;
   return Promise.all(products.map(async product=>({
     ...product,
-    stock_count:await availableShiireAccounts(env,product.supplier_product_id)
+    stock_count:await availableShiireAccounts(env,product)
   })));
 }
 
@@ -236,11 +256,16 @@ async function requireSourceProduct(env:Env,supplierProductId:string){
   if(!source) throw new Error("SUPPLIER_PRODUCT_NOT_FOUND");
 }
 
+function validProcurementClass(value:unknown):value is "TOP_SEARCH"|"NO_SHADOWBAN"{
+  return value==="TOP_SEARCH"||value==="NO_SHADOWBAN";
+}
+
 export async function createShiireProduct(
   env:Env,
   machineId:string,
   input:{
-    supplierProductId:string;
+    supplierProductId?:string;
+    procurementClass?:"TOP_SEARCH"|"NO_SHADOWBAN"|null;
     name:string;
     description:string;
     pricePayPay:number;
@@ -249,13 +274,37 @@ export async function createShiireProduct(
   }
 ){
   await ensureShiireVendingSchema(env);
-  await requireSourceProduct(env,input.supplierProductId);
+  const procurementClass=
+    validProcurementClass(input.procurementClass)
+      ?input.procurementClass
+      :null;
+  const supplierProductId=String(input.supplierProductId??"").trim();
+
+  if(procurementClass){
+    // Class-backed products aggregate stock across changing HStora listing IDs.
+  }else{
+    if(!supplierProductId) throw new Error("SUPPLIER_PRODUCT_REQUIRED");
+    await requireSourceProduct(env,supplierProductId);
+  }
+
   const id=randomId(),now=Date.now();
   await env.DB.prepare(
-    "INSERT INTO shiire_vending_products(id,vending_machine_id,supplier_product_id,name,description,price_paypay,price_kyash,emoji,sales_count,active,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,0,1,?,?)"
+    "INSERT INTO shiire_vending_products("+
+    "id,vending_machine_id,supplier_product_id,procurement_class,name,description,"+
+    "price_paypay,price_kyash,emoji,sales_count,active,created_at,updated_at"+
+    ") VALUES (?,?,?,?,?,?,?,?,?,0,1,?,?)"
   ).bind(
-    id,machineId,input.supplierProductId,input.name,input.description,
-    input.pricePayPay,input.priceKyash,input.emoji,now,now
+    id,
+    machineId,
+    procurementClass?"":supplierProductId,
+    procurementClass,
+    input.name,
+    input.description,
+    input.pricePayPay,
+    input.priceKyash,
+    input.emoji,
+    now,
+    now
   ).run();
   return getShiireProduct(env,id);
 }
@@ -265,6 +314,7 @@ export async function updateShiireProduct(
   id:string,
   input:Partial<{
     supplierProductId:string;
+    procurementClass:"TOP_SEARCH"|"NO_SHADOWBAN"|null;
     name:string;
     description:string;
     pricePayPay:number;
@@ -274,19 +324,40 @@ export async function updateShiireProduct(
 ){
   const current=await getShiireProduct(env,id);
   if(!current) return false;
-  if(input.supplierProductId&&input.supplierProductId!==current.supplier_product_id){
-    await requireSourceProduct(env,input.supplierProductId);
+
+  let nextClass=current.procurement_class;
+  let nextSupplier=current.supplier_product_id;
+
+  if(input.procurementClass!==undefined){
+    if(input.procurementClass!==null&&!validProcurementClass(input.procurementClass)){
+      throw new Error("PROCUREMENT_CLASS_INVALID");
+    }
+    nextClass=input.procurementClass;
+    if(nextClass) nextSupplier="";
   }
+  if(input.supplierProductId!==undefined){
+    const supplierProductId=String(input.supplierProductId).trim();
+    if(!supplierProductId) throw new Error("SUPPLIER_PRODUCT_REQUIRED");
+    await requireSourceProduct(env,supplierProductId);
+    nextSupplier=supplierProductId;
+    nextClass=null;
+  }
+  if(!nextClass&&!nextSupplier) throw new Error("VENDING_SOURCE_REQUIRED");
+
   const result=await env.DB.prepare(
-    "UPDATE shiire_vending_products SET supplier_product_id=?,name=?,description=?,price_paypay=?,price_kyash=?,emoji=?,updated_at=? WHERE id=? AND active=1"
+    "UPDATE shiire_vending_products SET supplier_product_id=?,procurement_class=?,"+
+    "name=?,description=?,price_paypay=?,price_kyash=?,emoji=?,updated_at=? "+
+    "WHERE id=? AND active=1"
   ).bind(
-    input.supplierProductId??current.supplier_product_id,
+    nextSupplier,
+    nextClass,
     input.name??current.name,
     input.description??current.description,
     input.pricePayPay??current.price_paypay,
     input.priceKyash??current.price_kyash,
     input.emoji===undefined?current.emoji:input.emoji,
-    Date.now(),id
+    Date.now(),
+    id
   ).run();
   return Number(result.meta.changes??0)>0;
 }
@@ -364,9 +435,17 @@ async function reserveAccounts(
   product:ShiireVendingProduct,
   quantity:number
 ){
-  const rows=(await env.DB.prepare(
-    "SELECT id FROM purchased_accounts WHERE supplier_product_id=? AND status='READY_FOR_DELIVERY' ORDER BY purchased_at ASC,id ASC LIMIT ?"
-  ).bind(product.supplier_product_id,quantity).all<{id:string}>()).results;
+  const rows=product.procurement_class
+    ?(await env.DB.prepare(
+      "SELECT id FROM purchased_accounts "+
+      "WHERE procurement_class=? AND status='READY_FOR_DELIVERY' "+
+      "ORDER BY purchased_at ASC,id ASC LIMIT ?"
+    ).bind(product.procurement_class,quantity).all<{id:string}>()).results
+    :(await env.DB.prepare(
+      "SELECT id FROM purchased_accounts "+
+      "WHERE supplier_product_id=? AND status='READY_FOR_DELIVERY' "+
+      "ORDER BY purchased_at ASC,id ASC LIMIT ?"
+    ).bind(product.supplier_product_id,quantity).all<{id:string}>()).results;
   if(rows.length<quantity) throw new Error("OUT_OF_STOCK");
 
   const reserved:string[]=[];
@@ -659,7 +738,26 @@ export async function saveShiirePanel(
 
 export async function machinesForSupplierProduct(env:Env,supplierProductId:string){
   await ensureShiireVendingSchema(env);
+  const source=await env.DB.prepare(
+    "SELECT procurement_class FROM supplier_products "+
+    "WHERE supplier='hstora' AND supplier_product_id=?"
+  ).bind(supplierProductId).first<{procurement_class:string|null}>();
+  const procurementClass=
+    source?.procurement_class==="TOP_SEARCH"||
+    source?.procurement_class==="NO_SHADOWBAN"
+      ?source.procurement_class
+      :null;
+
   return (await env.DB.prepare(
-    "SELECT p.id AS product_id,p.name AS product_name,m.* FROM shiire_vending_products p JOIN shiire_vending_machines m ON m.id=p.vending_machine_id WHERE p.supplier_product_id=? AND p.active=1 AND m.active=1"
-  ).bind(supplierProductId).all<any>()).results;
+    "SELECT p.id AS product_id,p.name AS product_name,m.* "+
+    "FROM shiire_vending_products p "+
+    "JOIN shiire_vending_machines m ON m.id=p.vending_machine_id "+
+    "WHERE p.active=1 AND m.active=1 AND ("+
+    "p.supplier_product_id=? OR (? IS NOT NULL AND p.procurement_class=?)"+
+    ")"
+  ).bind(
+    supplierProductId,
+    procurementClass,
+    procurementClass
+  ).all<any>()).results;
 }
