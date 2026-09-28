@@ -36,7 +36,11 @@ import {
   type HstoraProduct,
   type HstoraCatalogItem
 } from "./providers/hstora";
-import { qualifyHstoraProduct } from "./x-qualification";
+import {
+  detectSearchVisibility,
+  isXAccountProduct,
+  qualifyHstoraProduct
+} from "./x-qualification";
 import { notifyDiscord } from "./x-alerts";
 import { notifyShiireVendingStockArrival } from "./shiire-vending";
 
@@ -154,18 +158,73 @@ async function catalogProducts(env:Env,approvedIds:number[]):Promise<HstoraCatal
   do{
     const response=await listHstoraCatalog(env,page,20);
     out.push(...(response.items??[]));
-    pages=Math.min(20,Math.max(1,Number(response.pagination?.pages??1)));
+    const reportedPages=Math.max(
+      1,
+      Math.floor(Number(response.pagination?.pages??1))
+    );
+    // Fail closed instead of silently scanning only part of a catalog if the
+    // API suddenly reports an implausibly large page count.
+    if(reportedPages>200){
+      throw new Error("HSTORA_CATALOG_PAGE_COUNT_UNEXPECTED");
+    }
+    pages=reportedPages;
     page++;
   }while(page<=pages);
   return out;
 }
 
-async function selectCandidate(env:Env,quantity:number){
+function hasTopSearchEvidence(product:HstoraCatalogItem|HstoraProduct){
+  const labels=detectSearchVisibility(product).labels;
+  return labels.includes("TOP+Latest")||labels.includes("TOP Search");
+}
+
+function catalogBasePriceJpy(
+  product:HstoraCatalogItem,
+  settings:Awaited<ReturnType<typeof loadXSettings>>
+):number|null{
+  const currency=String(product.currency??"").toUpperCase();
+  const price=Number(product.price);
+  if(!Number.isFinite(price)||price<=0) return null;
+  if(currency==="JPY") return price;
+  if(
+    currency==="USD"&&
+    settings.usd_jpy_rate>0&&
+    settings.usd_jpy_rate_updated_at>0&&
+    Date.now()-settings.usd_jpy_rate_updated_at<=settings.max_fx_age_ms
+  ){
+    return price*settings.usd_jpy_rate;
+  }
+  return null;
+}
+
+async function selectCandidate(env:Env,quantityLimit:number){
   const settings=await loadXSettings(env);
-  const products=await catalogProducts(env,settings.approved_hstora_product_ids);
-  const candidates:Array<{product:HstoraProduct;q:ReturnType<typeof qualifyHstoraProduct>}>=[];
+  const approvedIds=
+    settings.seller_quality_mode==="manual_product_approval"
+      ?settings.approved_hstora_product_ids
+      :[];
+  const products=await catalogProducts(env,approvedIds);
+  const candidates:Array<{
+    product:HstoraProduct;
+    q:ReturnType<typeof qualifyHstoraProduct>;
+    plannedQuantity:number;
+    priorPurchases:number;
+  }> = [];
 
   for(const product of products){
+    if(!isXAccountProduct(product)) continue;
+
+    // TOP-search evidence normally appears in the catalog title/summary. If it
+    // does not, still inspect cheap X listings because the full description may
+    // carry the evidence. Do not use undocumented HStora search parameters.
+    const baseJpy=catalogBasePriceJpy(product,settings);
+    if(
+      !hasTopSearchEvidence(product)&&
+      (baseJpy===null||baseJpy>settings.max_unit_price_jpy)
+    ){
+      continue;
+    }
+
     let full:HstoraProduct;
     try{
       full=await getHstoraProduct(env,Number(product.id));
@@ -178,11 +237,29 @@ async function selectCandidate(env:Env,quantity:number){
       });
       continue;
     }
-    const q=qualifyHstoraProduct(full,settings,quantity);
+
+    const priorPurchases=await successfulPurchaseCountForProduct(
+      env,
+      String(full.id)
+    );
+    const trialCap=
+      priorPurchases===0
+        ?settings.trial_purchase_count
+        :quantityLimit;
+    const plannedQuantity=Math.min(
+      quantityLimit,
+      Math.max(1,trialCap),
+      Math.max(0,Number(full.stock_available??0))
+    );
+    if(plannedQuantity<=0) continue;
+
+    const q=qualifyHstoraProduct(full,settings,plannedQuantity);
     const previous=await getSupplierProductRecord(env,String(full.id));
     const previousPrice=Number(previous?.unit_price??0);
     const currentPrice=Number(full.price??0);
-    const sameCurrency=String(previous?.currency??"").toUpperCase()===String(full.currency??"").toUpperCase();
+    const sameCurrency=
+      String(previous?.currency??"").toUpperCase()===
+      String(full.currency??"").toUpperCase();
     if(previous&&sameCurrency&&previousPrice>0&&currentPrice>0){
       const jump=Math.abs(currentPrice-previousPrice)/previousPrice*100;
       if(jump>settings.max_price_jump_percent){
@@ -201,28 +278,58 @@ async function selectCandidate(env:Env,quantity:number){
         throw new Error("PRODUCT_PRICE_JUMP");
       }
     }
+
     await upsertSupplierProduct(env,{
       supplier:"hstora",
       supplierProductId:String(full.id),
       title:String(full.name??""),
       description:String(full.description??full.short_description??""),
       currency:String(full.currency??""),
-      unitPrice:Number(full.price??0),
+      unitPrice:Number(q.unit_price_source??full.price??0),
       stockAvailable:Number(full.stock_available??0),
       productUrl:full.product_url,
       structured:{
         delivery_type:full.delivery_type,
         price_tiers:full.price_tiers,
-        rules:full.rules
+        rules:full.rules,
+        procurement_strategy:settings.procurement_strategy,
+        planned_quantity:plannedQuantity
       },
       qualification:q,
       qualified:q.qualified,
       seller:null
     });
-    if(q.qualified) candidates.push({product:full,q});
+    if(q.qualified){
+      candidates.push({product:full,q,plannedQuantity,priorPurchases});
+    }
   }
 
-  candidates.sort((a,b)=>(a.q.unit_price_jpy??Infinity)-(b.q.unit_price_jpy??Infinity));
+  candidates.sort((a,b)=>{
+    const price=(a.q.unit_price_jpy??Infinity)-(b.q.unit_price_jpy??Infinity);
+    if(price!==0) return price;
+    const stock=Number(b.product.stock_available??0)-Number(a.product.stock_available??0);
+    if(stock!==0) return stock;
+    return Number(a.product.id)-Number(b.product.id);
+  });
+
+  await auditX(env,{
+    kind:"HSTORA_CHEAPEST_FIRST_SCAN",
+    message:"HStora TOP-search candidates ranked by effective JPY unit price",
+    details:{
+      scannedCatalogItems:products.length,
+      qualifiedCandidates:candidates.length,
+      maxUnitPriceJpy:settings.max_unit_price_jpy,
+      strategy:settings.procurement_strategy,
+      cheapest:candidates.slice(0,10).map(candidate=>({
+        productId:candidate.product.id,
+        unitPriceJpy:candidate.q.unit_price_jpy,
+        plannedQuantity:candidate.plannedQuantity,
+        stock:candidate.product.stock_available,
+        searchVisibility:candidate.q.search_visibility
+      }))
+    }
+  });
+
   return candidates[0]??null;
 }
 
@@ -668,22 +775,52 @@ export async function runXProcurement(env:Env):Promise<XRunResult>{
       inventory,
       details:{
         sellerQualityMode:settings.seller_quality_mode,
-        note:"HStora v1 APIにはseller rating/reviews/sales/dispute rateがないためstrict_apiでは自動購入しません。"
+        strategy:settings.procurement_strategy,
+        maxUnitPriceJpy:settings.max_unit_price_jpy,
+        searchVisibilityRequirement:settings.search_visibility_requirement,
+        note:settings.seller_quality_mode==="strict_api"
+          ?"HStora v1 APIにはseller rating/reviews/sales/dispute rateがないためstrict_apiでは自動購入しません。"
+          :"80円以下のX TOP-search条件に一致する商品が見つかりませんでした。"
       }
     };
   }
 
   const fresh=await getHstoraProduct(env,Number(candidate.product.id));
-  const q=qualifyHstoraProduct(fresh,settings,batch);
-  if(!q.qualified){
-    await setCircuitBreaker(env,"product_price","OPEN","PRODUCT_REQUALIFICATION_FAILED");
-    return {action:"PRODUCT_REQUALIFICATION_FAILED",dryRun:settings.dry_run,inventory,productId:Number(fresh.id),details:q};
-  }
-
   const prior=await successfulPurchaseCountForProduct(env,String(fresh.id));
   const trialCap=prior===0?settings.trial_purchase_count:batch;
-  const quantity=Math.min(batch,Math.max(1,trialCap),Number(fresh.stock_available??0));
-  if(quantity<=0) return {action:"PRODUCT_OUT_OF_STOCK",dryRun:settings.dry_run,inventory,productId:Number(fresh.id)};
+  const quantity=Math.min(
+    batch,
+    Math.max(1,trialCap),
+    Math.max(0,Number(fresh.stock_available??0))
+  );
+  if(quantity<=0){
+    return {
+      action:"PRODUCT_OUT_OF_STOCK",
+      dryRun:settings.dry_run,
+      inventory,
+      productId:Number(fresh.id)
+    };
+  }
+
+  // Recalculate the effective tier price using the quantity that will really
+  // be ordered. This prevents a 20-unit discount from qualifying a 10-unit
+  // trial purchase above the JPY ceiling.
+  const q=qualifyHstoraProduct(fresh,settings,quantity);
+  if(!q.qualified){
+    await setCircuitBreaker(
+      env,
+      "product_price",
+      "OPEN",
+      "PRODUCT_REQUALIFICATION_FAILED"
+    );
+    return {
+      action:"PRODUCT_REQUALIFICATION_FAILED",
+      dryRun:settings.dry_run,
+      inventory,
+      productId:Number(fresh.id),
+      details:q
+    };
+  }
 
   if(
     !settings.dry_run&&
