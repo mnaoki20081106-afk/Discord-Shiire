@@ -90,6 +90,15 @@ export async function getFundingPlan(env:Env,now=Date.now()){
       pathAmountsCaptured:settings.pending_paypay_path_amounts_captured,
       binanceJpyBaseline:settings.pending_paypay_binance_jpy_baseline,
       binanceLtcBaseline:settings.pending_paypay_binance_ltc_baseline,
+      currentBinanceLtcTotal:ltc.free+ltc.locked,
+      detectedLtcIncrease:Math.max(
+        0,
+        ltc.free+ltc.locked-settings.pending_paypay_binance_ltc_baseline
+      ),
+      directLtcIncreaseDetected:
+        settings.pending_paypay_direct_ltc_budget_jpy>0&&
+        settings.pending_paypay_ltc_baseline_captured&&
+        ltc.free+ltc.locked>settings.pending_paypay_binance_ltc_baseline+1e-12,
       requiredLtcAtRequest:settings.pending_paypay_required_ltc,
       ltcBaselineCaptured:settings.pending_paypay_ltc_baseline_captured,
       requestedAt:settings.pending_paypay_requested_at
