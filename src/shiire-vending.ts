@@ -26,7 +26,9 @@ import {
   listOpenCircuitBreakers,
   listSupplierProducts,
   recentFundingEvents,
-  recentCryptoTransactions
+  recentCryptoTransactions,
+  auditX,
+  setCircuitBreaker
 } from "./x-db";
 import { receiveMainPayment, getMainPaymentStatus } from "./main-bot";
 import {
@@ -1169,6 +1171,285 @@ export async function handleShiireMainBridge(
       recentCryptoTransactions(env,60)
     ]);
     return responseJson({logs,breakers,fundingEvents,cryptoTransactions});
+  }
+
+  if(suffix==="/funding-settings"){
+    if(request.method==="GET"){
+      const settings=await loadXSettings(env);
+      return responseJson({
+        reserve_jpy:settings.reserve_jpy,
+        max_purchase_jpy:settings.max_purchase_jpy,
+        daily_purchase_limit_jpy:settings.daily_purchase_limit_jpy,
+        weekly_purchase_limit_jpy:settings.weekly_purchase_limit_jpy,
+        monthly_purchase_limit_jpy:settings.monthly_purchase_limit_jpy,
+        min_purchase_jpy:settings.min_purchase_jpy,
+        target_ltc_balance:settings.target_ltc_balance,
+        max_ltc_balance:settings.max_ltc_balance,
+        observed_paypay_balance_jpy:settings.observed_paypay_balance_jpy,
+        observed_paypay_balance_at:settings.observed_paypay_balance_at,
+        usd_jpy_rate:settings.usd_jpy_rate,
+        usd_jpy_rate_updated_at:settings.usd_jpy_rate_updated_at
+      });
+    }
+    if(request.method==="PATCH"){
+      const input=await parseBridgeJson(rawBody);
+      const patch:Record<string,number>={};
+      const integerKeys=[
+        "reserve_jpy",
+        "max_purchase_jpy",
+        "daily_purchase_limit_jpy",
+        "weekly_purchase_limit_jpy",
+        "monthly_purchase_limit_jpy",
+        "min_purchase_jpy"
+      ] as const;
+      const numberKeys=[
+        "target_ltc_balance",
+        "max_ltc_balance"
+      ] as const;
+      for(const key of integerKeys){
+        if(input[key]===undefined) continue;
+        const value=Number(input[key]);
+        if(!Number.isSafeInteger(value)||value<0){
+          throw new ShiireVendingError(400,"INVALID_FUNDING_SETTING_"+key.toUpperCase());
+        }
+        patch[key]=value;
+      }
+      for(const key of numberKeys){
+        if(input[key]===undefined) continue;
+        const value=Number(input[key]);
+        if(!Number.isFinite(value)||value<0){
+          throw new ShiireVendingError(400,"INVALID_FUNDING_SETTING_"+key.toUpperCase());
+        }
+        patch[key]=value;
+      }
+      try{
+        const settings=await saveXSettings(env,patch);
+        await auditX(env,{
+          kind:"FUNDING_SETTINGS_UPDATED",
+          message:"Funding limits were updated from the authenticated main dashboard.",
+          details:{keys:Object.keys(patch)}
+        });
+        return responseJson({
+          ok:true,
+          settings:{
+            reserve_jpy:settings.reserve_jpy,
+            max_purchase_jpy:settings.max_purchase_jpy,
+            daily_purchase_limit_jpy:settings.daily_purchase_limit_jpy,
+            weekly_purchase_limit_jpy:settings.weekly_purchase_limit_jpy,
+            monthly_purchase_limit_jpy:settings.monthly_purchase_limit_jpy,
+            min_purchase_jpy:settings.min_purchase_jpy,
+            target_ltc_balance:settings.target_ltc_balance,
+            max_ltc_balance:settings.max_ltc_balance
+          }
+        });
+      }catch(error){
+        throw new ShiireVendingError(
+          400,
+          error instanceof Error?error.message:"FUNDING_SETTINGS_INVALID"
+        );
+      }
+    }
+  }
+
+  if(suffix==="/funding/paypay-observation"&&request.method==="POST"){
+    const input=await parseBridgeJson(rawBody);
+    const balanceJpy=Number(input.balanceJpy);
+    if(!Number.isSafeInteger(balanceJpy)||balanceJpy<0){
+      throw new ShiireVendingError(400,"INVALID_PAYPAY_BALANCE");
+    }
+    const settings=await saveXSettings(env,{
+      observed_paypay_balance_jpy:balanceJpy,
+      observed_paypay_balance_at:Date.now()
+    });
+    await auditX(env,{
+      kind:"paypay_balance_observed",
+      message:"PayPay balance observation updated from the authenticated main dashboard.",
+      details:{balanceJpy}
+    });
+    return responseJson({
+      ok:true,
+      balanceJpy:settings.observed_paypay_balance_jpy,
+      observedAt:settings.observed_paypay_balance_at
+    });
+  }
+
+  if(suffix==="/funding/usd-jpy-observation"&&request.method==="POST"){
+    const input=await parseBridgeJson(rawBody);
+    const rate=Number(input.rate);
+    if(!Number.isFinite(rate)||rate<=0){
+      throw new ShiireVendingError(400,"INVALID_USD_JPY_RATE");
+    }
+    const current=await loadXSettings(env);
+    const now=Date.now();
+    const previousFresh=
+      current.usd_jpy_rate>0&&
+      current.usd_jpy_rate_updated_at>0&&
+      now-current.usd_jpy_rate_updated_at<=current.max_fx_age_ms;
+    if(previousFresh){
+      const jump=Math.abs(rate-current.usd_jpy_rate)/current.usd_jpy_rate*100;
+      if(jump>current.max_fx_jump_percent){
+        await setCircuitBreaker(
+          env,
+          "fx_rate",
+          "OPEN",
+          "USDJPY_JUMP:"+jump.toFixed(2)+"%"
+        );
+        await auditX(env,{
+          level:"error",
+          kind:"FX_RATE_JUMP",
+          message:"USD/JPY observation changed beyond configured threshold.",
+          details:{previous:current.usd_jpy_rate,attempted:rate,jumpPercent:jump}
+        });
+        throw new ShiireVendingError(409,"FX_RATE_CIRCUIT_BREAKER");
+      }
+    }
+    const settings=await saveXSettings(env,{
+      usd_jpy_rate:rate,
+      usd_jpy_rate_updated_at:now
+    });
+    await auditX(env,{
+      kind:"usd_jpy_rate_observed",
+      message:"USD/JPY observation updated from the authenticated main dashboard.",
+      details:{rate}
+    });
+    return responseJson({
+      ok:true,
+      rate:settings.usd_jpy_rate,
+      observedAt:settings.usd_jpy_rate_updated_at
+    });
+  }
+
+  if(suffix==="/funding/pending/cancel"&&request.method==="POST"){
+    const current=await loadXSettings(env);
+    const settings=await saveXSettings(env,{
+      pending_paypay_funding_jpy:0,
+      pending_paypay_jpy_deposit_required_jpy:0,
+      pending_paypay_jpy_credit_required_jpy:0,
+      pending_paypay_direct_ltc_budget_jpy:0,
+      pending_paypay_path_amounts_captured:false,
+      pending_paypay_binance_jpy_baseline:0,
+      pending_paypay_binance_ltc_baseline:0,
+      pending_paypay_required_ltc:0,
+      pending_paypay_ltc_baseline_captured:false,
+      pending_paypay_requested_at:0
+    });
+    await auditX(env,{
+      kind:"PAYPAY_FUNDING_CANCELLED",
+      message:"Pending manual PayPay funding request was cancelled from the authenticated main dashboard.",
+      details:{cancelledAmountJpy:current.pending_paypay_funding_jpy}
+    });
+    return responseJson({
+      ok:true,
+      pending:false,
+      observedPayPayBalanceJpy:settings.observed_paypay_balance_jpy
+    });
+  }
+
+  if(suffix==="/automation-settings"){
+    if(request.method==="GET"){
+      const settings=await loadXSettings(env);
+      return responseJson({
+        dry_run:settings.dry_run,
+        emergency_stop:settings.emergency_stop,
+        auto_purchase_enabled:settings.auto_purchase_enabled,
+        auto_procurement_enabled:settings.auto_procurement_enabled
+      });
+    }
+    if(request.method==="PATCH"){
+      const input=await parseBridgeJson(rawBody);
+      const current=await loadXSettings(env);
+      const patch:Partial<{
+        dry_run:boolean;
+        auto_purchase_enabled:boolean;
+        auto_procurement_enabled:boolean;
+      }>={};
+      for(const key of [
+        "dry_run",
+        "auto_purchase_enabled",
+        "auto_procurement_enabled"
+      ] as const){
+        if(input[key]===undefined) continue;
+        if(typeof input[key]!=="boolean"){
+          throw new ShiireVendingError(400,"INVALID_AUTOMATION_SETTING_"+key.toUpperCase());
+        }
+        patch[key]=input[key] as boolean;
+      }
+      if(current.emergency_stop&&(
+        patch.auto_purchase_enabled===true||
+        patch.auto_procurement_enabled===true||
+        patch.dry_run===false
+      )){
+        throw new ShiireVendingError(409,"EMERGENCY_STOP_ACTIVE");
+      }
+      const nextDryRun=patch.dry_run??current.dry_run;
+      const enablingLiveAutomation=
+        nextDryRun===false&&(
+          (patch.auto_purchase_enabled===true&&!current.auto_purchase_enabled)||
+          (patch.auto_procurement_enabled===true&&!current.auto_procurement_enabled)
+        );
+      const leavingDryRun=current.dry_run===true&&patch.dry_run===false;
+      if((enablingLiveAutomation||leavingDryRun)&&input.confirmLive!==true){
+        throw new ShiireVendingError(409,"LIVE_MODE_CONFIRMATION_REQUIRED");
+      }
+      try{
+        const settings=await saveXSettings(env,patch);
+        await auditX(env,{
+          kind:"AUTOMATION_SETTINGS_UPDATED",
+          message:"Automation safety settings were updated from the authenticated main dashboard.",
+          details:{
+            dryRun:settings.dry_run,
+            autoPurchaseEnabled:settings.auto_purchase_enabled,
+            autoProcurementEnabled:settings.auto_procurement_enabled
+          }
+        });
+        return responseJson({
+          ok:true,
+          dry_run:settings.dry_run,
+          emergency_stop:settings.emergency_stop,
+          auto_purchase_enabled:settings.auto_purchase_enabled,
+          auto_procurement_enabled:settings.auto_procurement_enabled
+        });
+      }catch(error){
+        throw new ShiireVendingError(
+          400,
+          error instanceof Error?error.message:"AUTOMATION_SETTINGS_INVALID"
+        );
+      }
+    }
+  }
+
+  if(suffix==="/emergency-stop"&&request.method==="POST"){
+    const settings=await saveXSettings(env,{
+      emergency_stop:true,
+      auto_purchase_enabled:false,
+      auto_procurement_enabled:false
+    });
+    await auditX(env,{
+      level:"warn",
+      kind:"EMERGENCY_STOP_ENABLED",
+      message:"Emergency Stop was enabled from the authenticated main dashboard."
+    });
+    return responseJson({
+      ok:true,
+      emergency_stop:settings.emergency_stop,
+      auto_purchase_enabled:settings.auto_purchase_enabled,
+      auto_procurement_enabled:settings.auto_procurement_enabled
+    });
+  }
+
+  if(suffix==="/emergency-stop/reset"&&request.method==="POST"){
+    const settings=await saveXSettings(env,{emergency_stop:false});
+    await auditX(env,{
+      kind:"EMERGENCY_STOP_RESET",
+      message:"Emergency Stop was reset from the authenticated main dashboard. Automation remains unchanged."
+    });
+    return responseJson({
+      ok:true,
+      emergency_stop:settings.emergency_stop,
+      auto_purchase_enabled:settings.auto_purchase_enabled,
+      auto_procurement_enabled:settings.auto_procurement_enabled,
+      note:"Automation is not re-enabled automatically."
+    });
   }
 
   if(suffix==="/procurement-settings"){
