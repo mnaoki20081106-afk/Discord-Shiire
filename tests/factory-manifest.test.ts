@@ -19,7 +19,8 @@ test("Factory bridge URL accepts a real workers.dev HTTPS origin",()=>{
   assert.ok(pattern);
   const re=new RegExp(pattern);
   assert.equal(re.test("https://xaccount-bot.mnaoki20081106.workers.dev"),true);
-  assert.equal(re.test("https://example.com/path"),true);
+  assert.equal(re.test("https://example.com/"),true);
+  assert.equal(re.test("https://example.com/path"),false);
 });
 
 test("Factory URL fields reject whitespace and non-HTTPS schemes",()=>{
