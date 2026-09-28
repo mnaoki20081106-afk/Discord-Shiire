@@ -513,13 +513,18 @@ async function handleHstoraFundingNeed(
 
   let ltcJpy:number;
   let ltcFree:number;
+  let ltcLocked:number;
   let jpyFree:number;
   try{
-    [ltcJpy,ltcFree,jpyFree]=await Promise.all([
-      getLtcJpyMarketStatus().then(v=>v.priceJpy),
-      getBinanceBalance(env,"LTC").then(v=>v.free),
-      getBinanceBalance(env,"JPY").then(v=>v.free)
+    const [market,ltcBalance,jpyBalance]=await Promise.all([
+      getLtcJpyMarketStatus(),
+      getBinanceBalance(env,"LTC"),
+      getBinanceBalance(env,"JPY")
     ]);
+    ltcJpy=market.priceJpy;
+    ltcFree=ltcBalance.free;
+    ltcLocked=ltcBalance.locked;
+    jpyFree=jpyBalance.free;
   }catch(error){
     await setCircuitBreaker(env,"binance","OPEN",error instanceof Error?error.message:String(error));
     await notifyDiscord(env,{
@@ -689,7 +694,8 @@ async function handleHstoraFundingNeed(
     weeklyRemainingJpy:weekly,
     monthlyRemainingJpy:monthly,
     minPurchaseJpy:settings.min_purchase_jpy,
-    currentLtc:ltcFree,
+    // Exposure caps count both available and order-locked LTC.
+    currentLtc:ltcFree+ltcLocked,
     targetLtcBalance:settings.target_ltc_balance,
     maxLtcBalance:settings.max_ltc_balance,
     ltcJpy
