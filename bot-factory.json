@@ -182,37 +182,43 @@
           "id": "view-channels",
           "label": "チャンネルを見る",
           "required": true,
-          "description": "自販機パネルの設置・更新に必要です。"
+          "description": "自販機パネルの設置・更新に必要です。",
+          "discord_permission": "VIEW_CHANNEL"
         },
         {
           "id": "send-messages",
           "label": "メッセージを送信",
           "required": true,
-          "description": "自販機パネルと通知の投稿に必要です。"
+          "description": "自販機パネルと通知の投稿に必要です。",
+          "discord_permission": "SEND_MESSAGES"
         },
         {
           "id": "embed-links",
           "label": "埋め込みリンク",
           "required": true,
-          "description": "自販機Embedの表示に必要です。"
+          "description": "自販機Embedの表示に必要です。",
+          "discord_permission": "EMBED_LINKS"
         },
         {
           "id": "attach-files",
           "label": "ファイルを添付",
           "required": true,
-          "description": "長い納品データを購入者DMへファイル送信する場合に必要です。"
+          "description": "長い納品データを購入者DMへファイル送信する場合に必要です。",
+          "discord_permission": "ATTACH_FILES"
         },
         {
           "id": "read-history",
           "label": "メッセージ履歴を読む",
           "required": true,
-          "description": "設置済みパネルの更新・管理に使用します。"
+          "description": "設置済みパネルの更新・管理に使用します。",
+          "discord_permission": "READ_MESSAGE_HISTORY"
         },
         {
           "id": "manage-roles",
           "label": "ロールの管理",
           "required": true,
-          "description": "自販機で購入後ロールを付与する場合に必要です。Discord-Shiireロールを付与対象ロールより上に配置してください。"
+          "description": "自販機で購入後ロールを付与する場合に必要です。Discord-Shiireロールを付与対象ロールより上に配置してください。",
+          "discord_permission": "MANAGE_ROLES"
         }
       ],
       "checks": [
