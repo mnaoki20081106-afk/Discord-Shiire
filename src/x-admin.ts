@@ -478,7 +478,7 @@ async function load(){
     const s=data.settings||{};
     main.innerHTML=metrics(data)+
       '<section class="card"><strong>PayPay残高（手動観測）</strong>'+
-      '<p class="hint">PayPay操作はBinance Japanの公式Web/アプリ側で手動実行します。BOTはPayPay残高を直接取得せず、ここで観測した残高からreserve_jpy等の上限を計算します。古い観測値では自動購入枠は0円です。</p>'+
+      '<p class="hint">PayPay操作はBinance Japanの公式Web/アプリ側で手動実行します。BOTはPayPay残高を直接取得せず、ここで観測した残高からreserve_jpy等の上限を計算します。古い観測値では新しいPayPay資金の投入を止めます。既にBinanceへあるJPYは別枠で利用できます。</p>'+
       '<div class="formrow"><input id="paypayBalance" inputmode="numeric" type="number" min="0" step="1" value="'+esc(s.observed_paypay_balance_jpy??0)+'"><button id="savePayPay">観測値を保存</button></div>'+
       '</section>'+
       '<section class="card"><strong>USD/JPY（手動観測）</strong>'+
