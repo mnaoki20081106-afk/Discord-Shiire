@@ -1452,6 +1452,35 @@ export async function handleShiireMainBridge(
     });
   }
 
+  const breakerReset=suffix.match(/^\/circuit-breakers\/([^/]+)\/reset$/);
+  if(breakerReset&&request.method==="POST"){
+    const key=decodeURIComponent(breakerReset[1]!);
+    if(!/^[a-z0-9_-]{1,64}$/i.test(key)){
+      throw new ShiireVendingError(400,"INVALID_BREAKER_KEY");
+    }
+    await setCircuitBreaker(env,key,"CLOSED","MAIN_DASHBOARD_RESET");
+    await auditX(env,{
+      kind:"CIRCUIT_BREAKER_RESET",
+      message:"Circuit Breaker was reset from the authenticated main dashboard.",
+      details:{key}
+    });
+    return responseJson({ok:true,key,state:"CLOSED"});
+  }
+
+  if(suffix==="/bulk-approval"&&request.method==="POST"){
+    const input=await parseBridgeJson(rawBody);
+    const minutes=Math.max(1,Math.min(60,Math.floor(Number(input.minutes??10))));
+    const settings=await saveXSettings(env,{
+      bulk_approval_until:Date.now()+minutes*60_000
+    });
+    await auditX(env,{
+      kind:"BULK_PURCHASE_APPROVED",
+      message:"Bulk procurement was temporarily approved from the authenticated main dashboard.",
+      details:{minutes,approvedUntil:settings.bulk_approval_until}
+    });
+    return responseJson({ok:true,approvedUntil:settings.bulk_approval_until});
+  }
+
   if(suffix==="/procurement-settings"){
     if(request.method==="GET"){
       const settings=await loadXSettings(env);
