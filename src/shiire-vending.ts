@@ -992,17 +992,25 @@ export async function handleShiireMainBridge(
       }
       const name=String(input.name??"").trim();
       const supplierProductId=String(input.supplierProductId??"").trim();
+      const procurementClass=
+        input.procurementClass==="TOP_SEARCH"||
+        input.procurementClass==="NO_SHADOWBAN"
+          ?input.procurementClass
+          :null;
       const pricePayPay=Number(input.pricePayPay??0);
       const priceKyash=Number(input.priceKyash??0);
       if(
-        !name||name.length>80||!supplierProductId||
+        !name||name.length>80||
+        (!supplierProductId&&!procurementClass)||
+        (supplierProductId&&procurementClass)||
         !Number.isSafeInteger(pricePayPay)||pricePayPay<0||
         !Number.isSafeInteger(priceKyash)||priceKyash<0
       ){
         throw new ShiireVendingError(400,"INVALID_PRODUCT");
       }
       const product=await createShiireProduct(env,machine.id,{
-        supplierProductId,
+        supplierProductId:supplierProductId||undefined,
+        procurementClass,
         name,
         description:String(input.description??"").slice(0,500),
         pricePayPay,
@@ -1021,8 +1029,24 @@ export async function handleShiireMainBridge(
     if(request.method==="PATCH"){
       const input=await parseBridgeJson(rawBody);
       const patch:any={};
+      if(input.procurementClass!==undefined){
+        if(
+          input.procurementClass!==null&&
+          input.procurementClass!=="TOP_SEARCH"&&
+          input.procurementClass!=="NO_SHADOWBAN"
+        ){
+          throw new ShiireVendingError(400,"INVALID_PROCUREMENT_CLASS");
+        }
+        patch.procurementClass=input.procurementClass;
+      }
       if(input.supplierProductId!==undefined){
         patch.supplierProductId=String(input.supplierProductId).trim();
+      }
+      if(
+        input.procurementClass!==undefined&&
+        input.supplierProductId!==undefined
+      ){
+        throw new ShiireVendingError(400,"VENDING_SOURCE_CONFLICT");
       }
       if(input.name!==undefined){
         const name=String(input.name).trim();
