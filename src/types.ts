@@ -1,6 +1,6 @@
 export interface Env {
   DB: D1Database;
-  MAIN_BOT_BASE_URL: string;
+  MAIN_BOT_BASE_URL?: string;
   XACCOUNT_BOT_BASE_URL?: string;
   ADMIN_TOKEN: string;
   SHIIRE_BRIDGE_SECRET: string;

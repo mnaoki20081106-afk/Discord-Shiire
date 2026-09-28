@@ -42,7 +42,14 @@ export type XSettings={
   observed_paypay_balance_at:number;
   max_paypay_balance_age_ms:number;
   pending_paypay_funding_jpy:number;
+  pending_paypay_jpy_deposit_required_jpy:number;
+  pending_paypay_jpy_credit_required_jpy:number;
+  pending_paypay_direct_ltc_budget_jpy:number;
+  pending_paypay_path_amounts_captured:boolean;
   pending_paypay_binance_jpy_baseline:number;
+  pending_paypay_binance_ltc_baseline:number;
+  pending_paypay_required_ltc:number;
+  pending_paypay_ltc_baseline_captured:boolean;
   pending_paypay_requested_at:number;
   usd_jpy_rate:number;
   usd_jpy_rate_updated_at:number;
@@ -98,7 +105,14 @@ export const DEFAULT_X_SETTINGS:XSettings={
   observed_paypay_balance_at:0,
   max_paypay_balance_age_ms:24*60*60*1000,
   pending_paypay_funding_jpy:0,
+  pending_paypay_jpy_deposit_required_jpy:0,
+  pending_paypay_jpy_credit_required_jpy:0,
+  pending_paypay_direct_ltc_budget_jpy:0,
+  pending_paypay_path_amounts_captured:false,
   pending_paypay_binance_jpy_baseline:0,
+  pending_paypay_binance_ltc_baseline:0,
+  pending_paypay_required_ltc:0,
+  pending_paypay_ltc_baseline_captured:false,
   pending_paypay_requested_at:0,
   usd_jpy_rate:0,
   usd_jpy_rate_updated_at:0,
@@ -115,7 +129,8 @@ export const DEFAULT_X_SETTINGS:XSettings={
 
 const BOOLEAN_KEYS=new Set<keyof XSettings>([
   "dry_run","emergency_stop","auto_purchase_enabled","auto_procurement_enabled",
-  "require_bulk_confirmation"
+  "require_bulk_confirmation","pending_paypay_ltc_baseline_captured",
+  "pending_paypay_path_amounts_captured"
 ]);
 
 const INTEGER_KEYS=new Set<keyof XSettings>([
@@ -126,6 +141,8 @@ const INTEGER_KEYS=new Set<keyof XSettings>([
   "min_sales_count","minimum_stock","trial_purchase_count",
   "observed_paypay_balance_jpy","observed_paypay_balance_at",
   "max_paypay_balance_age_ms","pending_paypay_funding_jpy",
+  "pending_paypay_jpy_deposit_required_jpy","pending_paypay_jpy_credit_required_jpy",
+  "pending_paypay_direct_ltc_budget_jpy",
   "pending_paypay_binance_jpy_baseline","pending_paypay_requested_at",
   "usd_jpy_rate_updated_at","max_fx_age_ms",
   "bulk_confirmation_threshold","bulk_approval_until"
@@ -133,6 +150,7 @@ const INTEGER_KEYS=new Set<keyof XSettings>([
 
 const NUMBER_KEYS=new Set<keyof XSettings>([
   "target_ltc_balance","max_ltc_balance","wallet_target_ltc","wallet_max_ltc",
+  "pending_paypay_binance_ltc_baseline","pending_paypay_required_ltc",
   "max_unit_price_jpy","max_no_shadowban_unit_price_usd","min_seller_rating","max_dispute_rate","usd_jpy_rate",
   "max_fx_jump_percent","max_price_jump_percent","max_ltc_price_jump_percent"
 ]);

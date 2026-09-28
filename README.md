@@ -197,7 +197,7 @@ D1 binding:
 DB
 ```
 
-Main Bot URLは `wrangler.jsonc` の `MAIN_BOT_BASE_URL` で設定します。
+`MAIN_BOT_BASE_URL` はXアカウント以外の従来型商品をMain Bot有限在庫へ自動納品する場合だけ設定します。Factory利用時はフォームの「旧Main Bot Worker URL（汎用仕入れ用）」へ実際のWorker HTTPS originを入力してください。使用しない場合は未設定で構いません。
 
 
 ## X account procurement
@@ -249,15 +249,16 @@ auto_purchase_enabled = false
 auto_procurement_enabled = false
 dedicated_ltc_wallet = disabled (no signer connected)
 emergency_stop = false
-seller_quality_mode = strict_api
+seller_quality_mode = trial_only
 ```
 
 Turning Dry Run off through the admin API requires an explicit live-mode confirmation.
 Emergency Stop disables both automatic purchase and automatic procurement.
 
-Funding limits are calculated fail-closed. The actual JPY purchase ceiling is the minimum of:
+Funding limits are calculated fail-closed, but existing Binance JPY and new PayPay outflow are treated separately.
 
-- observed PayPay balance minus `reserve_jpy`
+The LTC purchase ceiling is the minimum of:
+
 - `max_purchase_jpy`
 - remaining daily limit
 - remaining weekly limit
@@ -265,7 +266,21 @@ Funding limits are calculated fail-closed. The actual JPY purchase ceiling is th
 - remaining LTC target balance capacity
 - remaining LTC maximum balance capacity
 
-A stale PayPay observation makes the allowable automated purchase amount zero.
+If the existing Binance JPY balance is sufficient, the bot can use that balance without consuming the configured PayPay reserve.
+
+Only when additional PayPay funding is required does the bot calculate spendable PayPay as:
+
+- observed PayPay balance
+- minus `reserve_jpy`
+
+A stale PayPay observation blocks only a new PayPay funding step; it does not block use of already-funded Binance JPY.
+
+For the current Binance Japan PayPay flow, the code distinguishes the two manual paths:
+
+- PayPay -> Binance JPY instant deposit: minimum gross deposit 1,000 JPY, 110 JPY fee deducted from the specified amount
+- PayPay -> direct crypto purchase: minimum purchase 1,000 JPY; the direct purchase path does not add the JPY-deposit fee
+
+The pending state persists both the gross PayPay deposit amount and the expected net Binance JPY increase so the 110 JPY fee cannot cause a false wait or false completion.
 
 ### PayPay boundary
 
@@ -281,8 +296,6 @@ PayPay funding is a manual boundary:
 4. Discord-Shiire checks official Binance account balances.
 5. A sufficient JPY increase causes the bot to continue with the LTC/JPY Spot purchase path.
 6. A sufficient LTC increase means the manual direct-LTC purchase already satisfied the requirement, so the bot does not submit a duplicate LTC order.
-
-The pending request is persisted so the one-minute Cron does not repeatedly create the same funding request.
 
 The pending request is persisted so the one-minute Cron does not repeatedly create the same funding request.
 
@@ -349,16 +362,18 @@ BINANCE_API_KEY
 BINANCE_API_SECRET
 HSTORA_API_KEY
 HSTORA_API_SECRET
-HSTORA_WEBHOOK_SECRET
 CREDENTIALS_ENCRYPTION_KEY
 ```
 
 Optional / feature-specific:
 
 ```text
+HSTORA_WEBHOOK_SECRET
 BINANCE_TRAVEL_RULE_QUESTIONNAIRE
 DISCORD_NOTIFY_WEBHOOK_URL
 ```
+
+`HSTORA_WEBHOOK_SECRET` はWebhook即時反映を使う場合に設定します。未設定でも1分Cronの注文照合は動作します。
 
 For live withdrawal support, use a **separate** Binance API key rather than expanding the trading key:
 
@@ -562,3 +577,55 @@ When both classes are below their reorder points, TOP_SEARCH is replenished firs
 Within each class, qualified HStora listings are sorted cheapest-first. TOP_SEARCH is sorted by effective JPY unit price and NO_SHADOWBAN is sorted by effective USD unit price. The price tier is recalculated using the quantity that will actually be ordered, including first-product trial limits.
 
 Existing purchased accounts are backfilled into the new procurement classes when their HStora product is re-evaluated. The engine recounts class inventory after this backfill before placing a new order, preventing a migration-time extra batch.
+
+
+## Production deployment checklist
+
+現在、このリポジトリの GitHub Actions は CI（typecheck / test）のみで、Cloudflare Worker の本番デプロイは自動ではありません。
+
+初回に必要な外部設定:
+
+1. 推奨: `Discord-Bot-Factory` でこのリポジトリを選び、`bot-factory.json` のフォームから起動する。Factoryを使わない場合だけ `npm run deploy` または Cloudflare Workers Builds でデプロイする。デプロイ後、実際の Worker HTTPS origin を確認する。
+2. Xaccount-Bot Worker に `SHIIRE_API_BASE_URL=<Discord-Shiireの実URL>` を設定する。
+3. Discord-Shiire Worker に `XACCOUNT_BOT_BASE_URL=<Xaccount-Botの実URL>` を設定する。
+4. 両Workerに同一の32文字以上の `SHIIRE_BRIDGE_SECRET` を Secret として設定する。
+5. Factoryフォームから Discord-Shiire Worker に `DISCORD_APPLICATION_ID`, `DISCORD_PUBLIC_KEY`, `DISCORD_BOT_TOKEN`, `BINANCE_API_KEY`, `BINANCE_API_SECRET`, `HSTORA_API_KEY`, `HSTORA_API_SECRET` を設定する。`ADMIN_TOKEN` と `CREDENTIALS_ENCRYPTION_KEY` はFactoryが自動生成する。従来型の汎用仕入れも使う場合だけ `MAIN_BOT_BASE_URL` を追加する。
+6. Discord Developer Portal の Interactions Endpoint URL を `https://<Discord-Shiire Worker>/interactions` に設定する。
+7. HStora Webhook を使う場合だけ、Webhook URLを `https://<Discord-Shiire Worker>/webhooks/hstora` に設定し、同じ署名Secretを `HSTORA_WEBHOOK_SECRET` として保存する。
+8. Xaccount-Bot の GitHub Repository Variable `VITE_API_BASE_URL` を実際の Xaccount-Bot Worker origin に設定する。
+
+なお、現在のXアカウント仕入れフローでは HStora Main Wallet へのLTC入金は手動境界です。Binance出金APIの安全チェック実装はありますが、HStoraの入金先を公式APIから取得できないため、自動仕入れエンジンから出金関数を呼びません。専用LTC Walletも未接続です。
+
+
+### Discord-Bot-Factory
+
+`bot-factory.json` を追加済みです。Factoryフォームでは、Discord-ShiireのDiscord資格情報、Xaccount-Bot Worker URL、共通Bridge Secret、Binance取引API、HStora APIを入力します。
+
+`ADMIN_TOKEN` と `CREDENTIALS_ENCRYPTION_KEY` はFactoryが安全なランダム値を生成し、同じリポジトリ + Cloudflareアカウントへの再デプロイ時にも再利用します。
+
+Binance出金用APIキー・固定送信元IP確認・Travel Rule JSONは現在の仕入れフローでは任意です。HStoraへのLTC入金が手動境界のため、出金自動化を接続するまでは設定しないでください。
+
+
+## Main dashboard operations
+
+通常運用では Discord-Shiire の `/x-admin` に ADMIN_TOKEN を入力する必要はありません。Xaccount-Bot の「仕入れbot > 資金・LTC / ログ・障害」から、署名付きBridge経由で次を操作できます。
+
+- reserve_jpy / 1回・日・週・月のLTC購入上限 / 最低購入額
+- Binance LTC目標残高 / 最大残高
+- PayPay残高の手動観測
+- USD/JPYの手動観測
+- Dry Run / LTC自動購入 / 自動仕入れ
+- Emergency Stop / 解除
+- PayPay手動操作待ちの取消
+- Circuit Breaker解除
+- 大量購入の10分間一時承認
+
+`/x-admin` は低レベル診断用として残します。Settings JSONからは、pending PayPayスナップショット、観測時刻、FX観測値、大量購入承認期限などのruntime-owned状態を直接編集できないよう制限しています。
+
+
+### PayPay手動操作の再開判定
+
+- PayPay -> Binance JPY即時入金は、保留開始時のBinance JPY残高と、公式手数料を考慮した期待純増額を比較し、十分なJPY増加を確認できた場合だけ自動再開します。
+- PayPayでLTCを直接購入した場合は、BinanceのLTC総残高（free + locked）の増加をBOTが検知しても自動確定しません。通常ユーザー向け公開APIで「そのLTC増加がPayPay販売所購入由来」と確定照合できる仕様を確認できないため、Main BOT管理画面の「このLTC購入を確認して再開」を管理者が押した時だけ確定します。
+- 確認ボタンを押した時点でもBinance LTC総残高を再取得し、保留開始時より増えていなければ確定を拒否します。
+- 保留開始後にPayPay残高の観測値を手動更新した場合、その新しい観測値を優先し、購入額を二重に差し引きません。

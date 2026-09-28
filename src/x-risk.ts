@@ -68,6 +68,117 @@ export function calculateFundingAllowance(input:FundingLimits):FundingAllowance{
   return {allowedJpy:allowed,components,blockedReason:null};
 }
 
+export function calculateLtcPurchaseAllowance(
+  input:Omit<FundingLimits,"reserveJpy"|"paypayBalanceJpy">
+):FundingAllowance{
+  const maxPurchase=finiteNonNegative(input.maxPurchaseJpy);
+  const daily=finiteNonNegative(input.dailyRemainingJpy);
+  const weekly=finiteNonNegative(input.weeklyRemainingJpy);
+  const monthly=finiteNonNegative(input.monthlyRemainingJpy);
+  const ltcPrice=finiteNonNegative(input.ltcJpy);
+  const targetGapLtc=finiteNonNegative(input.targetLtcBalance-input.currentLtc);
+  const maxGapLtc=finiteNonNegative(input.maxLtcBalance-input.currentLtc);
+  const targetGapJpy=ltcPrice>0?Math.floor(targetGapLtc*ltcPrice):0;
+  const maxGapJpy=ltcPrice>0?Math.floor(maxGapLtc*ltcPrice):0;
+  const components={
+    max_purchase_jpy:Math.floor(maxPurchase),
+    daily_remaining_jpy:Math.floor(daily),
+    weekly_remaining_jpy:Math.floor(weekly),
+    monthly_remaining_jpy:Math.floor(monthly),
+    target_ltc_gap_jpy:targetGapJpy,
+    max_ltc_gap_jpy:maxGapJpy
+  };
+
+  if(ltcPrice<=0) return {allowedJpy:0,components,blockedReason:"LTC_PRICE_UNAVAILABLE"};
+  if(input.maxLtcBalance<=0) return {allowedJpy:0,components,blockedReason:"MAX_LTC_BALANCE_NOT_CONFIGURED"};
+  if(input.currentLtc>=input.maxLtcBalance){
+    return {allowedJpy:0,components,blockedReason:"MAX_LTC_BALANCE_REACHED"};
+  }
+  if(input.targetLtcBalance<=input.currentLtc){
+    return {allowedJpy:0,components,blockedReason:"TARGET_LTC_BALANCE_REACHED"};
+  }
+
+  const allowed=Math.floor(Math.min(
+    maxPurchase,daily,weekly,monthly,targetGapJpy,maxGapJpy
+  ));
+  if(allowed<=0) return {allowedJpy:0,components,blockedReason:"NO_PURCHASE_ALLOWANCE"};
+  if(allowed<finiteNonNegative(input.minPurchaseJpy)){
+    return {allowedJpy:0,components,blockedReason:"BELOW_MIN_PURCHASE"};
+  }
+  return {allowedJpy:allowed,components,blockedReason:null};
+}
+
+export function calculateSpendablePayPayJpy(input:{
+  observedBalanceJpy:number;
+  reserveJpy:number;
+  pendingReservationJpy?:number;
+}):number{
+  return Math.floor(Math.max(
+    0,
+    finiteNonNegative(input.observedBalanceJpy)-
+    finiteNonNegative(input.reserveJpy)-
+    finiteNonNegative(input.pendingReservationJpy??0)
+  ));
+}
+
+export function planManualPayPayPaths(input:{
+  desiredPurchaseJpy:number;
+  currentBinanceJpy:number;
+  spendablePayPayJpy:number;
+  directPurchaseMinJpy:number;
+  jpyDepositMinGrossJpy:number;
+  jpyDepositFeeJpy:number;
+}){
+  const desired=Math.floor(finiteNonNegative(input.desiredPurchaseJpy));
+  const binanceJpy=finiteNonNegative(input.currentBinanceJpy);
+  const spendable=Math.floor(finiteNonNegative(input.spendablePayPayJpy));
+  const directMin=Math.ceil(finiteNonNegative(input.directPurchaseMinJpy));
+  const depositMin=Math.ceil(finiteNonNegative(input.jpyDepositMinGrossJpy));
+  const depositFee=Math.ceil(finiteNonNegative(input.jpyDepositFeeJpy));
+
+  const expectedNetJpyCredit=Math.ceil(Math.max(0,desired-binanceJpy));
+  const grossJpyDepositRequired=expectedNetJpyCredit>0
+    ?Math.max(depositMin,expectedNetJpyCredit+depositFee)
+    :0;
+  const jpyDepositAvailable=
+    grossJpyDepositRequired>0&&
+    grossJpyDepositRequired<=spendable;
+  const directLtcAvailable=
+    desired>=directMin&&
+    desired<=spendable;
+  const paypayReservationJpy=Math.max(
+    jpyDepositAvailable?grossJpyDepositRequired:0,
+    directLtcAvailable?desired:0
+  );
+
+  return {
+    desiredPurchaseJpy:desired,
+    expectedNetJpyCredit,
+    grossJpyDepositRequired,
+    jpyDepositAvailable,
+    directLtcAvailable,
+    paypayReservationJpy
+  };
+}
+
+export function nextObservedPayPayBalance(input:{
+  observedBalanceJpy:number;
+  observedAt:number;
+  pendingRequestedAt:number;
+  confirmedSpendJpy:number;
+}):number{
+  const observed=Math.floor(finiteNonNegative(input.observedBalanceJpy));
+  // A newer manual observation already reflects the post-operation balance.
+  // Do not subtract the same spend a second time.
+  if(
+    finiteNonNegative(input.observedAt)>
+    finiteNonNegative(input.pendingRequestedAt)
+  ){
+    return observed;
+  }
+  return Math.max(0,observed-Math.floor(finiteNonNegative(input.confirmedSpendJpy)));
+}
+
 export function splitPurchaseBatches(quantity:number,maxBatch:number):number[]{
   const total=Math.max(0,Math.floor(quantity));
   const cap=Math.max(1,Math.floor(maxBatch));
@@ -82,26 +193,48 @@ export function splitPurchaseBatches(quantity:number,maxBatch:number):number[]{
 }
 
 
-export type ManualPayPayCompletion="NONE"|"JPY_FUNDED"|"LTC_PURCHASED";
+export type ManualPayPayCompletion="NONE"|"JPY_FUNDED"|"LTC_INCREASE_DETECTED";
 
 export function detectManualPayPayCompletion(input:{
-  pendingJpy:number;
+  pendingReservationJpy:number;
+  jpyCreditRequiredJpy:number;
   binanceJpyBaseline:number;
+  binanceLtcBaseline:number;
+  ltcBaselineCaptured:boolean;
+  directLtcBudgetJpy:number;
   currentBinanceJpy:number;
   currentBinanceLtc:number;
-  requiredLtc:number;
 }):ManualPayPayCompletion{
-  const pending=Math.max(0,input.pendingJpy);
-  if(pending<=0) return "NONE";
+  const reserved=Math.max(0,input.pendingReservationJpy);
+  if(reserved<=0) return "NONE";
 
-  const requiredLtc=Math.max(0,input.requiredLtc);
-  if(requiredLtc>0&&input.currentBinanceLtc>=requiredLtc){
-    return "LTC_PURCHASED";
+  const directLtcBudgetJpy=Math.max(0,input.directLtcBudgetJpy);
+  const ltcBaseline=Math.max(0,input.binanceLtcBaseline);
+  const currentLtc=Math.max(0,input.currentBinanceLtc);
+  const ltcIncreased=currentLtc>ltcBaseline+1e-12;
+
+  // The direct-LTC path is considered complete only when that path was
+  // explicitly offered for this pending request and the LTC balance actually
+  // increased from the persisted baseline. It does not require the full
+  // HStora funding target to be reached in one purchase: configured purchase
+  // limits may intentionally split the funding into multiple iterations.
+  //
+  // Legacy requests without a captured baseline or without an explicit
+  // direct-LTC budget fail closed.
+  if(
+    input.ltcBaselineCaptured&&
+    directLtcBudgetJpy>0&&
+    ltcIncreased
+  ){
+    return "LTC_INCREASE_DETECTED";
   }
 
-  const expectedJpy=Math.max(0,input.binanceJpyBaseline)+pending;
-  if(input.currentBinanceJpy>=expectedJpy){
-    return "JPY_FUNDED";
+  const jpyNeeded=Math.max(0,input.jpyCreditRequiredJpy);
+  if(jpyNeeded>0){
+    const expectedJpy=Math.max(0,input.binanceJpyBaseline)+jpyNeeded;
+    if(input.currentBinanceJpy>=expectedJpy){
+      return "JPY_FUNDED";
+    }
   }
 
   return "NONE";

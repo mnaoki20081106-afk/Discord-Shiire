@@ -21,12 +21,19 @@ import {
   upsertSupplierProduct
 } from "./x-db";
 import { loadXSettings, saveXSettings } from "./x-settings";
-import { calculateFundingAllowance, detectManualPayPayCompletion } from "./x-risk";
+import {
+  calculateLtcPurchaseAllowance,
+  calculateSpendablePayPayJpy,
+  nextObservedPayPayBalance,
+  planManualPayPayPaths,
+  detectManualPayPayCompletion
+} from "./x-risk";
 import {
   getBinanceBalance,
   getBinanceOrder,
   getLtcJpyMarketStatus,
-  placeLtcJpyMarketBuy
+  placeLtcJpyMarketBuy,
+  BinanceApiError
 } from "./providers/binance";
 import {
   getHstoraBalance,
@@ -45,6 +52,10 @@ import {
 } from "./x-qualification";
 import { notifyDiscord } from "./x-alerts";
 import { notifyShiireVendingStockArrival } from "./shiire-vending";
+
+const PAYPAY_DIRECT_PURCHASE_MIN_JPY=1_000;
+const PAYPAY_JPY_DEPOSIT_MIN_GROSS_JPY=1_000;
+const PAYPAY_JPY_DEPOSIT_FEE_JPY=110;
 
 export type XRunResult={
   action:string;
@@ -503,13 +514,18 @@ async function handleHstoraFundingNeed(
 
   let ltcJpy:number;
   let ltcFree:number;
+  let ltcLocked:number;
   let jpyFree:number;
   try{
-    [ltcJpy,ltcFree,jpyFree]=await Promise.all([
-      getLtcJpyMarketStatus().then(v=>v.priceJpy),
-      getBinanceBalance(env,"LTC").then(v=>v.free),
-      getBinanceBalance(env,"JPY").then(v=>v.free)
+    const [market,ltcBalance,jpyBalance]=await Promise.all([
+      getLtcJpyMarketStatus(),
+      getBinanceBalance(env,"LTC"),
+      getBinanceBalance(env,"JPY")
     ]);
+    ltcJpy=market.priceJpy;
+    ltcFree=ltcBalance.free;
+    ltcLocked=ltcBalance.locked;
+    jpyFree=jpyBalance.free;
   }catch(error){
     await setCircuitBreaker(env,"binance","OPEN",error instanceof Error?error.message:String(error));
     await notifyDiscord(env,{
@@ -528,65 +544,124 @@ async function handleHstoraFundingNeed(
   const requiredLtc=requiredJpy/ltcJpy;
 
   if(settings.pending_paypay_funding_jpy>0){
+    const pathAmountsCaptured=settings.pending_paypay_path_amounts_captured;
+    const jpyDepositGross=pathAmountsCaptured
+      ?settings.pending_paypay_jpy_deposit_required_jpy
+      :settings.pending_paypay_funding_jpy;
+    const jpyCreditRequired=pathAmountsCaptured
+      ?settings.pending_paypay_jpy_credit_required_jpy
+      :settings.pending_paypay_funding_jpy;
+    const directLtcBudget=pathAmountsCaptured
+      ?settings.pending_paypay_direct_ltc_budget_jpy
+      :0;
     const completion=detectManualPayPayCompletion({
-      pendingJpy:settings.pending_paypay_funding_jpy,
+      pendingReservationJpy:settings.pending_paypay_funding_jpy,
+      jpyCreditRequiredJpy:jpyCreditRequired,
       binanceJpyBaseline:settings.pending_paypay_binance_jpy_baseline,
+      binanceLtcBaseline:settings.pending_paypay_binance_ltc_baseline,
+      ltcBaselineCaptured:settings.pending_paypay_ltc_baseline_captured,
+      directLtcBudgetJpy:directLtcBudget,
       currentBinanceJpy:jpyFree,
-      currentBinanceLtc:ltcFree,
-      requiredLtc
+      currentBinanceLtc:ltcFree+ltcLocked
     });
-    const jpyFundingDetected=completion==="JPY_FUNDED";
-    const ltcPurchaseDetected=completion==="LTC_PURCHASED";
+    const ltcIncreaseDetected=completion==="LTC_INCREASE_DETECTED";
 
-    if(completion!=="NONE"){
-      const confirmedSpend=settings.pending_paypay_funding_jpy;
+    if(ltcIncreaseDetected){
+      const currentTotal=ltcFree+ltcLocked;
+      return {
+        action:"MANUAL_PAYPAY_LTC_CONFIRMATION_REQUIRED",
+        dryRun:settings.dry_run,
+        details:{
+          paypayReservationJpy:settings.pending_paypay_funding_jpy,
+          directLtcBudgetJpy:directLtcBudget,
+          binanceLtcBaseline:settings.pending_paypay_binance_ltc_baseline,
+          currentBinanceLtcTotal:currentTotal,
+          detectedLtcIncrease:Math.max(
+            0,
+            currentTotal-settings.pending_paypay_binance_ltc_baseline
+          ),
+          requestedAt:settings.pending_paypay_requested_at
+        }
+      };
+    }
+
+    if(completion==="JPY_FUNDED"){
+      const confirmedSpend=jpyDepositGross;
+      if(confirmedSpend<=0){
+        await setCircuitBreaker(
+          env,
+          "paypay_manual",
+          "OPEN",
+          "PENDING_PAYPAY_PATH_AMOUNT_MISSING"
+        );
+        return {
+          action:"PAYPAY_PENDING_STATE_INVALID",
+          dryRun:settings.dry_run
+        };
+      }
+      const ltcBaseline=settings.pending_paypay_binance_ltc_baseline;
+      const detectedLtcIncrease=0;
       settings=await saveXSettings(env,{
-        observed_paypay_balance_jpy:Math.max(
-          0,
-          settings.observed_paypay_balance_jpy-confirmedSpend
-        ),
+        observed_paypay_balance_jpy:nextObservedPayPayBalance({
+          observedBalanceJpy:settings.observed_paypay_balance_jpy,
+          observedAt:settings.observed_paypay_balance_at,
+          pendingRequestedAt:settings.pending_paypay_requested_at,
+          confirmedSpendJpy:confirmedSpend
+        }),
         pending_paypay_funding_jpy:0,
+        pending_paypay_jpy_deposit_required_jpy:0,
+        pending_paypay_jpy_credit_required_jpy:0,
+        pending_paypay_direct_ltc_budget_jpy:0,
+        pending_paypay_path_amounts_captured:false,
         pending_paypay_binance_jpy_baseline:0,
+        pending_paypay_binance_ltc_baseline:0,
+        pending_paypay_required_ltc:0,
+        pending_paypay_ltc_baseline_captured:false,
         pending_paypay_requested_at:0
       });
       await recordFundingEvent(env,{
         provider:"paypay_manual",
-        kind:ltcPurchaseDetected?"DIRECT_LTC_PURCHASE_DETECTED":"JPY_DEPOSIT_DETECTED",
+        kind:"JPY_DEPOSIT_DETECTED",
         amountJpy:confirmedSpend,
-        asset:ltcPurchaseDetected?"LTC":undefined,
-        assetAmount:ltcPurchaseDetected?ltcFree:undefined,
         status:"COMPLETED",
-        metadata:{binanceJpyFree:jpyFree,binanceLtcFree:ltcFree}
+        metadata:{
+          binanceJpyFree:jpyFree,
+          binanceLtcFree:ltcFree,
+          binanceLtcBaseline:ltcBaseline,
+          detectedLtcIncrease,
+          jpyDepositGrossJpy:jpyDepositGross,
+          expectedJpyCreditJpy:jpyCreditRequired
+        }
       });
       await auditX(env,{
         kind:"PAYPAY_FUNDING_CONFIRMED",
-        message:ltcPurchaseDetected
-          ?"Binance LTC balance now covers the required amount after the pending manual PayPay step."
-          :"Binance JPY balance increase satisfied the pending manual PayPay funding request.",
+        message:"Binance JPY balance increase satisfied the pending manual PayPay funding request.",
         details:{
-          completionMode:ltcPurchaseDetected?"direct_ltc_purchase":"jpy_deposit",
+          completionMode:"jpy_deposit",
           confirmedSpendJpy:confirmedSpend,
           binanceJpyFree:jpyFree,
-          binanceLtcFree:ltcFree
+          binanceLtcFree:ltcFree,
+          binanceLtcBaseline:ltcBaseline,
+          detectedLtcIncrease,
+          jpyDepositGrossJpy:jpyDepositGross,
+          expectedJpyCreditJpy:jpyCreditRequired
         }
       });
-      if(ltcPurchaseDetected){
-        return {
-          action:"MANUAL_PAYPAY_LTC_PURCHASE_DETECTED",
-          dryRun:settings.dry_run,
-          details:{requiredLtc,binanceLtcFree:ltcFree}
-        };
-      }
     }else{
       return {
         action:"WAITING_MANUAL_PAYPAY_ACTION",
         dryRun:settings.dry_run,
         details:{
-          requestedMaxSpendJpy:settings.pending_paypay_funding_jpy,
+          paypayReservationJpy:settings.pending_paypay_funding_jpy,
+          jpyDepositGrossJpy:jpyDepositGross,
+          expectedJpyCreditJpy:jpyCreditRequired,
+          directLtcBudgetJpy:directLtcBudget,
           binanceJpyBaseline:settings.pending_paypay_binance_jpy_baseline,
+          binanceLtcBaseline:settings.pending_paypay_binance_ltc_baseline,
+          requiredLtcAtRequest:settings.pending_paypay_required_ltc,
           currentBinanceJpy:jpyFree,
           currentBinanceLtc:ltcFree,
-          requiredLtc,
+          requiredLtcNow:requiredLtc,
           requestedAt:settings.pending_paypay_requested_at,
           acceptedManualPaths:[
             "PayPay -> Binance JPY instant funding",
@@ -620,76 +695,185 @@ async function handleHstoraFundingNeed(
     fundingWindowRemaining(env,settings.monthly_purchase_limit_jpy,monthStart)
   ]);
 
-  const observedFresh=
-    settings.observed_paypay_balance_at>0&&
-    Date.now()-settings.observed_paypay_balance_at<=settings.max_paypay_balance_age_ms;
-
-  if(!observedFresh){
-    await notifyDiscord(env,{
-      title:"PayPay残高確認が必要",
-      message:"reserve_jpyを保証するため、管理画面で現在のPayPay残高を更新してください。",
-      details:{ltcShortfall,buyNeededJpy}
-    }).catch(()=>undefined);
-    return {
-      action:"PAYPAY_BALANCE_OBSERVATION_REQUIRED",
-      dryRun:settings.dry_run,
-      details:{ltcShortfall,buyNeededJpy}
-    };
-  }
-
-  const allowance=calculateFundingAllowance({
-    reserveJpy:settings.reserve_jpy,
+  const purchaseAllowance=calculateLtcPurchaseAllowance({
     maxPurchaseJpy:settings.max_purchase_jpy,
     dailyRemainingJpy:daily,
     weeklyRemainingJpy:weekly,
     monthlyRemainingJpy:monthly,
     minPurchaseJpy:settings.min_purchase_jpy,
-    paypayBalanceJpy:settings.observed_paypay_balance_jpy,
-    currentLtc:ltcFree,
+    // Exposure caps count both available and order-locked LTC.
+    currentLtc:ltcFree+ltcLocked,
     targetLtcBalance:settings.target_ltc_balance,
     maxLtcBalance:settings.max_ltc_balance,
     ltcJpy
   });
-  const desired=Math.min(buyNeededJpy,allowance.allowedJpy);
+  const desired=Math.min(buyNeededJpy,purchaseAllowance.allowedJpy);
 
   if(desired<=0){
     return {
       action:"FUNDING_LIMIT_BLOCKED",
       dryRun:settings.dry_run,
-      details:{buyNeededJpy,allowance}
+      details:{buyNeededJpy,purchaseAllowance}
     };
   }
 
+  // Existing Binance JPY can be used without consulting PayPay balance.
+  // PayPay reserve_jpy only protects new PayPay outflow.
   if(jpyFree<desired){
-    const requiredDepositJpy=Math.ceil(desired-jpyFree);
+    const observedFresh=
+      settings.observed_paypay_balance_at>0&&
+      Date.now()-settings.observed_paypay_balance_at<=settings.max_paypay_balance_age_ms;
+
+    if(!observedFresh){
+      await notifyDiscord(env,{
+        title:"PayPay残高確認が必要",
+        message:"reserve_jpyを保証するため、管理画面で現在のPayPay残高を更新してください。",
+        details:{ltcShortfall,buyNeededJpy,desiredPurchaseJpy:desired}
+      }).catch(()=>undefined);
+      return {
+        action:"PAYPAY_BALANCE_OBSERVATION_REQUIRED",
+        dryRun:settings.dry_run,
+        details:{ltcShortfall,buyNeededJpy,desiredPurchaseJpy:desired}
+      };
+    }
+
+    const spendablePayPay=calculateSpendablePayPayJpy({
+      observedBalanceJpy:settings.observed_paypay_balance_jpy,
+      reserveJpy:settings.reserve_jpy
+    });
+    const pathPlan=planManualPayPayPaths({
+      desiredPurchaseJpy:desired,
+      currentBinanceJpy:jpyFree,
+      spendablePayPayJpy:spendablePayPay,
+      directPurchaseMinJpy:PAYPAY_DIRECT_PURCHASE_MIN_JPY,
+      jpyDepositMinGrossJpy:PAYPAY_JPY_DEPOSIT_MIN_GROSS_JPY,
+      jpyDepositFeeJpy:PAYPAY_JPY_DEPOSIT_FEE_JPY
+    });
+    const {
+      expectedNetJpyCredit:netJpyCreditNeeded,
+      grossJpyDepositRequired,
+      jpyDepositAvailable,
+      directLtcAvailable,
+      paypayReservationJpy
+    }=pathPlan;
+
+    if(!jpyDepositAvailable&&!directLtcAvailable){
+      return {
+        action:"PAYPAY_FUNDING_LIMIT_BLOCKED",
+        dryRun:settings.dry_run,
+        details:{
+          desiredPurchaseJpy:desired,
+          spendablePayPayJpy:spendablePayPay,
+          reserveJpy:settings.reserve_jpy,
+          jpyDeposit:{
+            grossRequiredJpy:grossJpyDepositRequired,
+            expectedNetCreditJpy:netJpyCreditNeeded,
+            feeJpy:PAYPAY_JPY_DEPOSIT_FEE_JPY,
+            minimumGrossJpy:PAYPAY_JPY_DEPOSIT_MIN_GROSS_JPY,
+            available:false
+          },
+          directLtc:{
+            purchaseJpy:desired,
+            minimumJpy:PAYPAY_DIRECT_PURCHASE_MIN_JPY,
+            available:false
+          },
+          purchaseAllowance
+        }
+      };
+    }
+
     settings=await saveXSettings(env,{
-      pending_paypay_funding_jpy:requiredDepositJpy,
+      pending_paypay_funding_jpy:paypayReservationJpy,
+      pending_paypay_jpy_deposit_required_jpy:
+        jpyDepositAvailable?grossJpyDepositRequired:0,
+      pending_paypay_jpy_credit_required_jpy:
+        jpyDepositAvailable?netJpyCreditNeeded:0,
+      pending_paypay_direct_ltc_budget_jpy:
+        directLtcAvailable?desired:0,
+      pending_paypay_path_amounts_captured:true,
       pending_paypay_binance_jpy_baseline:Math.floor(jpyFree),
+      pending_paypay_binance_ltc_baseline:ltcFree+ltcLocked,
+      pending_paypay_required_ltc:requiredLtc,
+      pending_paypay_ltc_baseline_captured:true,
       pending_paypay_requested_at:Date.now()
     });
+
     await recordFundingEvent(env,{
       provider:"paypay_manual",
-      kind:"JPY_DEPOSIT_REQUIRED",
-      amountJpy:requiredDepositJpy,
+      kind:"PAYPAY_MANUAL_ACTION_REQUIRED",
+      amountJpy:paypayReservationJpy,
       status:"REQUIRED",
-      metadata:{desired,jpyFree}
+      metadata:{
+        desiredPurchaseJpy:desired,
+        spendablePayPayJpy:spendablePayPay,
+        jpyDepositAvailable,
+        grossJpyDepositRequired,
+        expectedNetJpyCredit:netJpyCreditNeeded,
+        paypayJpyDepositFeeJpy:PAYPAY_JPY_DEPOSIT_FEE_JPY,
+        directLtcAvailable,
+        directLtcBudgetJpy:directLtcAvailable?desired:0,
+        binanceJpyFree:jpyFree
+      }
     });
+
+    const manualPaths:string[]=[];
+    if(jpyDepositAvailable){
+      manualPaths.push(
+        "PayPay -> Binance JPY instant funding: gross "+
+        grossJpyDepositRequired+
+        " JPY (official fee "+
+        PAYPAY_JPY_DEPOSIT_FEE_JPY+
+        " JPY, expected balance increase at least "+
+        netJpyCreditNeeded+
+        " JPY)"
+      );
+    }
+    if(directLtcAvailable){
+      manualPaths.push(
+        "PayPay -> direct LTC purchase in Binance official UI: "+
+        desired+
+        " JPY"
+      );
+    }
+
     await notifyDiscord(env,{
       title:"PayPay手動操作が必要",
-      message:"Binance Japanの公式UIで、PayPayからJPYへ即時入金するか、LTCがPayPay購入対象として表示される場合はLTCを直接購入してください。BOTはJPY増加または必要量までのLTC増加を検知して自動再開します。",
-      details:{requestedMaxSpendJpy:requiredDepositJpy,purchaseCeilingJpy:desired,requiredLtc}
+      message:"Binance Japanの公式UIで、表示された利用可能な経路のどちらかを実行してください。BOTは実際のJPY/LTC残高増加を検知して自動再開します。",
+      details:{
+        paypayReservationJpy,
+        desiredPurchaseJpy:desired,
+        jpyDeposit:jpyDepositAvailable?{
+          grossRequiredJpy:grossJpyDepositRequired,
+          expectedNetCreditJpy:netJpyCreditNeeded,
+          feeJpy:PAYPAY_JPY_DEPOSIT_FEE_JPY
+        }:null,
+        directLtc:directLtcAvailable?{
+          purchaseJpy:desired,
+          minimumJpy:PAYPAY_DIRECT_PURCHASE_MIN_JPY
+        }:null,
+        requiredLtc,
+        acceptedManualPaths:manualPaths
+      }
     }).catch(()=>undefined);
+
     return {
       action:"MANUAL_PAYPAY_ACTION_REQUIRED",
       dryRun:settings.dry_run,
       details:{
-        requestedMaxSpendJpy:requiredDepositJpy,
+        paypayReservationJpy,
+        desiredPurchaseJpy:desired,
+        jpyDeposit:jpyDepositAvailable?{
+          grossRequiredJpy:grossJpyDepositRequired,
+          expectedNetCreditJpy:netJpyCreditNeeded,
+          feeJpy:PAYPAY_JPY_DEPOSIT_FEE_JPY
+        }:null,
+        directLtc:directLtcAvailable?{
+          purchaseJpy:desired,
+          minimumJpy:PAYPAY_DIRECT_PURCHASE_MIN_JPY
+        }:null,
         requiredLtc,
-        allowance,
-        acceptedManualPaths:[
-          "PayPay -> Binance JPY instant funding",
-          "PayPay -> direct LTC purchase in Binance official UI when LTC is offered"
-        ]
+        purchaseAllowance,
+        acceptedManualPaths:manualPaths
       }
     };
   }
@@ -706,7 +890,7 @@ async function handleHstoraFundingNeed(
     return {
       action:"DRY_RUN_LTC_PURCHASE",
       dryRun:true,
-      details:{wouldBuyJpy:desired,ltcJpy,estimatedLtc:desired/ltcJpy,allowance}
+      details:{wouldBuyJpy:desired,ltcJpy,estimatedLtc:desired/ltcJpy,purchaseAllowance}
     };
   }
 
@@ -737,6 +921,45 @@ async function handleHstoraFundingNeed(
     }).catch(()=>undefined);
     return {action:"LTC_PURCHASE_SUBMITTED",dryRun:false,details:{orderId:order.orderId,status:order.status}};
   }catch(error){
+    if(
+      error instanceof BinanceApiError&&
+      error.status>=400&&
+      error.status<500&&
+      !error.retryable
+    ){
+      await updateFundingEventByProviderReference(env,"binance_japan",clientOrderId,{
+        status:"FAILED",
+        metadata:{
+          clientOrderId,
+          rejected:true,
+          code:error.code,
+          status:error.status
+        }
+      });
+      await setCircuitBreaker(
+        env,
+        "binance_purchase",
+        "OPEN",
+        error.code+":"+error.message.slice(0,160)
+      );
+      await auditX(env,{
+        level:"error",
+        kind:"BINANCE_ORDER_REJECTED",
+        message:"Binance explicitly rejected the LTCJPY order; no ambiguous retry will be attempted.",
+        details:{
+          clientOrderId,
+          status:error.status,
+          code:error.code,
+          message:error.message
+        }
+      });
+      return {
+        action:"LTC_PURCHASE_REJECTED",
+        dryRun:false,
+        details:{clientOrderId,status:error.status,code:error.code}
+      };
+    }
+
     try{
       const recovered=await getBinanceOrder(env,{origClientOrderId:clientOrderId});
       await updateFundingEventByProviderReference(env,"binance_japan",clientOrderId,{
@@ -778,6 +1001,8 @@ export async function runXProcurement(env:Env):Promise<XRunResult>{
     circuitState(env,"hstora"),
     circuitState(env,"binance"),
     circuitState(env,"binance_purchase"),
+    circuitState(env,"paypay_manual"),
+    circuitState(env,"fx_rate"),
     circuitState(env,"product_price"),
     circuitState(env,"ltc_price"),
     circuitState(env,"unexpected_balance"),

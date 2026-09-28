@@ -391,8 +391,26 @@ export default {
         return json({
           ok:true,
           service:"Discord-Shiire",
-          mainBotConfigured:Boolean(env.MAIN_BOT_BASE_URL),
-          bridgeConfigured:Boolean(env.SHIIRE_BRIDGE_SECRET?.trim()&&env.SHIIRE_BRIDGE_SECRET.trim().length>=32)
+          legacyMainBotConfigured:Boolean(env.MAIN_BOT_BASE_URL),
+          xaccountBotConfigured:Boolean(env.XACCOUNT_BOT_BASE_URL),
+          bridgeConfigured:Boolean(
+            env.SHIIRE_BRIDGE_SECRET?.trim()&&
+            env.SHIIRE_BRIDGE_SECRET.trim().length>=32
+          ),
+          discordConfigured:Boolean(
+            env.DISCORD_APPLICATION_ID&&
+            env.DISCORD_PUBLIC_KEY&&
+            env.DISCORD_BOT_TOKEN
+          ),
+          binanceTradeConfigured:Boolean(
+            env.BINANCE_API_KEY&&env.BINANCE_API_SECRET
+          ),
+          hstoraConfigured:Boolean(
+            env.HSTORA_API_KEY&&env.HSTORA_API_SECRET
+          ),
+          credentialsEncryptionConfigured:Boolean(
+            env.CREDENTIALS_ENCRYPTION_KEY
+          )
         });
       }
       if(url.pathname==="/webhooks/hstora"){

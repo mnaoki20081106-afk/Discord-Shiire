@@ -1,7 +1,11 @@
 import type { Env } from "./types";
 import { hmacHex, sha256Hex } from "./crypto";
 import { loadXSettings, saveXSettings } from "./x-settings";
-import { getFundingPlan, jstPeriodStarts } from "./x-funding";
+import {
+  confirmPendingDirectLtcFunding,
+  getFundingPlan,
+  jstPeriodStarts
+} from "./x-funding";
 import {
   getBinanceApiRestrictions,
   getBinanceBalance,
@@ -26,7 +30,9 @@ import {
   listOpenCircuitBreakers,
   listSupplierProducts,
   recentFundingEvents,
-  recentCryptoTransactions
+  recentCryptoTransactions,
+  auditX,
+  setCircuitBreaker
 } from "./x-db";
 import { receiveMainPayment, getMainPaymentStatus } from "./main-bot";
 import {
@@ -138,9 +144,6 @@ async function operationsOverview(env:Env){
   const [
     funding,
     hstora,
-    market,
-    ltc,
-    jpy,
     withdrawalSafety,
     hotWalletHealth,
     hotWalletBalance,
@@ -155,9 +158,6 @@ async function operationsOverview(env:Env){
   ]=await Promise.all([
     operationSettled(()=>getFundingPlan(env,now)),
     operationSettled(()=>getHstoraBalance(env)),
-    operationSettled(()=>getLtcJpyMarketStatus()),
-    operationSettled(()=>getBinanceBalance(env,"LTC")),
-    operationSettled(()=>getBinanceBalance(env,"JPY")),
     operationSettled(()=>getBinanceWithdrawalSafetyStatus(env)),
     hotWallet.health(),
     hotWallet.getBalance("LTC"),
@@ -171,10 +171,65 @@ async function operationsOverview(env:Env){
     listPurchaseOrders(env,12)
   ]);
 
+  // getFundingPlan already fetches LTC/JPY plus Binance LTC/JPY balances.
+  // Reuse that snapshot instead of making the dashboard call the same Binance
+  // endpoints a second time. If the funding snapshot fails, fetch these
+  // independently so the UI can show which provider call is actually broken.
+  let market:
+    |{ok:true;data:any}
+    |{ok:false;error:string};
+  let ltc:
+    |{ok:true;data:any}
+    |{ok:false;error:string};
+  let jpy:
+    |{ok:true;data:any}
+    |{ok:false;error:string};
+
+  if(funding.ok){
+    market={ok:true,data:funding.data.binance.market};
+    ltc={
+      ok:true,
+      data:{
+        free:funding.data.binance.ltcFree,
+        locked:funding.data.binance.ltcLocked
+      }
+    };
+    jpy={
+      ok:true,
+      data:{
+        free:funding.data.binance.jpyFree,
+        locked:0
+      }
+    };
+  }else{
+    [market,ltc,jpy]=await Promise.all([
+      operationSettled(()=>getLtcJpyMarketStatus()),
+      operationSettled(()=>getBinanceBalance(env,"LTC")),
+      operationSettled(()=>getBinanceBalance(env,"JPY"))
+    ]);
+  }
+
   const recentErrors=(logs as any[])
     .filter(row=>String(row.level)==="error")
     .slice(0,8);
   const latestActivity=(logs as any[])[0]??null;
+
+  const providerIssues:Array<{provider:string;error:string}>=[];
+  for(const [provider,result] of [
+    ["Funding",funding],
+    ["HStora",hstora],
+    ["LTC/JPY",market],
+    ["Binance LTC",ltc],
+    ["Binance JPY",jpy],
+    ["Binance Withdrawal",withdrawalSafety]
+  ] as const){
+    if(!result.ok){
+      providerIssues.push({
+        provider,
+        error:String(result.error).slice(0,300)
+      });
+    }
+  }
 
   return {
     generatedAt:now,
@@ -197,6 +252,7 @@ async function operationsOverview(env:Env){
       }
     },
     withdrawalSafety,
+    providerIssues,
     inventory,
     inventoryByClass,
     today:{
@@ -1066,6 +1122,23 @@ export async function handleShiireMainBridge(
     return responseJson(await operationsOverview(env));
   }
 
+  if(
+    suffix==="/operations/funding/confirm-direct-ltc"&&
+    request.method==="POST"
+  ){
+    try{
+      return responseJson(await confirmPendingDirectLtcFunding(env));
+    }catch(error){
+      const code=error instanceof Error?error.message:String(error);
+      const status=
+        code==="NO_PENDING_DIRECT_LTC_CONFIRMATION"||
+        code==="LTC_BALANCE_INCREASE_NOT_DETECTED"
+          ?409
+          :500;
+      return responseJson({error:code},status);
+    }
+  }
+
   if(suffix==="/operations/binance"&&request.method==="GET"){
     const [market,restrictions,ltc,jpy,coinInfo,withdrawalSafety]=await Promise.all([
       operationSettled(()=>getLtcJpyMarketStatus()),
@@ -1119,6 +1192,314 @@ export async function handleShiireMainBridge(
       recentCryptoTransactions(env,60)
     ]);
     return responseJson({logs,breakers,fundingEvents,cryptoTransactions});
+  }
+
+  if(suffix==="/funding-settings"){
+    if(request.method==="GET"){
+      const settings=await loadXSettings(env);
+      return responseJson({
+        reserve_jpy:settings.reserve_jpy,
+        max_purchase_jpy:settings.max_purchase_jpy,
+        daily_purchase_limit_jpy:settings.daily_purchase_limit_jpy,
+        weekly_purchase_limit_jpy:settings.weekly_purchase_limit_jpy,
+        monthly_purchase_limit_jpy:settings.monthly_purchase_limit_jpy,
+        min_purchase_jpy:settings.min_purchase_jpy,
+        target_ltc_balance:settings.target_ltc_balance,
+        max_ltc_balance:settings.max_ltc_balance,
+        observed_paypay_balance_jpy:settings.observed_paypay_balance_jpy,
+        observed_paypay_balance_at:settings.observed_paypay_balance_at,
+        usd_jpy_rate:settings.usd_jpy_rate,
+        usd_jpy_rate_updated_at:settings.usd_jpy_rate_updated_at
+      });
+    }
+    if(request.method==="PATCH"){
+      const input=await parseBridgeJson(rawBody);
+      const patch:Record<string,number>={};
+      const integerKeys=[
+        "reserve_jpy",
+        "max_purchase_jpy",
+        "daily_purchase_limit_jpy",
+        "weekly_purchase_limit_jpy",
+        "monthly_purchase_limit_jpy",
+        "min_purchase_jpy"
+      ] as const;
+      const numberKeys=[
+        "target_ltc_balance",
+        "max_ltc_balance"
+      ] as const;
+      for(const key of integerKeys){
+        if(input[key]===undefined) continue;
+        const value=Number(input[key]);
+        if(!Number.isSafeInteger(value)||value<0){
+          throw new ShiireVendingError(400,"INVALID_FUNDING_SETTING_"+key.toUpperCase());
+        }
+        patch[key]=value;
+      }
+      for(const key of numberKeys){
+        if(input[key]===undefined) continue;
+        const value=Number(input[key]);
+        if(!Number.isFinite(value)||value<0){
+          throw new ShiireVendingError(400,"INVALID_FUNDING_SETTING_"+key.toUpperCase());
+        }
+        patch[key]=value;
+      }
+      try{
+        const settings=await saveXSettings(env,patch);
+        await auditX(env,{
+          kind:"FUNDING_SETTINGS_UPDATED",
+          message:"Funding limits were updated from the authenticated main dashboard.",
+          details:{keys:Object.keys(patch)}
+        });
+        return responseJson({
+          ok:true,
+          settings:{
+            reserve_jpy:settings.reserve_jpy,
+            max_purchase_jpy:settings.max_purchase_jpy,
+            daily_purchase_limit_jpy:settings.daily_purchase_limit_jpy,
+            weekly_purchase_limit_jpy:settings.weekly_purchase_limit_jpy,
+            monthly_purchase_limit_jpy:settings.monthly_purchase_limit_jpy,
+            min_purchase_jpy:settings.min_purchase_jpy,
+            target_ltc_balance:settings.target_ltc_balance,
+            max_ltc_balance:settings.max_ltc_balance
+          }
+        });
+      }catch(error){
+        throw new ShiireVendingError(
+          400,
+          error instanceof Error?error.message:"FUNDING_SETTINGS_INVALID"
+        );
+      }
+    }
+  }
+
+  if(suffix==="/funding/paypay-observation"&&request.method==="POST"){
+    const input=await parseBridgeJson(rawBody);
+    const balanceJpy=Number(input.balanceJpy);
+    if(!Number.isSafeInteger(balanceJpy)||balanceJpy<0){
+      throw new ShiireVendingError(400,"INVALID_PAYPAY_BALANCE");
+    }
+    const settings=await saveXSettings(env,{
+      observed_paypay_balance_jpy:balanceJpy,
+      observed_paypay_balance_at:Date.now()
+    });
+    await auditX(env,{
+      kind:"paypay_balance_observed",
+      message:"PayPay balance observation updated from the authenticated main dashboard.",
+      details:{balanceJpy}
+    });
+    return responseJson({
+      ok:true,
+      balanceJpy:settings.observed_paypay_balance_jpy,
+      observedAt:settings.observed_paypay_balance_at
+    });
+  }
+
+  if(suffix==="/funding/usd-jpy-observation"&&request.method==="POST"){
+    const input=await parseBridgeJson(rawBody);
+    const rate=Number(input.rate);
+    if(!Number.isFinite(rate)||rate<=0){
+      throw new ShiireVendingError(400,"INVALID_USD_JPY_RATE");
+    }
+    const current=await loadXSettings(env);
+    const now=Date.now();
+    const previousFresh=
+      current.usd_jpy_rate>0&&
+      current.usd_jpy_rate_updated_at>0&&
+      now-current.usd_jpy_rate_updated_at<=current.max_fx_age_ms;
+    if(previousFresh){
+      const jump=Math.abs(rate-current.usd_jpy_rate)/current.usd_jpy_rate*100;
+      if(jump>current.max_fx_jump_percent){
+        await setCircuitBreaker(
+          env,
+          "fx_rate",
+          "OPEN",
+          "USDJPY_JUMP:"+jump.toFixed(2)+"%"
+        );
+        await auditX(env,{
+          level:"error",
+          kind:"FX_RATE_JUMP",
+          message:"USD/JPY observation changed beyond configured threshold.",
+          details:{previous:current.usd_jpy_rate,attempted:rate,jumpPercent:jump}
+        });
+        throw new ShiireVendingError(409,"FX_RATE_CIRCUIT_BREAKER");
+      }
+    }
+    const settings=await saveXSettings(env,{
+      usd_jpy_rate:rate,
+      usd_jpy_rate_updated_at:now
+    });
+    await auditX(env,{
+      kind:"usd_jpy_rate_observed",
+      message:"USD/JPY observation updated from the authenticated main dashboard.",
+      details:{rate}
+    });
+    return responseJson({
+      ok:true,
+      rate:settings.usd_jpy_rate,
+      observedAt:settings.usd_jpy_rate_updated_at
+    });
+  }
+
+  if(suffix==="/funding/pending/cancel"&&request.method==="POST"){
+    const current=await loadXSettings(env);
+    const settings=await saveXSettings(env,{
+      pending_paypay_funding_jpy:0,
+      pending_paypay_jpy_deposit_required_jpy:0,
+      pending_paypay_jpy_credit_required_jpy:0,
+      pending_paypay_direct_ltc_budget_jpy:0,
+      pending_paypay_path_amounts_captured:false,
+      pending_paypay_binance_jpy_baseline:0,
+      pending_paypay_binance_ltc_baseline:0,
+      pending_paypay_required_ltc:0,
+      pending_paypay_ltc_baseline_captured:false,
+      pending_paypay_requested_at:0
+    });
+    await auditX(env,{
+      kind:"PAYPAY_FUNDING_CANCELLED",
+      message:"Pending manual PayPay funding request was cancelled from the authenticated main dashboard.",
+      details:{cancelledAmountJpy:current.pending_paypay_funding_jpy}
+    });
+    return responseJson({
+      ok:true,
+      pending:false,
+      observedPayPayBalanceJpy:settings.observed_paypay_balance_jpy
+    });
+  }
+
+  if(suffix==="/automation-settings"){
+    if(request.method==="GET"){
+      const settings=await loadXSettings(env);
+      return responseJson({
+        dry_run:settings.dry_run,
+        emergency_stop:settings.emergency_stop,
+        auto_purchase_enabled:settings.auto_purchase_enabled,
+        auto_procurement_enabled:settings.auto_procurement_enabled
+      });
+    }
+    if(request.method==="PATCH"){
+      const input=await parseBridgeJson(rawBody);
+      const current=await loadXSettings(env);
+      const patch:Partial<{
+        dry_run:boolean;
+        auto_purchase_enabled:boolean;
+        auto_procurement_enabled:boolean;
+      }>={};
+      for(const key of [
+        "dry_run",
+        "auto_purchase_enabled",
+        "auto_procurement_enabled"
+      ] as const){
+        if(input[key]===undefined) continue;
+        if(typeof input[key]!=="boolean"){
+          throw new ShiireVendingError(400,"INVALID_AUTOMATION_SETTING_"+key.toUpperCase());
+        }
+        patch[key]=input[key] as boolean;
+      }
+      if(current.emergency_stop&&(
+        patch.auto_purchase_enabled===true||
+        patch.auto_procurement_enabled===true||
+        patch.dry_run===false
+      )){
+        throw new ShiireVendingError(409,"EMERGENCY_STOP_ACTIVE");
+      }
+      const nextDryRun=patch.dry_run??current.dry_run;
+      const enablingLiveAutomation=
+        nextDryRun===false&&(
+          (patch.auto_purchase_enabled===true&&!current.auto_purchase_enabled)||
+          (patch.auto_procurement_enabled===true&&!current.auto_procurement_enabled)
+        );
+      const leavingDryRun=current.dry_run===true&&patch.dry_run===false;
+      if((enablingLiveAutomation||leavingDryRun)&&input.confirmLive!==true){
+        throw new ShiireVendingError(409,"LIVE_MODE_CONFIRMATION_REQUIRED");
+      }
+      try{
+        const settings=await saveXSettings(env,patch);
+        await auditX(env,{
+          kind:"AUTOMATION_SETTINGS_UPDATED",
+          message:"Automation safety settings were updated from the authenticated main dashboard.",
+          details:{
+            dryRun:settings.dry_run,
+            autoPurchaseEnabled:settings.auto_purchase_enabled,
+            autoProcurementEnabled:settings.auto_procurement_enabled
+          }
+        });
+        return responseJson({
+          ok:true,
+          dry_run:settings.dry_run,
+          emergency_stop:settings.emergency_stop,
+          auto_purchase_enabled:settings.auto_purchase_enabled,
+          auto_procurement_enabled:settings.auto_procurement_enabled
+        });
+      }catch(error){
+        throw new ShiireVendingError(
+          400,
+          error instanceof Error?error.message:"AUTOMATION_SETTINGS_INVALID"
+        );
+      }
+    }
+  }
+
+  if(suffix==="/emergency-stop"&&request.method==="POST"){
+    const settings=await saveXSettings(env,{
+      emergency_stop:true,
+      auto_purchase_enabled:false,
+      auto_procurement_enabled:false
+    });
+    await auditX(env,{
+      level:"warn",
+      kind:"EMERGENCY_STOP_ENABLED",
+      message:"Emergency Stop was enabled from the authenticated main dashboard."
+    });
+    return responseJson({
+      ok:true,
+      emergency_stop:settings.emergency_stop,
+      auto_purchase_enabled:settings.auto_purchase_enabled,
+      auto_procurement_enabled:settings.auto_procurement_enabled
+    });
+  }
+
+  if(suffix==="/emergency-stop/reset"&&request.method==="POST"){
+    const settings=await saveXSettings(env,{emergency_stop:false});
+    await auditX(env,{
+      kind:"EMERGENCY_STOP_RESET",
+      message:"Emergency Stop was reset from the authenticated main dashboard. Automation remains unchanged."
+    });
+    return responseJson({
+      ok:true,
+      emergency_stop:settings.emergency_stop,
+      auto_purchase_enabled:settings.auto_purchase_enabled,
+      auto_procurement_enabled:settings.auto_procurement_enabled,
+      note:"Automation is not re-enabled automatically."
+    });
+  }
+
+  const breakerReset=suffix.match(/^\/circuit-breakers\/([^/]+)\/reset$/);
+  if(breakerReset&&request.method==="POST"){
+    const key=decodeURIComponent(breakerReset[1]!);
+    if(!/^[a-z0-9_-]{1,64}$/i.test(key)){
+      throw new ShiireVendingError(400,"INVALID_BREAKER_KEY");
+    }
+    await setCircuitBreaker(env,key,"CLOSED","MAIN_DASHBOARD_RESET");
+    await auditX(env,{
+      kind:"CIRCUIT_BREAKER_RESET",
+      message:"Circuit Breaker was reset from the authenticated main dashboard.",
+      details:{key}
+    });
+    return responseJson({ok:true,key,state:"CLOSED"});
+  }
+
+  if(suffix==="/bulk-approval"&&request.method==="POST"){
+    const input=await parseBridgeJson(rawBody);
+    const minutes=Math.max(1,Math.min(60,Math.floor(Number(input.minutes??10))));
+    const settings=await saveXSettings(env,{
+      bulk_approval_until:Date.now()+minutes*60_000
+    });
+    await auditX(env,{
+      kind:"BULK_PURCHASE_APPROVED",
+      message:"Bulk procurement was temporarily approved from the authenticated main dashboard.",
+      details:{minutes,approvedUntil:settings.bulk_approval_until}
+    });
+    return responseJson({ok:true,approvedUntil:settings.bulk_approval_until});
   }
 
   if(suffix==="/procurement-settings"){

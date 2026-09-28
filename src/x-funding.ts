@@ -1,7 +1,11 @@
 import type { Env } from "./types";
-import { calculateFundingAllowance } from "./x-risk";
-import { fundingSpendSince } from "./x-db";
-import { loadXSettings } from "./x-settings";
+import {
+  calculateLtcPurchaseAllowance,
+  calculateSpendablePayPayJpy,
+  nextObservedPayPayBalance
+} from "./x-risk";
+import { auditX, fundingSpendSince, recordFundingEvent } from "./x-db";
+import { loadXSettings, saveXSettings } from "./x-settings";
 import { getBinanceBalance, getLtcJpyMarketStatus } from "./providers/binance";
 
 const JST_OFFSET_MS=9*60*60*1000;
@@ -40,21 +44,24 @@ export async function getFundingPlan(env:Env,now=Date.now()){
     settings.observed_paypay_balance_at>0&&
     now-settings.observed_paypay_balance_at<=settings.max_paypay_balance_age_ms;
 
-  const allowance=calculateFundingAllowance({
-    reserveJpy:settings.reserve_jpy,
+  const allowance=calculateLtcPurchaseAllowance({
     maxPurchaseJpy:settings.max_purchase_jpy,
     dailyRemainingJpy:Math.max(0,settings.daily_purchase_limit_jpy-today),
     weeklyRemainingJpy:Math.max(0,settings.weekly_purchase_limit_jpy-week),
     monthlyRemainingJpy:Math.max(0,settings.monthly_purchase_limit_jpy-month),
     minPurchaseJpy:settings.min_purchase_jpy,
-    paypayBalanceJpy:observedFresh
-      ?Math.max(0,settings.observed_paypay_balance_jpy-settings.pending_paypay_funding_jpy)
-      :0,
     currentLtc:ltc.free+ltc.locked,
     targetLtcBalance:settings.target_ltc_balance,
     maxLtcBalance:settings.max_ltc_balance,
     ltcJpy:market.priceJpy
   });
+  const spendablePayPayJpy=observedFresh
+    ?calculateSpendablePayPayJpy({
+      observedBalanceJpy:settings.observed_paypay_balance_jpy,
+      reserveJpy:settings.reserve_jpy,
+      pendingReservationJpy:settings.pending_paypay_funding_jpy
+    })
+    :0;
 
   return {
     observedPayPay:{
@@ -66,11 +73,34 @@ export async function getFundingPlan(env:Env,now=Date.now()){
       ),
       observedAt:settings.observed_paypay_balance_at,
       fresh:observedFresh,
+      spendableNewFundingJpy:spendablePayPayJpy,
       source:"manual_observation" as const
     },
     pendingManualFunding:settings.pending_paypay_funding_jpy>0?{
       amountJpy:settings.pending_paypay_funding_jpy,
+      jpyDepositGrossJpy:settings.pending_paypay_path_amounts_captured
+        ?settings.pending_paypay_jpy_deposit_required_jpy
+        :settings.pending_paypay_funding_jpy,
+      expectedJpyCreditJpy:settings.pending_paypay_path_amounts_captured
+        ?settings.pending_paypay_jpy_credit_required_jpy
+        :settings.pending_paypay_funding_jpy,
+      directLtcBudgetJpy:settings.pending_paypay_path_amounts_captured
+        ?settings.pending_paypay_direct_ltc_budget_jpy
+        :0,
+      pathAmountsCaptured:settings.pending_paypay_path_amounts_captured,
       binanceJpyBaseline:settings.pending_paypay_binance_jpy_baseline,
+      binanceLtcBaseline:settings.pending_paypay_binance_ltc_baseline,
+      currentBinanceLtcTotal:ltc.free+ltc.locked,
+      detectedLtcIncrease:Math.max(
+        0,
+        ltc.free+ltc.locked-settings.pending_paypay_binance_ltc_baseline
+      ),
+      directLtcIncreaseDetected:
+        settings.pending_paypay_direct_ltc_budget_jpy>0&&
+        settings.pending_paypay_ltc_baseline_captured&&
+        ltc.free+ltc.locked>settings.pending_paypay_binance_ltc_baseline+1e-12,
+      requiredLtcAtRequest:settings.pending_paypay_required_ltc,
+      ltcBaselineCaptured:settings.pending_paypay_ltc_baseline_captured,
       requestedAt:settings.pending_paypay_requested_at
     }:null,
     binance:{
@@ -87,8 +117,86 @@ export async function getFundingPlan(env:Env,now=Date.now()){
       weekRemainingJpy:Math.max(0,settings.weekly_purchase_limit_jpy-week),
       monthRemainingJpy:Math.max(0,settings.monthly_purchase_limit_jpy-month)
     },
-    allowance:observedFresh
-      ?allowance
-      :{...allowance,allowedJpy:0,blockedReason:"PAYPAY_BALANCE_MISSING_OR_STALE"}
+    allowance,
+    paypayFunding:{
+      fresh:observedFresh,
+      spendableJpy:spendablePayPayJpy,
+      blockedReason:observedFresh?null:"PAYPAY_BALANCE_MISSING_OR_STALE"
+    }
+  };
+}
+
+
+export async function confirmPendingDirectLtcFunding(env:Env){
+  const settings=await loadXSettings(env);
+  if(
+    settings.pending_paypay_funding_jpy<=0||
+    settings.pending_paypay_direct_ltc_budget_jpy<=0||
+    !settings.pending_paypay_ltc_baseline_captured
+  ){
+    throw new Error("NO_PENDING_DIRECT_LTC_CONFIRMATION");
+  }
+
+  const ltc=await getBinanceBalance(env,"LTC");
+  const currentTotal=Math.max(0,ltc.free+ltc.locked);
+  const baseline=Math.max(0,settings.pending_paypay_binance_ltc_baseline);
+  const increase=Math.max(0,currentTotal-baseline);
+  if(increase<=1e-12){
+    throw new Error("LTC_BALANCE_INCREASE_NOT_DETECTED");
+  }
+
+  const confirmedSpend=settings.pending_paypay_direct_ltc_budget_jpy;
+  const nextObserved=nextObservedPayPayBalance({
+    observedBalanceJpy:settings.observed_paypay_balance_jpy,
+    observedAt:settings.observed_paypay_balance_at,
+    pendingRequestedAt:settings.pending_paypay_requested_at,
+    confirmedSpendJpy:confirmedSpend
+  });
+
+  const next=await saveXSettings(env,{
+    observed_paypay_balance_jpy:nextObserved,
+    pending_paypay_funding_jpy:0,
+    pending_paypay_jpy_deposit_required_jpy:0,
+    pending_paypay_jpy_credit_required_jpy:0,
+    pending_paypay_direct_ltc_budget_jpy:0,
+    pending_paypay_path_amounts_captured:false,
+    pending_paypay_binance_jpy_baseline:0,
+    pending_paypay_binance_ltc_baseline:0,
+    pending_paypay_required_ltc:0,
+    pending_paypay_ltc_baseline_captured:false,
+    pending_paypay_requested_at:0
+  });
+
+  await recordFundingEvent(env,{
+    provider:"paypay_manual",
+    kind:"DIRECT_LTC_PURCHASE_CONFIRMED",
+    amountJpy:confirmedSpend,
+    asset:"LTC",
+    assetAmount:increase,
+    status:"COMPLETED",
+    metadata:{
+      binanceLtcBaseline:baseline,
+      binanceLtcTotal:currentTotal,
+      detectedLtcIncrease:increase,
+      confirmation:"admin"
+    }
+  });
+  await auditX(env,{
+    kind:"PAYPAY_DIRECT_LTC_CONFIRMED",
+    message:"Admin confirmed the detected Binance LTC increase as the pending PayPay direct purchase.",
+    details:{
+      confirmedSpendJpy:confirmedSpend,
+      binanceLtcBaseline:baseline,
+      binanceLtcTotal:currentTotal,
+      detectedLtcIncrease:increase
+    }
+  });
+
+  return {
+    ok:true,
+    confirmedSpendJpy:confirmedSpend,
+    detectedLtcIncrease:increase,
+    binanceLtcTotal:currentTotal,
+    settings:next
   };
 }

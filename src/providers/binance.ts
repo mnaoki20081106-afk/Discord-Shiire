@@ -1,16 +1,26 @@
 import type { Env } from "../types";
 import { hmacHex, randomId } from "../crypto";
+import { marketNotionalBounds } from "./binance-market";
 
 const BASE_URL="https://api.binance.com";
 const SYMBOL="LTCJPY";
 
 export class BinanceApiError extends Error{
+  status:number;
+  code:string;
+  retryable:boolean;
+
   constructor(
-    public status:number,
-    public code:string,
-    public retryable:boolean,
+    status:number,
+    code:string,
+    retryable:boolean,
     message:string
-  ){super(message);}
+  ){
+    super(message);
+    this.status=status;
+    this.code=code;
+    this.retryable=retryable;
+  }
 }
 
 type ExchangeInfo={
@@ -33,6 +43,8 @@ export type BinanceMarketStatus={
   isSpotTradingAllowed:boolean;
   quoteOrderQtyMarketAllowed:boolean;
   priceJpy:number;
+  minMarketNotionalJpy:number|null;
+  maxMarketNotionalJpy:number|null;
 };
 
 export type BinanceBalance={asset:string;free:number;locked:number};
@@ -204,6 +216,7 @@ export async function getLtcJpyMarketStatus():Promise<BinanceMarketStatus>{
   }
   const p=Number(price.price);
   if(!Number.isFinite(p)||p<=0) throw new BinanceApiError(502,"LTCJPY_PRICE_INVALID",true,"Invalid LTCJPY ticker price");
+  const notional=marketNotionalBounds(symbol.filters);
   return {
     symbol:SYMBOL,
     status:symbol.status,
@@ -211,7 +224,9 @@ export async function getLtcJpyMarketStatus():Promise<BinanceMarketStatus>{
     quoteAsset:symbol.quoteAsset,
     isSpotTradingAllowed:symbol.isSpotTradingAllowed===true,
     quoteOrderQtyMarketAllowed:symbol.quoteOrderQtyMarketAllowed===true,
-    priceJpy:p
+    priceJpy:p,
+    minMarketNotionalJpy:notional.min,
+    maxMarketNotionalJpy:notional.max
   };
 }
 
@@ -289,6 +304,28 @@ export async function placeLtcJpyMarketBuy(env:Env,input:{
   }
   if(!market.quoteOrderQtyMarketAllowed){
     throw new BinanceApiError(409,"QUOTE_ORDER_QTY_NOT_ALLOWED",false,"LTCJPY does not currently allow quoteOrderQty market buys");
+  }
+  if(
+    market.minMarketNotionalJpy!==null&&
+    amount<Math.ceil(market.minMarketNotionalJpy)
+  ){
+    throw new BinanceApiError(
+      409,
+      "LTCJPY_BELOW_MARKET_MIN_NOTIONAL",
+      false,
+      "JPY market-buy amount is below the current LTCJPY exchangeInfo minimum."
+    );
+  }
+  if(
+    market.maxMarketNotionalJpy!==null&&
+    amount>Math.floor(market.maxMarketNotionalJpy)
+  ){
+    throw new BinanceApiError(
+      409,
+      "LTCJPY_ABOVE_MARKET_MAX_NOTIONAL",
+      false,
+      "JPY market-buy amount is above the current LTCJPY exchangeInfo maximum."
+    );
   }
   if(!input.live){
     return {

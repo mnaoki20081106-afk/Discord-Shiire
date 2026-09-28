@@ -1,0 +1,220 @@
+{
+  "name": "discord-shiire",
+  "runtime": "worker",
+  "provider": "cloudflare",
+  "working_directory": ".",
+  "wrangler_config": "wrangler.jsonc",
+  "d1_migrations": [],
+  "d1_schema_files": [],
+  "setup": {
+    "title": "Discord-Shiire / Xアカウント仕入れBOT",
+    "description": "Xaccount-Botと連携する仕入れ・在庫・自販機BOTをCloudflare Workersへ起動します。初期状態はDry Run / 自動仕入れOFFです。",
+    "fields": [
+      {
+        "key": "DISCORD_BOT_TOKEN",
+        "label": "Discord BOT Token",
+        "type": "secret",
+        "required": true,
+        "help": "Discord-Shiire用アプリのBot Tokenです。Main BOTとは別アプリを推奨します。",
+        "source": {
+          "title": "Bot Tokenの取得",
+          "steps": [
+            "Discord Developer PortalでDiscord-Shiire用Applicationを開く",
+            "Botを開く",
+            "Tokenを発行/Resetして入力する"
+          ],
+          "url": "https://discord.com/developers/applications",
+          "link_label": "Discord Developer Portal"
+        }
+      },
+      {
+        "key": "DISCORD_APPLICATION_ID",
+        "label": "Discord Application ID",
+        "type": "text",
+        "required": true,
+        "pattern": "^\\d{17,20}$",
+        "source": {
+          "title": "Application ID",
+          "steps": [
+            "Discord Developer Portal > General Information > Application ID をコピー"
+          ],
+          "url": "https://discord.com/developers/applications",
+          "link_label": "Developer Portal"
+        }
+      },
+      {
+        "key": "DISCORD_PUBLIC_KEY",
+        "label": "Discord Public Key",
+        "type": "secret",
+        "required": true,
+        "pattern": "^[0-9a-fA-F]{64}$",
+        "help": "Interactions署名検証に使用します。"
+      },
+      {
+        "key": "ADMIN_TOKEN",
+        "label": "仕入れBOT管理トークン",
+        "type": "secret",
+        "required": true,
+        "generate": {
+          "strategy": "base64url",
+          "bytes": 32
+        },
+        "help": "Discord-Shiire単体の管理API用。Factoryが生成・保持します。"
+      },
+      {
+        "key": "CREDENTIALS_ENCRYPTION_KEY",
+        "label": "在庫暗号化キー",
+        "type": "secret",
+        "required": true,
+        "generate": {
+          "strategy": "base64",
+          "bytes": 32
+        },
+        "help": "購入済みXアカウント認証情報のAES-GCM暗号化用。再デプロイでもFactoryが同じ値を再利用します。"
+      },
+      {
+        "key": "SHIIRE_BRIDGE_SECRET",
+        "label": "Main BOT連携Secret",
+        "type": "secret",
+        "required": true,
+        "help": "Xaccount-Bot側のSHIIRE_BRIDGE_SECRETと完全に同じ値を入力してください。32文字以上。",
+        "pattern": "^.{32,}$"
+      },
+      {
+        "key": "MAIN_BOT_BASE_URL",
+        "label": "旧Main Bot Worker URL（汎用仕入れ用）",
+        "type": "url",
+        "required": false,
+        "placeholder": "https://<actual-main-bot>.workers.dev",
+        "help": "Xアカウント以外の従来型商品をMain Bot有限在庫へ自動納品する場合だけ設定します。未使用なら空欄で構いません。",
+        "pattern": "^https://[^\\\\s]+$"
+      },
+      {
+        "key": "XACCOUNT_BOT_BASE_URL",
+        "label": "Xaccount-Bot Worker URL",
+        "type": "url",
+        "required": true,
+        "placeholder": "https://<actual-worker>.workers.dev",
+        "help": "Main BOTの実際のCloudflare Worker HTTPS origin。仕入れbot自販機の決済委譲に使用します。",
+        "pattern": "^https://[^\\\\s]+$"
+      },
+      {
+        "key": "BINANCE_API_KEY",
+        "label": "Binance Japan API Key（取引）",
+        "type": "secret",
+        "required": true,
+        "help": "読取＋現物取引に限定したキーを推奨。出金キーとは分離してください。"
+      },
+      {
+        "key": "BINANCE_API_SECRET",
+        "label": "Binance Japan API Secret（取引）",
+        "type": "secret",
+        "required": true
+      },
+      {
+        "key": "HSTORA_API_KEY",
+        "label": "HStora API Key",
+        "type": "secret",
+        "required": true
+      },
+      {
+        "key": "HSTORA_API_SECRET",
+        "label": "HStora API Secret",
+        "type": "secret",
+        "required": true
+      },
+      {
+        "key": "HSTORA_WEBHOOK_SECRET",
+        "label": "HStora Webhook Secret",
+        "type": "secret",
+        "required": false,
+        "help": "任意。未設定でも1分Cronの注文照合は動作します。Webhookを使う場合だけ設定してください。"
+      },
+      {
+        "key": "DISCORD_NOTIFY_WEBHOOK_URL",
+        "label": "仕入れ通知Webhook URL",
+        "type": "url",
+        "required": false,
+        "help": "任意。仕入れ・残高不足・Circuit Breaker通知を別チャンネルへ送りたい場合に設定します。",
+        "pattern": "^https://[^\\\\s]+$"
+      },
+      {
+        "key": "BINANCE_WITHDRAW_API_KEY",
+        "label": "Binance 出金専用API Key",
+        "type": "secret",
+        "required": false,
+        "help": "現在のHStora入金フローでは未使用。将来の公式入金先連携用です。取引キーと分離してください。"
+      },
+      {
+        "key": "BINANCE_WITHDRAW_API_SECRET",
+        "label": "Binance 出金専用API Secret",
+        "type": "secret",
+        "required": false,
+        "help": "出金自動化を有効にするまでは未設定で構いません。"
+      },
+      {
+        "key": "BINANCE_FIXED_EGRESS_CONFIRMED",
+        "label": "固定送信元IPを確認済み",
+        "type": "boolean",
+        "required": false,
+        "help": "現在は出金自動化未接続のためOFFのままにしてください。"
+      },
+      {
+        "key": "BINANCE_TRAVEL_RULE_QUESTIONNAIRE",
+        "label": "Binance Travel Rule Questionnaire JSON",
+        "type": "secret",
+        "required": false,
+        "help": "将来、公式出金APIで要求された場合のみ正確なJSONを設定します。"
+      }
+    ],
+    "discord": {
+      "intents": [],
+      "permissions": [
+        {
+          "id": "view-channels",
+          "label": "チャンネルを見る",
+          "required": true,
+          "description": "自販機パネルの設置・更新に必要です。"
+        },
+        {
+          "id": "send-messages",
+          "label": "メッセージを送信",
+          "required": true,
+          "description": "自販機パネルと通知の投稿に必要です。"
+        },
+        {
+          "id": "embed-links",
+          "label": "埋め込みリンク",
+          "required": true,
+          "description": "自販機Embedの表示に必要です。"
+        },
+        {
+          "id": "attach-files",
+          "label": "ファイルを添付",
+          "required": true,
+          "description": "長い納品データを購入者DMへファイル送信する場合に必要です。"
+        },
+        {
+          "id": "read-history",
+          "label": "メッセージ履歴を読む",
+          "required": true,
+          "description": "設置済みパネルの更新・管理に使用します。"
+        }
+      ],
+      "checks": [
+        {
+          "id": "interaction-endpoint",
+          "label": "初回デプロイ後: Interactions Endpoint URLを設定",
+          "required": false,
+          "description": "Factoryの初回デプロイ後に発行されたDiscord-Shiire Worker URL + /interactions をDiscord Developer Portal > General Informationへ設定します。",
+          "path": "Discord Developer Portal > General Information > Interactions Endpoint URL"
+        }
+      ],
+      "notes": [
+        "Privileged Gateway Intentsは現在のDiscord-Shiire実装では不要です。",
+        "Binance出金キー・固定IP・Travel Rule設定は現在のHStora手動入金境界では不要です。",
+        "初期状態はDry Run=true / auto_purchase_enabled=false / auto_procurement_enabled=falseです。"
+      ]
+    }
+  }
+}

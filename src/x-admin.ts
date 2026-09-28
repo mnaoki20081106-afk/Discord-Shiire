@@ -1,5 +1,5 @@
 import type { Env } from "./types";
-import { loadXSettings, saveXSettings, DEFAULT_X_SETTINGS, type XSettings } from "./x-settings";
+import { loadXSettings, saveXSettings, type XSettings } from "./x-settings";
 import {
   inventorySummary,
   listAuditLogs,
@@ -11,7 +11,11 @@ import {
   listOpenCircuitBreakers,
   setCircuitBreaker
 } from "./x-db";
-import { getFundingPlan, jstPeriodStarts } from "./x-funding";
+import {
+  confirmPendingDirectLtcFunding,
+  getFundingPlan,
+  jstPeriodStarts
+} from "./x-funding";
 import { runXProcurement } from "./x-engine";
 import {
   getBinanceApiRestrictions,
@@ -41,15 +45,40 @@ async function requestJson(request:Request){
   catch{return null;}
 }
 
+const DIRECT_EDITABLE_SETTING_KEYS=new Set<keyof XSettings>([
+  "dry_run","emergency_stop","auto_purchase_enabled","auto_procurement_enabled",
+  "reserve_jpy","max_purchase_jpy","daily_purchase_limit_jpy",
+  "weekly_purchase_limit_jpy","monthly_purchase_limit_jpy","min_purchase_jpy",
+  "target_ltc_balance","max_ltc_balance","wallet_target_ltc","wallet_max_ltc",
+  "max_unit_price_jpy","max_no_shadowban_unit_price_usd",
+  "procurement_strategy","search_visibility_requirement",
+  "reorder_point","target_stock","no_shadowban_reorder_point",
+  "no_shadowban_target_stock","max_batch_purchase",
+  "min_seller_rating","min_product_reviews","min_sales_count",
+  "max_dispute_rate","minimum_stock","trial_purchase_count",
+  "seller_quality_mode","approved_hstora_product_ids",
+  "max_paypay_balance_age_ms","max_fx_age_ms","max_fx_jump_percent",
+  "max_price_jump_percent","max_ltc_price_jump_percent",
+  "require_bulk_confirmation","bulk_confirmation_threshold"
+]);
+
 function publicSettings(settings:XSettings){
-  return settings;
+  const out:Record<string,unknown>={};
+  for(const [key,value] of Object.entries(settings)){
+    // Pending funding snapshots are runtime-owned state. They are exposed via
+    // getFundingPlan(), not as editable Settings JSON.
+    if(key.startsWith("pending_paypay_")) continue;
+    out[key]=value;
+  }
+  return out;
 }
 
 function safePatch(input:Record<string,unknown>):Partial<XSettings>{
-  const allowed=new Set(Object.keys(DEFAULT_X_SETTINGS));
   const out:Record<string,unknown>={};
   for(const [key,value] of Object.entries(input)){
-    if(allowed.has(key)) out[key]=value;
+    if(DIRECT_EDITABLE_SETTING_KEYS.has(key as keyof XSettings)){
+      out[key]=value;
+    }
   }
   return out as Partial<XSettings>;
 }
@@ -184,11 +213,35 @@ export async function handleXAdminApi(
     return json({ok:true,approvedUntil:settings.bulk_approval_until});
   }
 
+  if(
+    url.pathname==="/api/x/funding/pending/confirm-direct-ltc"&&
+    request.method==="POST"
+  ){
+    try{
+      const result=await confirmPendingDirectLtcFunding(env);
+      return json(result);
+    }catch(error){
+      const code=error instanceof Error?error.message:String(error);
+      const status=
+        code==="NO_PENDING_DIRECT_LTC_CONFIRMATION"?409:
+        code==="LTC_BALANCE_INCREASE_NOT_DETECTED"?409:
+        500;
+      return json({error:code},status);
+    }
+  }
+
   if(url.pathname==="/api/x/funding/pending/cancel"&&request.method==="POST"){
     const current=await loadXSettings(env);
     const settings=await saveXSettings(env,{
       pending_paypay_funding_jpy:0,
+      pending_paypay_jpy_deposit_required_jpy:0,
+      pending_paypay_jpy_credit_required_jpy:0,
+      pending_paypay_direct_ltc_budget_jpy:0,
+      pending_paypay_path_amounts_captured:false,
       pending_paypay_binance_jpy_baseline:0,
+      pending_paypay_binance_ltc_baseline:0,
+      pending_paypay_required_ltc:0,
+      pending_paypay_ltc_baseline_captured:false,
       pending_paypay_requested_at:0
     });
     await auditX(env,{
@@ -399,7 +452,7 @@ function metrics(data){
  const todayJpy=data.today?.approximateJpy;
  const avgJpy=data.today?.approximateAverageJpy;
  return '<div class="grid">'+
-  '<div class="metric"><small>PayPay使用可能額</small><strong>'+esc(f?.allowedJpy??0)+'円</strong></div>'+
+  '<div class="metric"><small>LTC購入上限</small><strong>'+esc(f?.allowedJpy??0)+'円</strong></div>'+
   '<div class="metric"><small>LTC残高</small><strong>'+esc(data.balances?.binanceLtc?.data?.free??"-")+' LTC</strong></div>'+
   '<div class="metric"><small>HStora残高</small><strong>'+esc(data.balances?.hstora?.data?.balance??"-")+' USD</strong></div>'+
   '<div class="metric"><small>X垢在庫</small><strong>'+esc(ready)+'</strong></div>'+
@@ -446,15 +499,15 @@ async function load(){
     const s=data.settings||{};
     main.innerHTML=metrics(data)+
       '<section class="card"><strong>PayPay残高（手動観測）</strong>'+
-      '<p class="hint">PayPay操作はBinance Japanの公式Web/アプリ側で手動実行します。BOTはPayPay残高を直接取得せず、ここで観測した残高からreserve_jpy等の上限を計算します。古い観測値では自動購入枠は0円です。</p>'+
+      '<p class="hint">PayPay操作はBinance Japanの公式Web/アプリ側で手動実行します。BOTはPayPay残高を直接取得せず、ここで観測した残高からreserve_jpy等の上限を計算します。古い観測値では新しいPayPay資金の投入を止めます。既にBinanceへあるJPYは別枠で利用できます。</p>'+
       '<div class="formrow"><input id="paypayBalance" inputmode="numeric" type="number" min="0" step="1" value="'+esc(s.observed_paypay_balance_jpy??0)+'"><button id="savePayPay">観測値を保存</button></div>'+
       '</section>'+
       '<section class="card"><strong>USD/JPY（手動観測）</strong>'+
       '<p class="hint">HStoraのUSD建て価格をJPY上限と比較するための換算値です。期限切れなら価格判定を停止します。</p>'+
       '<div class="formrow"><input id="usdJpy" inputmode="decimal" type="number" min="0" step="0.001" value="'+esc(s.usd_jpy_rate??0)+'"><button id="saveFx">換算値を保存</button></div>'+
       '</section>'+
-      (s.pending_paypay_funding_jpy>0
-        ?'<section class="card"><strong>PayPay手動操作待ち</strong><p class="hint">最大使用額: '+esc(s.pending_paypay_funding_jpy)+'円。Binance Japan公式UIでPayPay→JPY即時入金、またはLTCがPayPay購入対象として表示される場合はLTC直接購入を行ってください。BOTはJPY増加または必要量までのLTC増加を検知して再開します。</p><button id="cancelPending" class="danger">この要求を取消</button></section>'
+      (data.funding?.data?.pendingManualFunding
+        ?'<section class="card"><strong>PayPay手動操作待ち</strong><p class="hint">最大予約額: '+esc(data.funding.data.pendingManualFunding.amountJpy)+'円。Binance Japan公式UIで表示された経路を実行してください。BOTは実際のJPY/LTC残高増加を検知して再開します。</p><button id="cancelPending" class="danger">この要求を取消</button></section>'
         :'')+
       card("Funding detail",data.funding);
     const cancel=document.querySelector("#cancelPending"); if(cancel) cancel.onclick=()=>cancelPendingFunding().catch(e=>alert(e.message));
