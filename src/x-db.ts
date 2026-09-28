@@ -122,6 +122,12 @@ const SCHEMA=[
   received_at INTEGER NOT NULL
 )`,
 `CREATE INDEX IF NOT EXISTS idx_hstora_webhook_event ON hstora_webhook_deliveries(event_id)`,
+`CREATE TABLE IF NOT EXISTS procurement_leases (
+  key TEXT PRIMARY KEY,
+  lease_id TEXT NOT NULL,
+  expires_at INTEGER NOT NULL,
+  created_at INTEGER NOT NULL
+)`,
 `CREATE TABLE IF NOT EXISTS circuit_breakers (
   key TEXT PRIMARY KEY,
   state TEXT NOT NULL,
@@ -158,6 +164,40 @@ export async function ensureXSchema(env:Env){
   }
 
   schemaReady=true;
+}
+
+export async function acquireProcurementLease(
+  env:Env,
+  key:string,
+  leaseMs:number
+):Promise<string|null>{
+  await ensureXSchema(env);
+  const now=Date.now();
+  const safeLeaseMs=Math.max(60_000,Math.min(30*60_000,Math.floor(leaseMs)));
+  const leaseId=randomId();
+
+  // Expired leases are safe to discard. INSERT OR IGNORE on the primary key
+  // is the atomic winner selection when cron/manual invocations race.
+  await env.DB.prepare(
+    "DELETE FROM procurement_leases WHERE key=? AND expires_at<=?"
+  ).bind(key,now).run();
+
+  const result=await env.DB.prepare(
+    "INSERT OR IGNORE INTO procurement_leases(key,lease_id,expires_at,created_at) VALUES(?,?,?,?)"
+  ).bind(key,leaseId,now+safeLeaseMs,now).run();
+
+  return Number(result.meta?.changes??0)===1?leaseId:null;
+}
+
+export async function releaseProcurementLease(
+  env:Env,
+  key:string,
+  leaseId:string
+):Promise<void>{
+  await ensureXSchema(env);
+  await env.DB.prepare(
+    "DELETE FROM procurement_leases WHERE key=? AND lease_id=?"
+  ).bind(key,leaseId).run();
 }
 
 export async function getXSetting<T>(env:Env,key:string):Promise<T|null>{
