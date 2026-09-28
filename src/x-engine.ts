@@ -499,6 +499,352 @@ async function allowExpectedHstoraDecrease(env:Env,amountUsd:number){
   });
 }
 
+
+async function submitLtcMarketPurchase(
+  env:Env,
+  input:{
+    settings:Awaited<ReturnType<typeof loadXSettings>>;
+    desiredJpy:number;
+    ltcJpy:number;
+    purchaseAllowance:ReturnType<typeof calculateLtcPurchaseAllowance>;
+    source:"target_rebalance"|"hstora_shortfall";
+  }
+):Promise<XRunResult>{
+  const desired=Math.floor(input.desiredJpy);
+  const settings=input.settings;
+
+  if(desired<=0){
+    return {
+      action:"LTC_PURCHASE_LIMIT_BLOCKED",
+      dryRun:settings.dry_run,
+      details:{purchaseAllowance:input.purchaseAllowance,source:input.source}
+    };
+  }
+
+  if(!settings.auto_purchase_enabled){
+    return {
+      action:"AUTO_LTC_PURCHASE_DISABLED",
+      dryRun:settings.dry_run,
+      details:{wouldBuyJpy:desired,ltcJpy:input.ltcJpy,source:input.source}
+    };
+  }
+
+  if(settings.dry_run){
+    return {
+      action:"DRY_RUN_LTC_PURCHASE",
+      dryRun:true,
+      details:{
+        wouldBuyJpy:desired,
+        ltcJpy:input.ltcJpy,
+        estimatedLtc:desired/input.ltcJpy,
+        purchaseAllowance:input.purchaseAllowance,
+        source:input.source
+      }
+    };
+  }
+
+  const clientOrderId=("shiirex_"+randomId()).slice(0,36);
+  await recordFundingEvent(env,{
+    provider:"binance_japan",
+    kind:"LTC_PURCHASE",
+    amountJpy:desired,
+    asset:"LTC",
+    status:"INTENT",
+    providerReference:clientOrderId,
+    metadata:{clientOrderId,source:input.source}
+  });
+
+  try{
+    const order=await placeLtcJpyMarketBuy(env,{
+      quoteJpy:desired,
+      clientOrderId,
+      live:true
+    });
+    if("dryRun" in order){
+      throw new Error("BINANCE_LIVE_ORDER_RETURNED_DRY_RUN");
+    }
+    await updateFundingEventByProviderReference(env,"binance_japan",clientOrderId,{
+      status:String(order.status??"SUBMITTED").toUpperCase(),
+      assetAmount:Number(order.executedQty??0),
+      metadata:{
+        clientOrderId,
+        orderId:order.orderId,
+        source:input.source
+      }
+    });
+    await auditX(env,{
+      kind:"BINANCE_LTC_PURCHASE_SUBMITTED",
+      message:"Binance Japan LTCJPY market-buy submitted.",
+      details:{
+        clientOrderId,
+        orderId:order.orderId,
+        status:order.status,
+        jpy:desired,
+        source:input.source
+      }
+    });
+    await notifyDiscord(env,{
+      title:"LTC購入",
+      message:"Binance Japanで上限計算済みのLTC購入注文を送信しました。",
+      details:{
+        jpy:desired,
+        status:order.status,
+        orderId:order.orderId,
+        source:input.source
+      }
+    }).catch(()=>undefined);
+    return {
+      action:"LTC_PURCHASE_SUBMITTED",
+      dryRun:false,
+      details:{
+        orderId:order.orderId,
+        status:order.status,
+        jpy:desired,
+        source:input.source
+      }
+    };
+  }catch(error){
+    if(
+      error instanceof BinanceApiError&&
+      error.status>=400&&
+      error.status<500&&
+      !error.retryable
+    ){
+      await updateFundingEventByProviderReference(env,"binance_japan",clientOrderId,{
+        status:"FAILED",
+        metadata:{
+          clientOrderId,
+          rejected:true,
+          code:error.code,
+          status:error.status,
+          source:input.source
+        }
+      });
+      await setCircuitBreaker(
+        env,
+        "binance_purchase",
+        "OPEN",
+        error.code+":"+error.message.slice(0,160)
+      );
+      await auditX(env,{
+        level:"error",
+        kind:"BINANCE_ORDER_REJECTED",
+        message:"Binance explicitly rejected the LTCJPY order; no ambiguous retry will be attempted.",
+        details:{
+          clientOrderId,
+          status:error.status,
+          code:error.code,
+          message:error.message,
+          source:input.source
+        }
+      });
+      return {
+        action:"LTC_PURCHASE_REJECTED",
+        dryRun:false,
+        details:{
+          clientOrderId,
+          status:error.status,
+          code:error.code,
+          source:input.source
+        }
+      };
+    }
+
+    try{
+      const recovered=await getBinanceOrder(env,{origClientOrderId:clientOrderId});
+      await updateFundingEventByProviderReference(env,"binance_japan",clientOrderId,{
+        status:String(recovered.status??"SUBMITTED").toUpperCase(),
+        assetAmount:Number(recovered.executedQty??0),
+        metadata:{
+          clientOrderId,
+          orderId:recovered.orderId,
+          recovered:true,
+          source:input.source
+        }
+      });
+      await auditX(env,{
+        kind:"BINANCE_ORDER_RECOVERED",
+        message:"Binance order was recovered by clientOrderId after an ambiguous submission result.",
+        details:{
+          clientOrderId,
+          orderId:recovered.orderId,
+          status:recovered.status,
+          source:input.source
+        }
+      });
+      return {
+        action:"LTC_PURCHASE_RECOVERED",
+        dryRun:false,
+        details:{
+          orderId:recovered.orderId,
+          status:recovered.status,
+          source:input.source
+        }
+      };
+    }catch{}
+
+    await updateFundingEventByProviderReference(env,"binance_japan",clientOrderId,{
+      status:"UNKNOWN",
+      metadata:{clientOrderId,source:input.source}
+    });
+    await setCircuitBreaker(
+      env,
+      "binance_purchase",
+      "OPEN",
+      error instanceof Error?error.message:String(error)
+    );
+    await notifyDiscord(env,{
+      title:"Circuit Breaker: LTC購入",
+      message:"LTC購入結果をclientOrderIdでも照合できなかったため停止しました。手動確認が必要です。",
+      level:"error",
+      details:{clientOrderId,source:input.source}
+    }).catch(()=>undefined);
+    return {
+      action:"LTC_PURCHASE_UNKNOWN",
+      dryRun:false,
+      details:{clientOrderId,source:input.source}
+    };
+  }
+}
+
+export async function runLtcAutoPurchase(env:Env):Promise<XRunResult>{
+  const settings=await loadXSettings(env);
+
+  if(settings.emergency_stop){
+    return {action:"EMERGENCY_STOP",dryRun:settings.dry_run};
+  }
+  if(!settings.auto_purchase_enabled){
+    return {action:"AUTO_LTC_PURCHASE_DISABLED",dryRun:settings.dry_run};
+  }
+
+  const breakers=await Promise.all([
+    circuitState(env,"binance"),
+    circuitState(env,"binance_purchase"),
+    circuitState(env,"ltc_price")
+  ]);
+  if(breakers.some(value=>String(value?.state??"")==="OPEN")){
+    return {action:"CIRCUIT_BREAKER_OPEN",dryRun:settings.dry_run};
+  }
+
+  let market;
+  let ltcBalance;
+  let jpyBalance;
+  try{
+    [market,ltcBalance,jpyBalance]=await Promise.all([
+      getLtcJpyMarketStatus(),
+      getBinanceBalance(env,"LTC"),
+      getBinanceBalance(env,"JPY")
+    ]);
+  }catch(error){
+    await setCircuitBreaker(
+      env,
+      "binance",
+      "OPEN",
+      error instanceof Error?error.message:String(error)
+    );
+    return {
+      action:"BINANCE_API_BLOCKED",
+      dryRun:settings.dry_run,
+      details:{error:error instanceof Error?error.message:String(error)}
+    };
+  }
+
+  if(
+    market.status!=="TRADING"||
+    !market.isSpotTradingAllowed||
+    !market.quoteOrderQtyMarketAllowed
+  ){
+    return {
+      action:"LTCJPY_MARKET_UNAVAILABLE",
+      dryRun:settings.dry_run,
+      details:{market}
+    };
+  }
+
+  if(
+    !await checkLtcPriceGuard(
+      env,
+      market.priceJpy,
+      settings.max_ltc_price_jump_percent
+    )
+  ){
+    return {action:"LTC_PRICE_CIRCUIT_BREAKER",dryRun:settings.dry_run};
+  }
+
+  const currentLtc=ltcBalance.free+ltcBalance.locked;
+  const {dayStart,weekStart,monthStart}=jstPeriodStarts();
+  const [daily,weekly,monthly]=await Promise.all([
+    fundingWindowRemaining(env,settings.daily_purchase_limit_jpy,dayStart),
+    fundingWindowRemaining(env,settings.weekly_purchase_limit_jpy,weekStart),
+    fundingWindowRemaining(env,settings.monthly_purchase_limit_jpy,monthStart)
+  ]);
+
+  const purchaseAllowance=calculateLtcPurchaseAllowance({
+    maxPurchaseJpy:settings.max_purchase_jpy,
+    dailyRemainingJpy:daily,
+    weeklyRemainingJpy:weekly,
+    monthlyRemainingJpy:monthly,
+    minPurchaseJpy:settings.min_purchase_jpy,
+    currentLtc,
+    targetLtcBalance:settings.target_ltc_balance,
+    maxLtcBalance:settings.max_ltc_balance,
+    ltcJpy:market.priceJpy
+  });
+
+  if(purchaseAllowance.allowedJpy<=0){
+    return {
+      action:
+        purchaseAllowance.blockedReason==="TARGET_LTC_BALANCE_REACHED"
+          ?"LTC_TARGET_OK"
+          :"LTC_PURCHASE_LIMIT_BLOCKED",
+      dryRun:settings.dry_run,
+      details:{
+        currentLtc,
+        targetLtcBalance:settings.target_ltc_balance,
+        maxLtcBalance:settings.max_ltc_balance,
+        purchaseAllowance
+      }
+    };
+  }
+
+  const exchangeMinJpy=Math.ceil(market.minMarketNotionalJpy??0);
+  const configuredMinJpy=Math.ceil(Math.max(0,settings.min_purchase_jpy));
+  const minimumOrderJpy=Math.max(1,exchangeMinJpy,configuredMinJpy);
+  const exchangeMaxJpy=
+    market.maxMarketNotionalJpy===null
+      ?Number.POSITIVE_INFINITY
+      :Math.floor(market.maxMarketNotionalJpy);
+  const availableJpy=Math.floor(Math.max(0,jpyBalance.free));
+  const desired=Math.floor(Math.min(
+    purchaseAllowance.allowedJpy,
+    availableJpy,
+    exchangeMaxJpy
+  ));
+
+  if(desired<minimumOrderJpy){
+    return {
+      action:"BINANCE_JPY_FUNDING_REQUIRED",
+      dryRun:settings.dry_run,
+      details:{
+        availableJpy,
+        minimumOrderJpy,
+        allowedJpy:purchaseAllowance.allowedJpy,
+        currentLtc,
+        targetLtcBalance:settings.target_ltc_balance,
+        maxLtcBalance:settings.max_ltc_balance
+      }
+    };
+  }
+
+  return submitLtcMarketPurchase(env,{
+    settings,
+    desiredJpy:desired,
+    ltcJpy:market.priceJpy,
+    purchaseAllowance,
+    source:"target_rebalance"
+  });
+}
+
 async function handleHstoraFundingNeed(
   env:Env,
   neededUsd:number
@@ -878,119 +1224,13 @@ async function handleHstoraFundingNeed(
     };
   }
 
-  if(!settings.auto_purchase_enabled){
-    return {
-      action:"AUTO_LTC_PURCHASE_DISABLED",
-      dryRun:settings.dry_run,
-      details:{wouldBuyJpy:desired,ltcJpy}
-    };
-  }
-
-  if(settings.dry_run){
-    return {
-      action:"DRY_RUN_LTC_PURCHASE",
-      dryRun:true,
-      details:{wouldBuyJpy:desired,ltcJpy,estimatedLtc:desired/ltcJpy,purchaseAllowance}
-    };
-  }
-
-  const clientOrderId=("shiirex_"+randomId()).slice(0,36);
-  await recordFundingEvent(env,{
-    provider:"binance_japan",
-    kind:"LTC_PURCHASE",
-    amountJpy:Math.floor(desired),
-    asset:"LTC",
-    status:"INTENT",
-    providerReference:clientOrderId,
-    metadata:{clientOrderId}
+  return submitLtcMarketPurchase(env,{
+    settings,
+    desiredJpy:desired,
+    ltcJpy,
+    purchaseAllowance,
+    source:"hstora_shortfall"
   });
-  try{
-    const order=await placeLtcJpyMarketBuy(env,{quoteJpy:Math.floor(desired),clientOrderId,live:true});
-    if("dryRun" in order){
-      throw new Error("BINANCE_LIVE_ORDER_RETURNED_DRY_RUN");
-    }
-    await updateFundingEventByProviderReference(env,"binance_japan",clientOrderId,{
-      status:String(order.status??"SUBMITTED").toUpperCase(),
-      assetAmount:Number(order.executedQty??0),
-      metadata:{clientOrderId,orderId:order.orderId}
-    });
-    await notifyDiscord(env,{
-      title:"LTC購入",
-      message:"Binance Japanで上限計算済みのLTC購入注文を送信しました。",
-      details:{jpy:Math.floor(desired),status:order.status,orderId:order.orderId}
-    }).catch(()=>undefined);
-    return {action:"LTC_PURCHASE_SUBMITTED",dryRun:false,details:{orderId:order.orderId,status:order.status}};
-  }catch(error){
-    if(
-      error instanceof BinanceApiError&&
-      error.status>=400&&
-      error.status<500&&
-      !error.retryable
-    ){
-      await updateFundingEventByProviderReference(env,"binance_japan",clientOrderId,{
-        status:"FAILED",
-        metadata:{
-          clientOrderId,
-          rejected:true,
-          code:error.code,
-          status:error.status
-        }
-      });
-      await setCircuitBreaker(
-        env,
-        "binance_purchase",
-        "OPEN",
-        error.code+":"+error.message.slice(0,160)
-      );
-      await auditX(env,{
-        level:"error",
-        kind:"BINANCE_ORDER_REJECTED",
-        message:"Binance explicitly rejected the LTCJPY order; no ambiguous retry will be attempted.",
-        details:{
-          clientOrderId,
-          status:error.status,
-          code:error.code,
-          message:error.message
-        }
-      });
-      return {
-        action:"LTC_PURCHASE_REJECTED",
-        dryRun:false,
-        details:{clientOrderId,status:error.status,code:error.code}
-      };
-    }
-
-    try{
-      const recovered=await getBinanceOrder(env,{origClientOrderId:clientOrderId});
-      await updateFundingEventByProviderReference(env,"binance_japan",clientOrderId,{
-        status:String(recovered.status??"SUBMITTED").toUpperCase(),
-        assetAmount:Number(recovered.executedQty??0),
-        metadata:{clientOrderId,orderId:recovered.orderId,recovered:true}
-      });
-      await auditX(env,{
-        kind:"BINANCE_ORDER_RECOVERED",
-        message:"Binance order was recovered by clientOrderId after an ambiguous submission result.",
-        details:{clientOrderId,orderId:recovered.orderId,status:recovered.status}
-      });
-      return {
-        action:"LTC_PURCHASE_RECOVERED",
-        dryRun:false,
-        details:{orderId:recovered.orderId,status:recovered.status}
-      };
-    }catch{}
-    await updateFundingEventByProviderReference(env,"binance_japan",clientOrderId,{
-      status:"UNKNOWN",
-      metadata:{clientOrderId}
-    });
-    await setCircuitBreaker(env,"binance_purchase","OPEN",error instanceof Error?error.message:String(error));
-    await notifyDiscord(env,{
-      title:"Circuit Breaker: LTC購入",
-      message:"LTC購入結果をclientOrderIdでも照合できなかったため停止しました。手動確認が必要です。",
-      level:"error",
-      details:{clientOrderId}
-    }).catch(()=>undefined);
-    return {action:"LTC_PURCHASE_UNKNOWN",dryRun:false,details:{clientOrderId}};
-  }
 }
 
 export async function runXProcurement(env:Env):Promise<XRunResult>{
