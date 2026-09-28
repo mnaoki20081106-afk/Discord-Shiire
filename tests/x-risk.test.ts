@@ -90,7 +90,7 @@ test("detects direct LTC purchase after a pending PayPay action",()=>{
     ltcBaselineCaptured:true,
     currentBinanceJpy:1_000,
     currentBinanceLtc:0.5,
-    requiredLtcAtRequest:0.4
+    directLtcBudgetJpy:7_000
   }),"LTC_PURCHASED");
 });
 
@@ -103,7 +103,7 @@ test("detects PayPay-funded Binance JPY increase",()=>{
     ltcBaselineCaptured:true,
     currentBinanceJpy:8_000,
     currentBinanceLtc:0.1,
-    requiredLtcAtRequest:0.4
+    directLtcBudgetJpy:7_000
   }),"JPY_FUNDED");
 });
 
@@ -116,12 +116,12 @@ test("does not resume before either manual completion condition is met",()=>{
     ltcBaselineCaptured:true,
     currentBinanceJpy:7_999,
     currentBinanceLtc:0.399,
-    requiredLtcAtRequest:0.4
+    directLtcBudgetJpy:7_000
   }),"NONE");
 });
 
 
-test("does not false-detect LTC purchase when requirement falls below the old balance",()=>{
+test("does not false-detect LTC purchase when the balance did not increase",()=>{
   assert.equal(detectManualPayPayCompletion({
     pendingReservationJpy:7_000,
     jpyCreditRequiredJpy:7_000,
@@ -130,7 +130,7 @@ test("does not false-detect LTC purchase when requirement falls below the old ba
     ltcBaselineCaptured:true,
     currentBinanceJpy:1_000,
     currentBinanceLtc:0.5,
-    requiredLtcAtRequest:0.6
+    directLtcBudgetJpy:7_000
   }),"NONE");
 });
 
@@ -143,7 +143,7 @@ test("legacy pending request without captured LTC baseline fails closed",()=>{
     ltcBaselineCaptured:false,
     currentBinanceJpy:1_000,
     currentBinanceLtc:1,
-    requiredLtcAtRequest:0
+    directLtcBudgetJpy:0
   }),"NONE");
 });
 
@@ -157,7 +157,7 @@ test("partial Binance JPY uses only the explicit deposit requirement for JPY com
     ltcBaselineCaptured:true,
     currentBinanceJpy:7_000,
     currentBinanceLtc:0.1,
-    requiredLtcAtRequest:0.5
+    directLtcBudgetJpy:0.5
   }),"JPY_FUNDED");
 });
 
@@ -170,7 +170,7 @@ test("partial Binance JPY does not reduce the direct-LTC PayPay accounting path"
     ltcBaselineCaptured:true,
     currentBinanceJpy:2_000,
     currentBinanceLtc:0.5,
-    requiredLtcAtRequest:0.5
+    directLtcBudgetJpy:0.5
   }),"LTC_PURCHASED");
 });
 
@@ -246,4 +246,31 @@ test("PayPay path planner honors the official 1000 JPY gross deposit minimum",()
   assert.equal(result.jpyDepositAvailable,true);
   assert.equal(result.directLtcAvailable,false);
   assert.equal(result.paypayReservationJpy,1_000);
+});
+
+
+test("detects a capped direct LTC tranche before the full HStora target is reached",()=>{
+  assert.equal(detectManualPayPayCompletion({
+    pendingReservationJpy:3_000,
+    jpyCreditRequiredJpy:0,
+    binanceJpyBaseline:0,
+    binanceLtcBaseline:0.1,
+    ltcBaselineCaptured:true,
+    directLtcBudgetJpy:3_000,
+    currentBinanceJpy:0,
+    currentBinanceLtc:0.2
+  }),"LTC_PURCHASED");
+});
+
+test("does not treat an LTC increase as PayPay completion when direct LTC was not offered",()=>{
+  assert.equal(detectManualPayPayCompletion({
+    pendingReservationJpy:5_110,
+    jpyCreditRequiredJpy:5_000,
+    binanceJpyBaseline:2_000,
+    binanceLtcBaseline:0.1,
+    ltcBaselineCaptured:true,
+    directLtcBudgetJpy:0,
+    currentBinanceJpy:2_000,
+    currentBinanceLtc:0.2
+  }),"NONE");
 });
