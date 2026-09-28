@@ -557,11 +557,14 @@ export async function finishShiireDelivery(env:Env,order:ShiireVendingOrder){
       "DELETE FROM shiire_vending_reservations WHERE order_id=?"
     ).bind(order.id),
     env.DB.prepare(
-      "UPDATE shiire_vending_orders SET status='delivered',delivered_at=?,updated_at=? WHERE id=? AND status IN ('delivering','delivery_sent')"
-    ).bind(now,now,order.id),
+      "UPDATE shiire_vending_products SET sales_count=sales_count+?,updated_at=? "+
+      "WHERE id=? AND EXISTS ("+
+      "SELECT 1 FROM shiire_vending_orders WHERE id=? AND status IN ('delivering','delivery_sent')"+
+      ")"
+    ).bind(order.quantity,now,order.product_id,order.id),
     env.DB.prepare(
-      "UPDATE shiire_vending_products SET sales_count=sales_count+?,updated_at=? WHERE id=?"
-    ).bind(order.quantity,now,order.product_id)
+      "UPDATE shiire_vending_orders SET status='delivered',delivered_at=?,updated_at=? WHERE id=? AND status IN ('delivering','delivery_sent')"
+    ).bind(now,now,order.id)
   ];
   const results=await env.DB.batch(statements);
   for(let i=0;i<rows.length;i++){
