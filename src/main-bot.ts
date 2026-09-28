@@ -7,14 +7,24 @@ function baseUrl(env:Env):URL{
   return new URL(raw.endsWith("/")?raw:raw+"/");
 }
 
+function xaccountBaseUrl(env:Env):URL{
+  const raw=env.XACCOUNT_BOT_BASE_URL?.trim();
+  if(!raw) throw new Error("XACCOUNT_BOT_BASE_URL_NOT_CONFIGURED");
+  return new URL(raw.endsWith("/")?raw:raw+"/");
+}
+
 async function signedFetch(
   env:Env,
   path:string,
-  init:RequestInit={}
+  init:RequestInit={},
+  target:"legacy"|"xaccount"="legacy"
 ):Promise<Response>{
   const secret=env.SHIIRE_BRIDGE_SECRET?.trim()??"";
   if(secret.length<32) throw new Error("SHIIRE_BRIDGE_SECRET_NOT_CONFIGURED");
-  const url=new URL(path.replace(/^\//,""),baseUrl(env));
+  const url=new URL(
+    path.replace(/^\//,""),
+    target==="xaccount"?xaccountBaseUrl(env):baseUrl(env)
+  );
   const method=String(init.method??"GET").toUpperCase();
   const body=typeof init.body==="string"?init.body:"";
   const timestamp=String(Date.now());
@@ -108,4 +118,51 @@ export async function getMainCatalog(env:Env){
       available:number;
     }>;
   }>(response);
+}
+
+
+export async function getMainPaymentStatus(env:Env){
+  const response=await signedFetch(
+    env,
+    "/api/shiire/payment/status",
+    {},
+    "xaccount"
+  );
+  return responseJson<{paypay:boolean;kyash:boolean}>(response);
+}
+
+export async function receiveMainPayment(
+  env:Env,
+  input:{
+    method:"paypay"|"kyash";
+    link:string;
+    amount:number;
+    idempotencyKey:string;
+  }
+){
+  const body=JSON.stringify(input);
+  const response=await signedFetch(
+    env,
+    "/api/shiire/payment/receive",
+    {
+      method:"POST",
+      body
+    },
+    "xaccount"
+  );
+  const text=await response.text();
+  let payload:any={};
+  try{payload=text?JSON.parse(text):{};}catch{}
+  if(!response.ok&&response.status!==409){
+    throw new Error(
+      "MAIN_PAYMENT_"+response.status+":"+
+      String(payload.message??payload.error??text).slice(0,300)
+    );
+  }
+  return {
+    ok:Boolean(payload.ok),
+    status:String(payload.status??(response.ok?"completed":"rejected")),
+    amount:Number(payload.amount??payload.linkAmount??0),
+    reason:String(payload.reason??payload.error??"")
+  };
 }

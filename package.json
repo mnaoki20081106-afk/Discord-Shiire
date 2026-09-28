@@ -7,7 +7,7 @@
     "build": "tsc --noEmit",
     "typecheck": "tsc --noEmit",
     "deploy": "wrangler deploy",
-    "test": "npm run typecheck",
+    "test": "node --experimental-strip-types --test tests/*.test.ts",
     "dev": "wrangler dev"
   },
   "devDependencies": {

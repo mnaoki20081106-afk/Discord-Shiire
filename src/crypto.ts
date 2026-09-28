@@ -26,6 +26,7 @@ export async function hmacHex(secret:string,value:string):Promise<string>{
   ));
 }
 
-export function randomId():string{
-  return crypto.randomUUID().replace(/-/g,"");
+export function randomId(prefix?:string):string{
+  const id=crypto.randomUUID().replace(/-/g,"");
+  return prefix?prefix+"_"+id:id;
 }
