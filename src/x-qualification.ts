@@ -1,8 +1,11 @@
 import type { HstoraProduct } from "./providers/hstora";
 import type { XSettings } from "./x-settings";
 
+export type ProcurementClass="TOP_SEARCH"|"NO_SHADOWBAN";
+
 export type ProductQualification={
   qualified:boolean;
+  procurement_class:ProcurementClass|null;
   unit_price_source:number;
   unit_price_jpy:number|null;
   stock:number;
@@ -53,6 +56,19 @@ export function detectSearchVisibility(product:VisibilityProduct){
   return {labels,evidence,text};
 }
 
+export function classifyProcurementClass(
+  product:VisibilityProduct
+):ProcurementClass|null{
+  if(!isXAccountProduct(product)) return null;
+  const visibility=detectSearchVisibility(product);
+  const hasTop=
+    visibility.labels.includes("TOP+Latest")||
+    visibility.labels.includes("TOP Search");
+  if(hasTop) return "TOP_SEARCH";
+  if(visibility.labels.includes("No Shadowban")) return "NO_SHADOWBAN";
+  return null;
+}
+
 export function tierUnitPrice(product:HstoraProduct,quantity:number):number{
   const base=Number(product.price);
   let best=base;
@@ -75,6 +91,7 @@ export function qualifyHstoraProduct(
 ):ProductQualification{
   const reasons:string[]=[];
   const visibility=detectSearchVisibility(product);
+  const procurementClass=classifyProcurementClass(product);
   const unitSource=tierUnitPrice(product,quantity);
   const currency=String(product.currency??"").toUpperCase();
 
@@ -93,17 +110,27 @@ export function qualifyHstoraProduct(
   }
 
   if(!isXAccountProduct(product)) reasons.push("NOT_X_ACCOUNT_PRODUCT");
-  const topConfirmed=
-    visibility.labels.includes("TOP+Latest")||
-    visibility.labels.includes("TOP Search");
-  if(settings.search_visibility_requirement==="top"&&!topConfirmed){
-    reasons.push("TOP_SEARCH_NOT_CONFIRMED");
+  if(!procurementClass){
+    reasons.push("SUPPORTED_X_PRODUCT_CLASS_NOT_CONFIRMED");
   }
   if(product.stock_available<settings.minimum_stock) reasons.push("STOCK_BELOW_MINIMUM");
-  if(unitJpy===null||!Number.isFinite(unitJpy)||unitJpy<=0){
-    reasons.push("UNIT_PRICE_JPY_UNAVAILABLE");
-  }else if(unitJpy>settings.max_unit_price_jpy){
-    reasons.push("UNIT_PRICE_ABOVE_LIMIT");
+
+  if(procurementClass==="TOP_SEARCH"){
+    if(unitJpy===null||!Number.isFinite(unitJpy)||unitJpy<=0){
+      reasons.push("UNIT_PRICE_JPY_UNAVAILABLE");
+    }else if(unitJpy>settings.max_unit_price_jpy){
+      reasons.push("TOP_SEARCH_UNIT_PRICE_ABOVE_JPY_LIMIT");
+    }
+  }else if(procurementClass==="NO_SHADOWBAN"){
+    if(currency!=="USD"){
+      reasons.push("NO_SHADOWBAN_REQUIRES_USD_PRICE");
+    }else if(
+      !Number.isFinite(unitSource)||
+      unitSource<=0||
+      unitSource>settings.max_no_shadowban_unit_price_usd
+    ){
+      reasons.push("NO_SHADOWBAN_UNIT_PRICE_ABOVE_USD_LIMIT");
+    }
   }
 
   let sellerQuality:ProductQualification["seller_quality"]="unavailable";
@@ -119,6 +146,7 @@ export function qualifyHstoraProduct(
 
   return {
     qualified:reasons.length===0,
+    procurement_class:procurementClass,
     unit_price_source:unitSource,
     unit_price_jpy:unitJpy,
     stock:Number(product.stock_available??0),
