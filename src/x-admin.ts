@@ -1,5 +1,6 @@
 import type { Env } from "./types";
 import { loadXSettings, saveXSettings, type XSettings } from "./x-settings";
+import { fundingModeLabel, isBinanceAutoFundingServerEnabled } from "./x-funding-mode";
 import {
   inventorySummary,
   listAuditLogs,
@@ -46,7 +47,7 @@ async function requestJson(request:Request){
 }
 
 const DIRECT_EDITABLE_SETTING_KEYS=new Set<keyof XSettings>([
-  "dry_run","emergency_stop","auto_purchase_enabled","auto_procurement_enabled",
+  "dry_run","emergency_stop","auto_purchase_enabled","auto_procurement_enabled","funding_mode",
   "reserve_jpy","max_purchase_jpy","daily_purchase_limit_jpy",
   "weekly_purchase_limit_jpy","monthly_purchase_limit_jpy","min_purchase_jpy",
   "target_ltc_balance","max_ltc_balance","wallet_target_ltc","wallet_max_ltc",
@@ -132,6 +133,49 @@ export async function handleXAdminApi(
     request.method==="POST"
   ){
     return json(await runLtcAutoPurchase(env));
+  }
+
+  if(url.pathname==="/api/x/funding/mode"&&request.method==="POST"){
+    const raw=await requestJson(request);
+    const mode=String(raw?.mode??"");
+    if(mode!=="manual_hstora"&&mode!=="binance_auto"){
+      return json({error:"INVALID_FUNDING_MODE"},400);
+    }
+    if(mode==="binance_auto"&&!isBinanceAutoFundingServerEnabled(env)){
+      return json({
+        error:"BINANCE_AUTO_FUNDING_SERVER_LOCKED",
+        message:"BINANCE_AUTO_FUNDING_ENABLED must be true before Binance funding can be selected."
+      },409);
+    }
+    const patch:Partial<XSettings>={funding_mode:mode};
+    if(mode==="manual_hstora"){
+      Object.assign(patch,{
+        auto_purchase_enabled:false,
+        pending_paypay_funding_jpy:0,
+        pending_paypay_jpy_deposit_required_jpy:0,
+        pending_paypay_jpy_credit_required_jpy:0,
+        pending_paypay_direct_ltc_budget_jpy:0,
+        pending_paypay_path_amounts_captured:false,
+        pending_paypay_binance_jpy_baseline:0,
+        pending_paypay_binance_ltc_baseline:0,
+        pending_paypay_required_ltc:0,
+        pending_paypay_ltc_baseline_captured:false,
+        pending_paypay_requested_at:0
+      });
+    }
+    const settings=await saveXSettings(env,patch);
+    await auditX(env,{
+      kind:"FUNDING_MODE_CHANGED",
+      message:"Funding mode changed by admin.",
+      details:{mode,binanceServerUnlocked:isBinanceAutoFundingServerEnabled(env)}
+    });
+    return json({
+      ok:true,
+      fundingMode:settings.funding_mode,
+      fundingModeLabel:fundingModeLabel(settings.funding_mode),
+      binanceAutoFundingServerEnabled:isBinanceAutoFundingServerEnabled(env),
+      settings:publicSettings(settings)
+    });
   }
 
   if(url.pathname==="/api/x/products"&&request.method==="GET"){
@@ -232,6 +276,8 @@ export async function handleXAdminApi(
       const status=
         code==="NO_PENDING_DIRECT_LTC_CONFIRMATION"?409:
         code==="LTC_BALANCE_INCREASE_NOT_DETECTED"?409:
+        code==="BINANCE_FUNDING_MODE_INACTIVE"?409:
+        code==="BINANCE_AUTO_FUNDING_SERVER_LOCKED"?409:
         500;
       return json({error:code},status);
     }
@@ -323,6 +369,9 @@ export async function handleXAdminApi(
       safety:{
         dryRun:settings.dry_run,
         emergencyStop:settings.emergency_stop,
+        fundingMode:settings.funding_mode,
+        fundingModeLabel:fundingModeLabel(settings.funding_mode),
+        binanceAutoFundingServerEnabled:isBinanceAutoFundingServerEnabled(env),
         autoPurchaseEnabled:settings.auto_purchase_enabled,
         autoProcurementEnabled:settings.auto_procurement_enabled
       }
