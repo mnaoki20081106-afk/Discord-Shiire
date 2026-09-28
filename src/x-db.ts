@@ -343,6 +343,20 @@ export async function upsertSupplierProduct(env:Env,input:{
     JSON.stringify(redact(input.structured??{})),JSON.stringify(input.qualification??{}),
     input.procurementClass??null,input.qualified?1:0,now,now,now
   ).run();
+
+  if(input.procurementClass){
+    await env.DB.batch([
+      env.DB.prepare(
+        "UPDATE purchase_orders SET procurement_class=? "+
+        "WHERE supplier=? AND supplier_product_id=? AND procurement_class IS NULL"
+      ).bind(input.procurementClass,input.supplier,input.supplierProductId),
+      env.DB.prepare(
+        "UPDATE purchased_accounts SET procurement_class=? "+
+        "WHERE supplier=? AND supplier_product_id=? AND procurement_class IS NULL"
+      ).bind(input.procurementClass,input.supplier,input.supplierProductId)
+    ]);
+  }
+
   return id;
 }
 
