@@ -119,6 +119,15 @@ export async function handleXAdminApi(
       if(current.emergency_stop===true&&patch.emergency_stop===false){
         return json({error:"USE_EMERGENCY_STOP_RESET_ENDPOINT"},409);
       }
+      if(
+        patch.funding_mode==="binance_auto"&&
+        !isBinanceAutoFundingServerEnabled(env)
+      ){
+        return json({
+          error:"BINANCE_AUTO_FUNDING_SERVER_LOCKED",
+          message:"BINANCE_AUTO_FUNDING_ENABLED must be true before Binance funding can be selected."
+        },409);
+      }
       const settings=await saveXSettings(env,patch);
       return json({ok:true,settings:publicSettings(settings)});
     }
@@ -328,15 +337,22 @@ export async function handleXAdminApi(
   if(url.pathname==="/api/x/dashboard"&&request.method==="GET"){
     const now=Date.now();
     const dayStart=jstPeriodStarts(now).day;
-    const [settings,inventory,today,funding,hstora,market,ltc,jpy,circuitBreakers,recentLogs]=await Promise.all([
-      loadXSettings(env),
+    const settings=await loadXSettings(env);
+    const binanceActive=
+      settings.funding_mode==="binance_auto"&&
+      isBinanceAutoFundingServerEnabled(env);
+    const inactiveBinance=Promise.resolve({
+      ok:false as const,
+      error:"BINANCE_FUNDING_INACTIVE"
+    });
+    const [inventory,today,funding,hstora,market,ltc,jpy,circuitBreakers,recentLogs]=await Promise.all([
       inventorySummary(env),
       todayPurchaseStats(env,dayStart),
       settled(()=>getFundingPlan(env,now)),
       settled(()=>getHstoraBalance(env)),
-      settled(()=>getLtcJpyMarketStatus()),
-      settled(()=>getBinanceBalance(env,"LTC")),
-      settled(()=>getBinanceBalance(env,"JPY")),
+      binanceActive?settled(()=>getLtcJpyMarketStatus()):inactiveBinance,
+      binanceActive?settled(()=>getBinanceBalance(env,"LTC")):inactiveBinance,
+      binanceActive?settled(()=>getBinanceBalance(env,"JPY")):inactiveBinance,
       listOpenCircuitBreakers(env),
       listAuditLogs(env,50)
     ]);
