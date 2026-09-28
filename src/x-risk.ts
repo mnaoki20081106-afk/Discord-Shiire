@@ -139,7 +139,7 @@ export type ManualPayPayCompletion="NONE"|"JPY_FUNDED"|"LTC_PURCHASED";
 
 export function detectManualPayPayCompletion(input:{
   pendingReservationJpy:number;
-  jpyDepositRequiredJpy:number;
+  jpyCreditRequiredJpy:number;
   binanceJpyBaseline:number;
   binanceLtcBaseline:number;
   ltcBaselineCaptured:boolean;
@@ -168,7 +168,7 @@ export function detectManualPayPayCompletion(input:{
     return "LTC_PURCHASED";
   }
 
-  const jpyNeeded=Math.max(0,input.jpyDepositRequiredJpy);
+  const jpyNeeded=Math.max(0,input.jpyCreditRequiredJpy);
   if(jpyNeeded>0){
     const expectedJpy=Math.max(0,input.binanceJpyBaseline)+jpyNeeded;
     if(input.currentBinanceJpy>=expectedJpy){
