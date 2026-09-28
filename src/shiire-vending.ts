@@ -331,6 +331,26 @@ async function sendDeliveryMessage(
   return response.json() as Promise<{id:string}>;
 }
 
+async function persistDeliverySent(
+  env:Env,
+  orderId:string,
+  channelId:string,
+  messageId:string
+){
+  let lastError:unknown=null;
+  for(let attempt=0;attempt<3;attempt++){
+    try{
+      await markShiireDeliverySent(env,orderId,channelId,messageId);
+      return;
+    }catch(error){
+      lastError=error;
+    }
+  }
+  throw lastError instanceof Error
+    ?lastError
+    :new Error("DELIVERY_SENT_STATE_WRITE_FAILED");
+}
+
 async function deliverOrder(env:Env,order:ShiireVendingOrder):Promise<boolean>{
   if(order.status==="delivery_sent"){
     await finishShiireDelivery(env,order);
@@ -366,7 +386,7 @@ async function deliverOrder(env:Env,order:ShiireVendingOrder):Promise<boolean>{
     };
     const message=await sendDeliveryMessage(env,dm.id,order,deliveryText,embed);
     sent=true;
-    await markShiireDeliverySent(env,order.id,dm.id,message.id);
+    await persistDeliverySent(env,order.id,dm.id,message.id);
 
     if(machine.role_id){
       await discordFetch(
