@@ -572,7 +572,7 @@ Existing purchased accounts are backfilled into the new procurement classes when
 
 初回に必要な外部設定:
 
-1. `npm run deploy` または Cloudflare Workers Builds で Discord-Shiire をデプロイし、実際の Worker HTTPS origin を確認する。
+1. 推奨: `Discord-Bot-Factory` でこのリポジトリを選び、`bot-factory.json` のフォームから起動する。Factoryを使わない場合だけ `npm run deploy` または Cloudflare Workers Builds でデプロイする。デプロイ後、実際の Worker HTTPS origin を確認する。
 2. Xaccount-Bot Worker に `SHIIRE_API_BASE_URL=<Discord-Shiireの実URL>` を設定する。
 3. Discord-Shiire Worker に `XACCOUNT_BOT_BASE_URL=<Xaccount-Botの実URL>` を設定する。
 4. 両Workerに同一の32文字以上の `SHIIRE_BRIDGE_SECRET` を Secret として設定する。
@@ -582,3 +582,12 @@ Existing purchased accounts are backfilled into the new procurement classes when
 8. Xaccount-Bot の GitHub Repository Variable `VITE_API_BASE_URL` を実際の Xaccount-Bot Worker origin に設定する。
 
 なお、現在のXアカウント仕入れフローでは HStora Main Wallet へのLTC入金は手動境界です。Binance出金APIの安全チェック実装はありますが、HStoraの入金先を公式APIから取得できないため、自動仕入れエンジンから出金関数を呼びません。専用LTC Walletも未接続です。
+
+
+### Discord-Bot-Factory
+
+`bot-factory.json` を追加済みです。Factoryフォームでは、Discord-ShiireのDiscord資格情報、Xaccount-Bot Worker URL、共通Bridge Secret、Binance取引API、HStora APIを入力します。
+
+`ADMIN_TOKEN` と `CREDENTIALS_ENCRYPTION_KEY` はFactoryが安全なランダム値を生成し、同じリポジトリ + Cloudflareアカウントへの再デプロイ時にも再利用します。
+
+Binance出金用APIキー・固定送信元IP確認・Travel Rule JSONは現在の仕入れフローでは任意です。HStoraへのLTC入金が手動境界のため、出金自動化を接続するまでは設定しないでください。
