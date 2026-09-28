@@ -1,5 +1,6 @@
 import type { Env } from "./types";
 import { hmacHex, sha256Hex } from "./crypto";
+import { deliveryNonce, paymentMethodEnabled, paymentPrice } from "./shiire-vending-policy";
 import { receiveMainPayment, getMainPaymentStatus } from "./main-bot";
 import {
   ensureShiireVendingSchema,
@@ -296,7 +297,7 @@ async function sendDeliveryMessage(
   content:string,
   embed:unknown
 ){
-  const nonce=("svd"+order.id.replace(/[^A-Za-z0-9]/g,"")).slice(0,25);
+  const nonce=deliveryNonce(order.id);
   if(content.length<=1800){
     return sendJsonMessage(env,channelId,{
       content,
@@ -465,13 +466,13 @@ function selectOptions(
   method:"paypay"|"kyash"
 ){
   return products
-    .filter(product=>product.stock_count>0)
+    .filter(product=>product.stock_count>0&&paymentMethodEnabled(product,method))
     .slice(0,25)
     .map(product=>({
       label:product.name.slice(0,100),
       value:product.id,
       description:(
-        (method==="kyash"?product.price_kyash:product.price_paypay)+
+        paymentPrice(product,method)+
         "円 / 在庫 "+product.stock_count
       ).slice(0,100),
       ...(product.emoji?{emoji:{name:product.emoji}}:{})
@@ -492,11 +493,26 @@ export async function handleShiireVendingInteraction(
       const machine=await getShiireMachine(env,machineId);
       if(!machine) return interactionResponse(ephemeral("自販機が見つかりません。"));
       const payment=await getMainPaymentStatus(env).catch(()=>({paypay:false,kyash:false}));
+      const products=await listShiireProducts(env,machineId);
       const options=[];
-      if(payment.paypay) options.push({label:"PayPay",value:"paypay",emoji:{name:"💴"}});
-      if(payment.kyash) options.push({label:"Kyash",value:"kyash",emoji:{name:"💳"}});
+      if(
+        payment.paypay&&
+        products.some(product=>product.stock_count>0&&paymentMethodEnabled(product,"paypay"))
+      ){
+        options.push({label:"PayPay",value:"paypay",emoji:{name:"💴"}});
+      }
+      if(
+        payment.kyash&&
+        products.some(product=>product.stock_count>0&&paymentMethodEnabled(product,"kyash"))
+      ){
+        options.push({label:"Kyash",value:"kyash",emoji:{name:"💳"}});
+      }
       if(!options.length){
-        return interactionResponse(ephemeral("現在、販売者の決済設定が利用できません。"));
+        return interactionResponse(ephemeral(
+          products.some(product=>product.stock_count>0)
+            ?"現在利用できる決済方法がありません。商品価格と販売者の決済設定を確認してください。"
+            :"現在購入できる在庫がありません。"
+        ));
       }
       return interactionResponse(ephemeral(
         "決済方法を選択してください。",
@@ -646,6 +662,9 @@ export async function handleShiireVendingInteraction(
       const product=await getShiireProduct(env,productId);
       if(!machine||!product||product.vending_machine_id!==machine.id){
         return interactionResponse(ephemeral("商品が見つかりません。"));
+      }
+      if(!paymentMethodEnabled(product,method)){
+        return interactionResponse(ephemeral("この商品では選択した決済方法は利用できません。"));
       }
       if(String(interaction.guild_id??"")!==machine.guild_id){
         return interactionResponse(ephemeral("このサーバーの自販機ではありません。"));
