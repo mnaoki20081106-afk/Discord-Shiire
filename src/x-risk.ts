@@ -161,6 +161,24 @@ export function planManualPayPayPaths(input:{
   };
 }
 
+export function nextObservedPayPayBalance(input:{
+  observedBalanceJpy:number;
+  observedAt:number;
+  pendingRequestedAt:number;
+  confirmedSpendJpy:number;
+}):number{
+  const observed=Math.floor(finiteNonNegative(input.observedBalanceJpy));
+  // A newer manual observation already reflects the post-operation balance.
+  // Do not subtract the same spend a second time.
+  if(
+    finiteNonNegative(input.observedAt)>
+    finiteNonNegative(input.pendingRequestedAt)
+  ){
+    return observed;
+  }
+  return Math.max(0,observed-Math.floor(finiteNonNegative(input.confirmedSpendJpy)));
+}
+
 export function splitPurchaseBatches(quantity:number,maxBatch:number):number[]{
   const total=Math.max(0,Math.floor(quantity));
   const cap=Math.max(1,Math.floor(maxBatch));
@@ -175,7 +193,7 @@ export function splitPurchaseBatches(quantity:number,maxBatch:number):number[]{
 }
 
 
-export type ManualPayPayCompletion="NONE"|"JPY_FUNDED"|"LTC_PURCHASED";
+export type ManualPayPayCompletion="NONE"|"JPY_FUNDED"|"LTC_INCREASE_DETECTED";
 
 export function detectManualPayPayCompletion(input:{
   pendingReservationJpy:number;
@@ -208,7 +226,7 @@ export function detectManualPayPayCompletion(input:{
     directLtcBudgetJpy>0&&
     ltcIncreased
   ){
-    return "LTC_PURCHASED";
+    return "LTC_INCREASE_DETECTED";
   }
 
   const jpyNeeded=Math.max(0,input.jpyCreditRequiredJpy);
