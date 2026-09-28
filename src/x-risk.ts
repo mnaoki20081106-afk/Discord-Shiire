@@ -68,6 +68,59 @@ export function calculateFundingAllowance(input:FundingLimits):FundingAllowance{
   return {allowedJpy:allowed,components,blockedReason:null};
 }
 
+export function calculateLtcPurchaseAllowance(
+  input:Omit<FundingLimits,"reserveJpy"|"paypayBalanceJpy">
+):FundingAllowance{
+  const maxPurchase=finiteNonNegative(input.maxPurchaseJpy);
+  const daily=finiteNonNegative(input.dailyRemainingJpy);
+  const weekly=finiteNonNegative(input.weeklyRemainingJpy);
+  const monthly=finiteNonNegative(input.monthlyRemainingJpy);
+  const ltcPrice=finiteNonNegative(input.ltcJpy);
+  const targetGapLtc=finiteNonNegative(input.targetLtcBalance-input.currentLtc);
+  const maxGapLtc=finiteNonNegative(input.maxLtcBalance-input.currentLtc);
+  const targetGapJpy=ltcPrice>0?Math.floor(targetGapLtc*ltcPrice):0;
+  const maxGapJpy=ltcPrice>0?Math.floor(maxGapLtc*ltcPrice):0;
+  const components={
+    max_purchase_jpy:Math.floor(maxPurchase),
+    daily_remaining_jpy:Math.floor(daily),
+    weekly_remaining_jpy:Math.floor(weekly),
+    monthly_remaining_jpy:Math.floor(monthly),
+    target_ltc_gap_jpy:targetGapJpy,
+    max_ltc_gap_jpy:maxGapJpy
+  };
+
+  if(ltcPrice<=0) return {allowedJpy:0,components,blockedReason:"LTC_PRICE_UNAVAILABLE"};
+  if(input.maxLtcBalance<=0) return {allowedJpy:0,components,blockedReason:"MAX_LTC_BALANCE_NOT_CONFIGURED"};
+  if(input.currentLtc>=input.maxLtcBalance){
+    return {allowedJpy:0,components,blockedReason:"MAX_LTC_BALANCE_REACHED"};
+  }
+  if(input.targetLtcBalance<=input.currentLtc){
+    return {allowedJpy:0,components,blockedReason:"TARGET_LTC_BALANCE_REACHED"};
+  }
+
+  const allowed=Math.floor(Math.min(
+    maxPurchase,daily,weekly,monthly,targetGapJpy,maxGapJpy
+  ));
+  if(allowed<=0) return {allowedJpy:0,components,blockedReason:"NO_PURCHASE_ALLOWANCE"};
+  if(allowed<finiteNonNegative(input.minPurchaseJpy)){
+    return {allowedJpy:0,components,blockedReason:"BELOW_MIN_PURCHASE"};
+  }
+  return {allowedJpy:allowed,components,blockedReason:null};
+}
+
+export function calculateSpendablePayPayJpy(input:{
+  observedBalanceJpy:number;
+  reserveJpy:number;
+  pendingReservationJpy?:number;
+}):number{
+  return Math.floor(Math.max(
+    0,
+    finiteNonNegative(input.observedBalanceJpy)-
+    finiteNonNegative(input.reserveJpy)-
+    finiteNonNegative(input.pendingReservationJpy??0)
+  ));
+}
+
 export function splitPurchaseBatches(quantity:number,maxBatch:number):number[]{
   const total=Math.max(0,Math.floor(quantity));
   const cap=Math.max(1,Math.floor(maxBatch));
