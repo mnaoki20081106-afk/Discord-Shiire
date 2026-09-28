@@ -1,7 +1,33 @@
 import type { Env } from "./types";
 import { hmacHex, sha256Hex } from "./crypto";
 import { loadXSettings, saveXSettings } from "./x-settings";
+import { getFundingPlan, jstPeriodStarts } from "./x-funding";
+import {
+  getBinanceApiRestrictions,
+  getBinanceBalance,
+  getBinanceLtcCoinInfo,
+  getBinanceWithdrawalSafetyStatus,
+  getLtcJpyMarketStatus
+} from "./providers/binance";
+import {
+  getHstoraBalance,
+  listHstoraCatalog
+} from "./providers/hstora";
+import { DisabledHotWalletProvider } from "./providers/manual";
 import { deliveryNonce, paymentMethodEnabled, paymentPrice } from "./shiire-vending-policy";
+import {
+  inventorySummary,
+  inventoryClassSummary,
+  purchaseStatsByClass,
+  purchaseOrderStatusSummary,
+  todayPurchaseStats,
+  listPurchaseOrders,
+  listAuditLogs,
+  listOpenCircuitBreakers,
+  listSupplierProducts,
+  recentFundingEvents,
+  recentCryptoTransactions
+} from "./x-db";
 import { receiveMainPayment, getMainPaymentStatus } from "./main-bot";
 import {
   ensureShiireVendingSchema,
@@ -58,6 +84,154 @@ export class ShiireVendingError extends Error{
     this.name="ShiireVendingError";
     this.status=status;
   }
+}
+
+async function operationSettled<T>(fn:()=>Promise<T>){
+  try{return {ok:true as const,data:await fn()};}
+  catch(error){
+    return {
+      ok:false as const,
+      error:error instanceof Error?error.message:String(error)
+    };
+  }
+}
+
+function safeProcurementSettings(settings:Awaited<ReturnType<typeof loadXSettings>>){
+  return {
+    dry_run:settings.dry_run,
+    emergency_stop:settings.emergency_stop,
+    auto_purchase_enabled:settings.auto_purchase_enabled,
+    auto_procurement_enabled:settings.auto_procurement_enabled,
+    reserve_jpy:settings.reserve_jpy,
+    max_purchase_jpy:settings.max_purchase_jpy,
+    daily_purchase_limit_jpy:settings.daily_purchase_limit_jpy,
+    weekly_purchase_limit_jpy:settings.weekly_purchase_limit_jpy,
+    monthly_purchase_limit_jpy:settings.monthly_purchase_limit_jpy,
+    min_purchase_jpy:settings.min_purchase_jpy,
+    target_ltc_balance:settings.target_ltc_balance,
+    max_ltc_balance:settings.max_ltc_balance,
+    wallet_target_ltc:settings.wallet_target_ltc,
+    wallet_max_ltc:settings.wallet_max_ltc,
+    max_unit_price_jpy:settings.max_unit_price_jpy,
+    max_no_shadowban_unit_price_usd:settings.max_no_shadowban_unit_price_usd,
+    reorder_point:settings.reorder_point,
+    target_stock:settings.target_stock,
+    no_shadowban_reorder_point:settings.no_shadowban_reorder_point,
+    no_shadowban_target_stock:settings.no_shadowban_target_stock,
+    trial_purchase_count:settings.trial_purchase_count,
+    max_batch_purchase:settings.max_batch_purchase,
+    observed_paypay_balance_jpy:settings.observed_paypay_balance_jpy,
+    observed_paypay_balance_at:settings.observed_paypay_balance_at,
+    pending_paypay_funding_jpy:settings.pending_paypay_funding_jpy,
+    usd_jpy_rate:settings.usd_jpy_rate,
+    usd_jpy_rate_updated_at:settings.usd_jpy_rate_updated_at,
+    bulk_approval_until:settings.bulk_approval_until
+  };
+}
+
+async function operationsOverview(env:Env){
+  const now=Date.now();
+  const settings=await loadXSettings(env);
+  const dayStart=jstPeriodStarts(now).day;
+  const hotWallet=new DisabledHotWalletProvider();
+
+  const [
+    funding,
+    hstora,
+    market,
+    ltc,
+    jpy,
+    withdrawalSafety,
+    hotWalletHealth,
+    hotWalletBalance,
+    inventory,
+    inventoryByClass,
+    today,
+    todayByClass,
+    orderStatuses,
+    breakers,
+    logs,
+    recentOrders
+  ]=await Promise.all([
+    operationSettled(()=>getFundingPlan(env,now)),
+    operationSettled(()=>getHstoraBalance(env)),
+    operationSettled(()=>getLtcJpyMarketStatus()),
+    operationSettled(()=>getBinanceBalance(env,"LTC")),
+    operationSettled(()=>getBinanceBalance(env,"JPY")),
+    operationSettled(()=>getBinanceWithdrawalSafetyStatus(env)),
+    hotWallet.health(),
+    hotWallet.getBalance("LTC"),
+    inventorySummary(env),
+    inventoryClassSummary(env),
+    todayPurchaseStats(env,dayStart),
+    purchaseStatsByClass(env,dayStart),
+    purchaseOrderStatusSummary(env),
+    listOpenCircuitBreakers(env),
+    listAuditLogs(env,40),
+    listPurchaseOrders(env,12)
+  ]);
+
+  const recentErrors=(logs as any[])
+    .filter(row=>String(row.level)==="error")
+    .slice(0,8);
+  const latestActivity=(logs as any[])[0]??null;
+
+  return {
+    generatedAt:now,
+    safety:{
+      dryRun:settings.dry_run,
+      emergencyStop:settings.emergency_stop,
+      autoPurchaseEnabled:settings.auto_purchase_enabled,
+      autoProcurementEnabled:settings.auto_procurement_enabled
+    },
+    settings:safeProcurementSettings(settings),
+    funding,
+    market,
+    balances:{
+      hstora,
+      binanceLtc:ltc,
+      binanceJpy:jpy,
+      hotWallet:{
+        health:hotWalletHealth,
+        balanceLtc:hotWalletBalance
+      }
+    },
+    withdrawalSafety,
+    inventory,
+    inventoryByClass,
+    today:{
+      ...today,
+      byClass:todayByClass,
+      approximateJpy:
+        settings.usd_jpy_rate>0&&
+        settings.usd_jpy_rate_updated_at>0&&
+        now-settings.usd_jpy_rate_updated_at<=settings.max_fx_age_ms
+          ?today.amount*settings.usd_jpy_rate
+          :null,
+      approximateAverageJpy:
+        settings.usd_jpy_rate>0&&
+        settings.usd_jpy_rate_updated_at>0&&
+        now-settings.usd_jpy_rate_updated_at<=settings.max_fx_age_ms
+          ?today.average*settings.usd_jpy_rate
+          :null
+    },
+    orderStatuses,
+    circuitBreakers:breakers,
+    recentErrors,
+    latestActivity,
+    recentOrders,
+    integrations:{
+      binanceTradeConfigured:Boolean(env.BINANCE_API_KEY&&env.BINANCE_API_SECRET),
+      binanceWithdrawConfigured:Boolean(
+        env.BINANCE_WITHDRAW_API_KEY&&env.BINANCE_WITHDRAW_API_SECRET
+      ),
+      hstoraConfigured:Boolean(env.HSTORA_API_KEY&&env.HSTORA_API_SECRET),
+      hstoraWebhookConfigured:Boolean(env.HSTORA_WEBHOOK_SECRET),
+      credentialsEncryptionConfigured:Boolean(env.CREDENTIALS_ENCRYPTION_KEY),
+      discordNotifyConfigured:Boolean(env.DISCORD_NOTIFY_WEBHOOK_URL),
+      dedicatedHotWallet:"disabled"
+    }
+  };
 }
 
 function responseJson(data:unknown,status=200){
@@ -886,6 +1060,65 @@ export async function handleShiireMainBridge(
           "&permissions=268487680&integration_type=0&scope=bot%20applications.commands"
         :null
     });
+  }
+
+  if(suffix==="/operations/overview"&&request.method==="GET"){
+    return responseJson(await operationsOverview(env));
+  }
+
+  if(suffix==="/operations/binance"&&request.method==="GET"){
+    const [market,restrictions,ltc,jpy,coinInfo,withdrawalSafety]=await Promise.all([
+      operationSettled(()=>getLtcJpyMarketStatus()),
+      operationSettled(()=>getBinanceApiRestrictions(env)),
+      operationSettled(()=>getBinanceBalance(env,"LTC")),
+      operationSettled(()=>getBinanceBalance(env,"JPY")),
+      operationSettled(()=>getBinanceLtcCoinInfo(env)),
+      operationSettled(()=>getBinanceWithdrawalSafetyStatus(env))
+    ]);
+    return responseJson({
+      market,
+      restrictions,
+      balances:{ltc,jpy},
+      coinInfo,
+      withdrawalSafety
+    });
+  }
+
+  if(suffix==="/operations/hstora"&&request.method==="GET"){
+    const [balance,catalog]=await Promise.all([
+      operationSettled(()=>getHstoraBalance(env)),
+      operationSettled(()=>listHstoraCatalog(env,1,20))
+    ]);
+    return responseJson({
+      balance,
+      catalog,
+      cachedProducts:await listSupplierProducts(env,false)
+    });
+  }
+
+  if(suffix==="/operations/inventory"&&request.method==="GET"){
+    return responseJson({
+      summary:await inventorySummary(env),
+      byClass:await inventoryClassSummary(env),
+      supplierProducts:await listSupplierProducts(env,false)
+    });
+  }
+
+  if(suffix==="/operations/orders"&&request.method==="GET"){
+    return responseJson({
+      statusSummary:await purchaseOrderStatusSummary(env),
+      orders:await listPurchaseOrders(env,200)
+    });
+  }
+
+  if(suffix==="/operations/logs"&&request.method==="GET"){
+    const [logs,breakers,fundingEvents,cryptoTransactions]=await Promise.all([
+      listAuditLogs(env,200),
+      listOpenCircuitBreakers(env),
+      recentFundingEvents(env,60),
+      recentCryptoTransactions(env,60)
+    ]);
+    return responseJson({logs,breakers,fundingEvents,cryptoTransactions});
   }
 
   if(suffix==="/procurement-settings"){
