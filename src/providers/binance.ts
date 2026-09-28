@@ -5,12 +5,21 @@ const BASE_URL="https://api.binance.com";
 const SYMBOL="LTCJPY";
 
 export class BinanceApiError extends Error{
+  status:number;
+  code:string;
+  retryable:boolean;
+
   constructor(
-    public status:number,
-    public code:string,
-    public retryable:boolean,
+    status:number,
+    code:string,
+    retryable:boolean,
     message:string
-  ){super(message);}
+  ){
+    super(message);
+    this.status=status;
+    this.code=code;
+    this.retryable=retryable;
+  }
 }
 
 type ExchangeInfo={
