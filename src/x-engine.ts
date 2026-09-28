@@ -537,15 +537,18 @@ async function handleHstoraFundingNeed(
 
   if(settings.pending_paypay_funding_jpy>0){
     const pathAmountsCaptured=settings.pending_paypay_path_amounts_captured;
-    const jpyDepositRequired=pathAmountsCaptured
+    const jpyDepositGross=pathAmountsCaptured
       ?settings.pending_paypay_jpy_deposit_required_jpy
+      :settings.pending_paypay_funding_jpy;
+    const jpyCreditRequired=pathAmountsCaptured
+      ?settings.pending_paypay_jpy_credit_required_jpy
       :settings.pending_paypay_funding_jpy;
     const directLtcBudget=pathAmountsCaptured
       ?settings.pending_paypay_direct_ltc_budget_jpy
       :0;
     const completion=detectManualPayPayCompletion({
       pendingReservationJpy:settings.pending_paypay_funding_jpy,
-      jpyDepositRequiredJpy:jpyDepositRequired,
+      jpyCreditRequiredJpy:jpyCreditRequired,
       binanceJpyBaseline:settings.pending_paypay_binance_jpy_baseline,
       binanceLtcBaseline:settings.pending_paypay_binance_ltc_baseline,
       ltcBaselineCaptured:settings.pending_paypay_ltc_baseline_captured,
@@ -553,13 +556,12 @@ async function handleHstoraFundingNeed(
       currentBinanceLtc:ltcFree,
       requiredLtcAtRequest:settings.pending_paypay_required_ltc
     });
-    const jpyFundingDetected=completion==="JPY_FUNDED";
     const ltcPurchaseDetected=completion==="LTC_PURCHASED";
 
     if(completion!=="NONE"){
       const confirmedSpend=ltcPurchaseDetected
         ?directLtcBudget
-        :jpyDepositRequired;
+        :jpyDepositGross;
       if(confirmedSpend<=0){
         await setCircuitBreaker(
           env,
@@ -583,6 +585,7 @@ async function handleHstoraFundingNeed(
         ),
         pending_paypay_funding_jpy:0,
         pending_paypay_jpy_deposit_required_jpy:0,
+        pending_paypay_jpy_credit_required_jpy:0,
         pending_paypay_direct_ltc_budget_jpy:0,
         pending_paypay_path_amounts_captured:false,
         pending_paypay_binance_jpy_baseline:0,
@@ -602,7 +605,9 @@ async function handleHstoraFundingNeed(
           binanceJpyFree:jpyFree,
           binanceLtcFree:ltcFree,
           binanceLtcBaseline:ltcBaseline,
-          detectedLtcIncrease
+          detectedLtcIncrease,
+          jpyDepositGrossJpy:jpyDepositGross,
+          expectedJpyCreditJpy:jpyCreditRequired
         }
       });
       await auditX(env,{
@@ -616,7 +621,9 @@ async function handleHstoraFundingNeed(
           binanceJpyFree:jpyFree,
           binanceLtcFree:ltcFree,
           binanceLtcBaseline:ltcBaseline,
-          detectedLtcIncrease
+          detectedLtcIncrease,
+          jpyDepositGrossJpy:jpyDepositGross,
+          expectedJpyCreditJpy:jpyCreditRequired
         }
       });
       if(ltcPurchaseDetected){
@@ -632,7 +639,8 @@ async function handleHstoraFundingNeed(
         dryRun:settings.dry_run,
         details:{
           paypayReservationJpy:settings.pending_paypay_funding_jpy,
-          jpyDepositRequiredJpy:jpyDepositRequired,
+          jpyDepositGrossJpy:jpyDepositGross,
+          expectedJpyCreditJpy:jpyCreditRequired,
           directLtcBudgetJpy:directLtcBudget,
           binanceJpyBaseline:settings.pending_paypay_binance_jpy_baseline,
           binanceLtcBaseline:settings.pending_paypay_binance_ltc_baseline,
