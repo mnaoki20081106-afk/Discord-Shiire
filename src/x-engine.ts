@@ -24,6 +24,7 @@ import { loadXSettings, saveXSettings } from "./x-settings";
 import {
   calculateLtcPurchaseAllowance,
   calculateSpendablePayPayJpy,
+  planManualPayPayPaths,
   detectManualPayPayCompletion
 } from "./x-risk";
 import {
@@ -727,20 +728,21 @@ async function handleHstoraFundingNeed(
       observedBalanceJpy:settings.observed_paypay_balance_jpy,
       reserveJpy:settings.reserve_jpy
     });
-    const netJpyCreditNeeded=Math.ceil(Math.max(0,desired-jpyFree));
-    const grossJpyDepositRequired=netJpyCreditNeeded>0
-      ?Math.max(
-        PAYPAY_JPY_DEPOSIT_MIN_GROSS_JPY,
-        netJpyCreditNeeded+PAYPAY_JPY_DEPOSIT_FEE_JPY
-      )
-      :0;
-
-    const jpyDepositAvailable=
-      grossJpyDepositRequired>0&&
-      grossJpyDepositRequired<=spendablePayPay;
-    const directLtcAvailable=
-      desired>=PAYPAY_DIRECT_PURCHASE_MIN_JPY&&
-      desired<=spendablePayPay;
+    const pathPlan=planManualPayPayPaths({
+      desiredPurchaseJpy:desired,
+      currentBinanceJpy:jpyFree,
+      spendablePayPayJpy:spendablePayPay,
+      directPurchaseMinJpy:PAYPAY_DIRECT_PURCHASE_MIN_JPY,
+      jpyDepositMinGrossJpy:PAYPAY_JPY_DEPOSIT_MIN_GROSS_JPY,
+      jpyDepositFeeJpy:PAYPAY_JPY_DEPOSIT_FEE_JPY
+    });
+    const {
+      expectedNetJpyCredit:netJpyCreditNeeded,
+      grossJpyDepositRequired,
+      jpyDepositAvailable,
+      directLtcAvailable,
+      paypayReservationJpy
+    }=pathPlan;
 
     if(!jpyDepositAvailable&&!directLtcAvailable){
       return {
@@ -766,11 +768,6 @@ async function handleHstoraFundingNeed(
         }
       };
     }
-
-    const paypayReservationJpy=Math.max(
-      jpyDepositAvailable?grossJpyDepositRequired:0,
-      directLtcAvailable?desired:0
-    );
 
     settings=await saveXSettings(env,{
       pending_paypay_funding_jpy:paypayReservationJpy,
