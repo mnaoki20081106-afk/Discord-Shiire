@@ -226,7 +226,8 @@
       "notes": [
         "Privileged Gateway Intentsは現在のDiscord-Shiire実装では不要です。",
         "Binance出金キー・固定IP・Travel Rule設定は現在のHStora手動入金境界では不要です。",
-        "初期状態はDry Run=true / auto_purchase_enabled=false / auto_procurement_enabled=falseです。"
+        "初期状態はDry Run=true / auto_purchase_enabled=false / auto_procurement_enabled=falseです。",
+        "在庫通知でロールをpingする場合は、通知対象ロールをDiscord側でメンション可能にしてください。BOTへMention Everyone権限を広く付ける構成にはしていません。"
       ]
     }
   }
