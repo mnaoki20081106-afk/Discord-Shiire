@@ -528,8 +528,16 @@ async function handleHstoraFundingNeed(
   const requiredLtc=requiredJpy/ltcJpy;
 
   if(settings.pending_paypay_funding_jpy>0){
+    const pathAmountsCaptured=settings.pending_paypay_path_amounts_captured;
+    const jpyDepositRequired=pathAmountsCaptured
+      ?settings.pending_paypay_jpy_deposit_required_jpy
+      :settings.pending_paypay_funding_jpy;
+    const directLtcBudget=pathAmountsCaptured
+      ?settings.pending_paypay_direct_ltc_budget_jpy
+      :0;
     const completion=detectManualPayPayCompletion({
-      pendingJpy:settings.pending_paypay_funding_jpy,
+      pendingReservationJpy:settings.pending_paypay_funding_jpy,
+      jpyDepositRequiredJpy:jpyDepositRequired,
       binanceJpyBaseline:settings.pending_paypay_binance_jpy_baseline,
       binanceLtcBaseline:settings.pending_paypay_binance_ltc_baseline,
       ltcBaselineCaptured:settings.pending_paypay_ltc_baseline_captured,
@@ -541,7 +549,21 @@ async function handleHstoraFundingNeed(
     const ltcPurchaseDetected=completion==="LTC_PURCHASED";
 
     if(completion!=="NONE"){
-      const confirmedSpend=settings.pending_paypay_funding_jpy;
+      const confirmedSpend=ltcPurchaseDetected
+        ?directLtcBudget
+        :jpyDepositRequired;
+      if(confirmedSpend<=0){
+        await setCircuitBreaker(
+          env,
+          "paypay_manual",
+          "OPEN",
+          "PENDING_PAYPAY_PATH_AMOUNT_MISSING"
+        );
+        return {
+          action:"PAYPAY_PENDING_STATE_INVALID",
+          dryRun:settings.dry_run
+        };
+      }
       const ltcBaseline=settings.pending_paypay_binance_ltc_baseline;
       const detectedLtcIncrease=ltcPurchaseDetected
         ?Math.max(0,ltcFree-ltcBaseline)
@@ -552,6 +574,9 @@ async function handleHstoraFundingNeed(
           settings.observed_paypay_balance_jpy-confirmedSpend
         ),
         pending_paypay_funding_jpy:0,
+        pending_paypay_jpy_deposit_required_jpy:0,
+        pending_paypay_direct_ltc_budget_jpy:0,
+        pending_paypay_path_amounts_captured:false,
         pending_paypay_binance_jpy_baseline:0,
         pending_paypay_binance_ltc_baseline:0,
         pending_paypay_required_ltc:0,
@@ -598,7 +623,9 @@ async function handleHstoraFundingNeed(
         action:"WAITING_MANUAL_PAYPAY_ACTION",
         dryRun:settings.dry_run,
         details:{
-          requestedMaxSpendJpy:settings.pending_paypay_funding_jpy,
+          paypayReservationJpy:settings.pending_paypay_funding_jpy,
+          jpyDepositRequiredJpy:jpyDepositRequired,
+          directLtcBudgetJpy:directLtcBudget,
           binanceJpyBaseline:settings.pending_paypay_binance_jpy_baseline,
           binanceLtcBaseline:settings.pending_paypay_binance_ltc_baseline,
           requiredLtcAtRequest:settings.pending_paypay_required_ltc,
@@ -681,7 +708,13 @@ async function handleHstoraFundingNeed(
   if(jpyFree<desired){
     const requiredDepositJpy=Math.ceil(desired-jpyFree);
     settings=await saveXSettings(env,{
-      pending_paypay_funding_jpy:requiredDepositJpy,
+      // Reserve the largest PayPay amount that could be spent while this
+      // manual step is pending. The JPY-deposit path may need less because
+      // existing Binance JPY can be reused; the direct-LTC path cannot.
+      pending_paypay_funding_jpy:desired,
+      pending_paypay_jpy_deposit_required_jpy:requiredDepositJpy,
+      pending_paypay_direct_ltc_budget_jpy:desired,
+      pending_paypay_path_amounts_captured:true,
       pending_paypay_binance_jpy_baseline:Math.floor(jpyFree),
       pending_paypay_binance_ltc_baseline:ltcFree,
       pending_paypay_required_ltc:requiredLtc,
@@ -698,13 +731,21 @@ async function handleHstoraFundingNeed(
     await notifyDiscord(env,{
       title:"PayPay手動操作が必要",
       message:"Binance Japanの公式UIで、PayPayからJPYへ即時入金するか、LTCがPayPay購入対象として表示される場合はLTCを直接購入してください。BOTはJPY増加または必要量までのLTC増加を検知して自動再開します。",
-      details:{requestedMaxSpendJpy:requiredDepositJpy,purchaseCeilingJpy:desired,requiredLtc}
+      details:{
+        paypayReservationJpy:desired,
+        jpyDepositRequiredJpy:requiredDepositJpy,
+        directLtcBudgetJpy:desired,
+        purchaseCeilingJpy:desired,
+        requiredLtc
+      }
     }).catch(()=>undefined);
     return {
       action:"MANUAL_PAYPAY_ACTION_REQUIRED",
       dryRun:settings.dry_run,
       details:{
-        requestedMaxSpendJpy:requiredDepositJpy,
+        paypayReservationJpy:desired,
+        jpyDepositRequiredJpy:requiredDepositJpy,
+        directLtcBudgetJpy:desired,
         requiredLtc,
         allowance,
         acceptedManualPaths:[
