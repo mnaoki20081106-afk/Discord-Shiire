@@ -833,7 +833,7 @@ export async function runXProcurement(env:Env):Promise<XRunResult>{
   }
 
   const need=Math.max(0,classTarget-classInventory);
-  const batch=Math.min(need,settings.max_batch_purchase);
+  let batch=Math.min(need,settings.max_batch_purchase);
   if(batch<=0){
     return {
       action:"INVENTORY_OK",
@@ -858,6 +858,37 @@ export async function runXProcurement(env:Env):Promise<XRunResult>{
     }).catch(()=>undefined);
     return {action:"HSTORA_API_BLOCKED",dryRun:settings.dry_run,inventory};
   }
+  const refreshedClassInventory=await readyInventoryCountByClass(
+    env,
+    targetClass
+  );
+  const refreshedReorder=
+    targetClass==="TOP_SEARCH"
+      ?settings.reorder_point
+      :settings.no_shadowban_reorder_point;
+  if(refreshedClassInventory>refreshedReorder){
+    return {
+      action:"INVENTORY_RECLASSIFIED_OK",
+      dryRun:settings.dry_run,
+      inventory:await readyInventoryCount(env),
+      details:{
+        targetClass,
+        before:classInventory,
+        after:refreshedClassInventory
+      }
+    };
+  }
+  const refreshedNeed=Math.max(0,classTarget-refreshedClassInventory);
+  batch=Math.min(refreshedNeed,settings.max_batch_purchase);
+  if(batch<=0){
+    return {
+      action:"INVENTORY_RECLASSIFIED_OK",
+      dryRun:settings.dry_run,
+      inventory:await readyInventoryCount(env),
+      details:{targetClass,classInventory:refreshedClassInventory,classTarget}
+    };
+  }
+
   if(!candidate){
     return {
       action:"NO_QUALIFIED_HSTORA_PRODUCT",
