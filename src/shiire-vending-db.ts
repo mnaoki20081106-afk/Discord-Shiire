@@ -227,7 +227,8 @@ export async function availableShiireAccounts(
   }
   const row=await env.DB.prepare(
     "SELECT COUNT(*) AS count FROM purchased_accounts "+
-    "WHERE supplier_product_id=? AND status='READY_FOR_DELIVERY'"
+    "WHERE supplier_product_id=? AND status='READY_FOR_DELIVERY' "+
+    "AND COALESCE(procurement_class,'')<>'INVITE_CAMPAIGN'"
   ).bind(product.supplier_product_id).first<{count:number}>();
   return Math.max(0,Number(row?.count??0));
 }
@@ -444,6 +445,7 @@ async function reserveAccounts(
     :(await env.DB.prepare(
       "SELECT id FROM purchased_accounts "+
       "WHERE supplier_product_id=? AND status='READY_FOR_DELIVERY' "+
+      "AND COALESCE(procurement_class,'')<>'INVITE_CAMPAIGN' "+
       "ORDER BY purchased_at ASC,id ASC LIMIT ?"
     ).bind(product.supplier_product_id,quantity).all<{id:string}>()).results;
   if(rows.length<quantity) throw new Error("OUT_OF_STOCK");
