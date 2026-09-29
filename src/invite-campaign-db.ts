@@ -1,4 +1,5 @@
 import type { Env } from "./types";
+import { ensureXSchema } from "./x-db";
 import {
   DEFAULT_INVITES_PER_REWARD,
   DEFAULT_INVITE_CAMPAIGN_TARGET_STOCK,
@@ -180,7 +181,10 @@ export async function recordInviteCampaignRuntimeError(env:Env,error:unknown):Pr
 }
 
 export async function inviteCampaignStockCount(env:Env):Promise<number>{
-  await ensureInviteCampaignSchema(env);
+  await Promise.all([
+    ensureInviteCampaignSchema(env),
+    ensureXSchema(env)
+  ]);
   const row=await env.DB.prepare(
     "SELECT COUNT(*) AS count FROM purchased_accounts "+
     "WHERE procurement_class='INVITE_CAMPAIGN' AND status='READY_FOR_DELIVERY'"
