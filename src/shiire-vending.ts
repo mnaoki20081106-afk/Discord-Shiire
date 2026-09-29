@@ -1930,7 +1930,7 @@ export async function notifyShiireVendingStockArrival(
   env:Env,
   supplierProductId:string,
   added:number,
-  addedByClass?:Partial<Record<"TOP_SEARCH"|"NO_SHADOWBAN",number>>
+  addedByClass?:Partial<Record<"TOP_SEARCH"|"NO_SHADOWBAN"|"INVITE_CAMPAIGN",number>>
 ){
   if(added<=0) return;
   const machines=await machinesForSupplierProduct(env,supplierProductId);
@@ -1944,7 +1944,10 @@ export async function notifyShiireVendingStockArrival(
     const addedForMachine=
       machineClass
         ?Math.max(0,Number(addedByClass?.[machineClass]??added))
-        :added;
+        :Math.max(
+          0,
+          added-Math.max(0,Number(addedByClass?.INVITE_CAMPAIGN??0))
+        );
     if(addedForMachine<=0) continue;
 
     const notification=await getShiireStockNotification(env,machine.id);
