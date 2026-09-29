@@ -316,7 +316,7 @@ export async function upsertSupplierProduct(env:Env,input:{
   productUrl?:string;
   structured?:unknown;
   qualification?:unknown;
-  procurementClass?:"TOP_SEARCH"|"NO_SHADOWBAN"|null;
+  procurementClass?:"TOP_SEARCH"|"NO_SHADOWBAN"|"INVITE_CAMPAIGN"|null;
   qualified:boolean;
   seller?:{
     id?:string;name?:string;rating?:number;reviews?:number;sales?:number;disputeRate?:number;
@@ -379,7 +379,7 @@ export async function createPurchaseOrderRecord(env:Env,input:{
   currency:string;
   externalOrderId:string;
   idempotencyKey:string;
-  procurementClass?:"TOP_SEARCH"|"NO_SHADOWBAN"|null;
+  procurementClass?:"TOP_SEARCH"|"NO_SHADOWBAN"|"INVITE_CAMPAIGN"|null;
   deliverySplitMode?:typeof DUAL_TOP_SPLIT_MODE|null;
   dryRun:boolean;
 }){
@@ -432,6 +432,7 @@ export type StoredDeliveryResult={
   byClass:{
     TOP_SEARCH:number;
     NO_SHADOWBAN:number;
+    INVITE_CAMPAIGN:number;
     UNCLASSIFIED:number;
   };
 };
@@ -441,7 +442,7 @@ export async function storeDeliveredAccounts(env:Env,input:{
   supplier:string;
   supplierProductId:string;
   purchasePrice:number;
-  procurementClass?:"TOP_SEARCH"|"NO_SHADOWBAN"|null;
+  procurementClass?:"TOP_SEARCH"|"NO_SHADOWBAN"|"INVITE_CAMPAIGN"|null;
   orderResponse:unknown;
 }):Promise<StoredDeliveryResult>{
   await ensureXSchema(env);
@@ -450,6 +451,7 @@ export async function storeDeliveredAccounts(env:Env,input:{
   const byClass={
     TOP_SEARCH:0,
     NO_SHADOWBAN:0,
+    INVITE_CAMPAIGN:0,
     UNCLASSIFIED:0
   };
   const now=Date.now();
@@ -543,6 +545,8 @@ export async function storeDeliveredAccounts(env:Env,input:{
       }else if(assignedClass==="NO_SHADOWBAN"){
         byClass.NO_SHADOWBAN++;
         if(splitAcrossClasses) splitNoShadowCount++;
+      }else if(assignedClass==="INVITE_CAMPAIGN"){
+        byClass.INVITE_CAMPAIGN++;
       }else{
         byClass.UNCLASSIFIED++;
       }
@@ -681,7 +685,7 @@ export async function listPurchaseOrders(env:Env,limit=100){
 
 export async function readyInventoryCountByClass(
   env:Env,
-  procurementClass:"TOP_SEARCH"|"NO_SHADOWBAN"
+  procurementClass:"TOP_SEARCH"|"NO_SHADOWBAN"|"INVITE_CAMPAIGN"
 ):Promise<number>{
   await ensureXSchema(env);
   const row=await env.DB.prepare(
