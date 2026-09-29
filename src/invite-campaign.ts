@@ -159,6 +159,7 @@ async function recordMemberJoin(
 
   let reason:string|null=null;
   if(!invite||!inviterUserId) reason="INVITER_UNRESOLVED";
+  else if(event.user.bot) reason="BOT_ACCOUNT";
   else if(inviterUserId===event.user.id) reason="SELF_INVITE";
 
   const counted=reason?0:1;
@@ -191,7 +192,7 @@ export async function handleInviteCampaignMemberJoin(
   env:Env,
   event:InviteCampaignMemberEvent
 ):Promise<void>{
-  if(!event?.guild_id||!event.user?.id||event.user.bot) return;
+  if(!event?.guild_id||!event.user?.id) return;
   const settings=await getInviteCampaignSettings(env);
   if(!settings.enabled||settings.guild_id!==event.guild_id) return;
   try{
