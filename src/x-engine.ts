@@ -52,9 +52,9 @@ import {
   type ProcurementClass
 } from "./x-qualification";
 import {
-  PRIMARY_SPLIT_HSTORA_PRODUCT_ID,
+  DUAL_TOP_SPLIT_MODE,
   evenSplitPurchaseQuantity,
-  isPrimarySplitHstoraProduct
+  hasDualTopNoShadowbanEvidence
 } from "./x-procurement-policy";
 import { notifyDiscord } from "./x-alerts";
 import { notifyShiireVendingStockArrival } from "./shiire-vending";
@@ -231,28 +231,9 @@ async function selectCandidate(
   const settings=await loadXSettings(env);
   const approvedIds=
     settings.seller_quality_mode==="manual_product_approval"
-      ?[...new Set([
-        PRIMARY_SPLIT_HSTORA_PRODUCT_ID,
-        ...settings.approved_hstora_product_ids
-      ])]
+      ?settings.approved_hstora_product_ids
       :[];
   const products=await catalogProducts(env,approvedIds);
-  if(!products.some(product=>
-    isPrimarySplitHstoraProduct(product.id)
-  )){
-    try{
-      products.unshift(
-        await getHstoraProduct(env,PRIMARY_SPLIT_HSTORA_PRODUCT_ID)
-      );
-    }catch(error){
-      await auditX(env,{
-        level:"warn",
-        kind:"HSTORA_PRIMARY_PRODUCT_FETCH_FAILED",
-        message:error instanceof Error?error.message:String(error),
-        details:{productId:PRIMARY_SPLIT_HSTORA_PRODUCT_ID,targetClass}
-      });
-    }
-  }
   const candidates:Array<{
     product:HstoraProduct;
     q:ReturnType<typeof qualifyHstoraProduct>;
@@ -268,7 +249,9 @@ async function selectCandidate(
       visibility.labels.includes("TOP+Latest")||
       visibility.labels.includes("TOP Search");
     const hasNoShadow=visibility.labels.includes("No Shadowban");
-    const preferredSplit=isPrimarySplitHstoraProduct(product.id);
+    const dualCapability=hasDualTopNoShadowbanEvidence(
+      visibility.labels
+    );
     const baseJpy=catalogBasePriceJpy(product,settings);
     const baseUsd=
       String(product.currency??"").toUpperCase()==="USD"
@@ -276,24 +259,20 @@ async function selectCandidate(
         :null;
 
     if(targetClass==="TOP_SEARCH"){
-      if(
-        !hasTop&&
-        (baseJpy===null||baseJpy>settings.max_unit_price_jpy)
-      ){
-        continue;
-      }
+      // Fail closed: price is never enough to make a product a TOP_SEARCH
+      // candidate. Explicit positive TOP evidence is mandatory.
+      if(!hasTop) continue;
+      if(baseJpy===null||baseJpy>settings.max_unit_price_jpy) continue;
     }else{
-      // Ordinary listings remain class-exclusive. Product 4841 is explicitly
-      // dual-capability and is allowed to replenish either class because its
-      // delivered credentials are split 50:50 at storage time.
-      if(hasTop&&!preferredSplit) continue;
+      // NO_SHADOWBAN can be replenished from a dual-capability TOP listing
+      // only when both positive evidences are explicit. Other TOP listings are
+      // kept out of this class.
+      if(hasTop&&!dualCapability) continue;
+      if(!hasNoShadow) continue;
       if(
-        !hasNoShadow&&
-        (
-          baseUsd===null||
-          !Number.isFinite(baseUsd)||
-          baseUsd>settings.max_no_shadowban_unit_price_usd
-        )
+        baseUsd===null||
+        !Number.isFinite(baseUsd)||
+        baseUsd>settings.max_no_shadowban_unit_price_usd
       ){
         continue;
       }
@@ -320,31 +299,23 @@ async function selectCandidate(
       priorPurchases===0
         ?settings.trial_purchase_count
         :quantityLimit;
+    const fullVisibility=detectSearchVisibility(full);
+    const fullDualCapability=hasDualTopNoShadowbanEvidence(
+      fullVisibility.labels
+    );
     let plannedQuantity=Math.min(
       quantityLimit,
       Math.max(1,trialCap),
       Math.max(0,Number(full.stock_available??0))
     );
-    if(isPrimarySplitHstoraProduct(full.id)){
+    if(fullDualCapability){
       plannedQuantity=evenSplitPurchaseQuantity(plannedQuantity);
     }
     if(plannedQuantity<=0) continue;
 
-    const qualificationSettings=
-      isPrimarySplitHstoraProduct(full.id)&&
-      settings.seller_quality_mode==="manual_product_approval"&&
-      !settings.approved_hstora_product_ids.includes(PRIMARY_SPLIT_HSTORA_PRODUCT_ID)
-        ?{
-          ...settings,
-          approved_hstora_product_ids:[
-            ...settings.approved_hstora_product_ids,
-            PRIMARY_SPLIT_HSTORA_PRODUCT_ID
-          ]
-        }
-        :settings;
     const q=qualifyHstoraProduct(
       full,
-      qualificationSettings,
+      settings,
       plannedQuantity
     );
     const previous=await getSupplierProductRecord(env,String(full.id));
@@ -406,9 +377,8 @@ async function selectCandidate(
       q.procurement_class===targetClass||
       (
         targetClass==="NO_SHADOWBAN"&&
-        isPrimarySplitHstoraProduct(full.id)&&
         q.procurement_class==="TOP_SEARCH"&&
-        q.search_visibility.includes("No Shadowban")
+        hasDualTopNoShadowbanEvidence(q.search_visibility)
       );
     if(q.qualified&&supportsTarget){
       candidates.push({product:full,q,plannedQuantity,priorPurchases});
@@ -416,10 +386,6 @@ async function selectCandidate(
   }
 
   candidates.sort((a,b)=>{
-    const aPreferred=isPrimarySplitHstoraProduct(a.product.id);
-    const bPreferred=isPrimarySplitHstoraProduct(b.product.id);
-    if(aPreferred!==bPreferred) return aPreferred?-1:1;
-
     const aPrice=
       targetClass==="NO_SHADOWBAN"
         ?Number(a.q.unit_price_source)
@@ -1509,12 +1475,16 @@ export async function runXProcurement(env:Env):Promise<XRunResult>{
   const fresh=await getHstoraProduct(env,Number(candidate.product.id));
   const prior=await successfulPurchaseCountForProduct(env,String(fresh.id));
   const trialCap=prior===0?settings.trial_purchase_count:batch;
+  const freshVisibility=detectSearchVisibility(fresh);
+  const splitAcrossClasses=hasDualTopNoShadowbanEvidence(
+    freshVisibility.labels
+  );
   let quantity=Math.min(
     batch,
     Math.max(1,trialCap),
     Math.max(0,Number(fresh.stock_available??0))
   );
-  if(isPrimarySplitHstoraProduct(fresh.id)){
+  if(splitAcrossClasses){
     quantity=evenSplitPurchaseQuantity(quantity);
   }
   if(quantity<=0){
@@ -1529,26 +1499,13 @@ export async function runXProcurement(env:Env):Promise<XRunResult>{
   // Recalculate the effective tier price using the quantity that will really
   // be ordered. This prevents a 20-unit discount from qualifying a 10-unit
   // trial purchase above the JPY ceiling.
-  const qualificationSettings=
-    isPrimarySplitHstoraProduct(fresh.id)&&
-    settings.seller_quality_mode==="manual_product_approval"&&
-    !settings.approved_hstora_product_ids.includes(PRIMARY_SPLIT_HSTORA_PRODUCT_ID)
-      ?{
-        ...settings,
-        approved_hstora_product_ids:[
-          ...settings.approved_hstora_product_ids,
-          PRIMARY_SPLIT_HSTORA_PRODUCT_ID
-        ]
-      }
-      :settings;
-  const q=qualifyHstoraProduct(fresh,qualificationSettings,quantity);
+  const q=qualifyHstoraProduct(fresh,settings,quantity);
   const supportsTarget=
     q.procurement_class===targetClass||
     (
       targetClass==="NO_SHADOWBAN"&&
-      isPrimarySplitHstoraProduct(fresh.id)&&
       q.procurement_class==="TOP_SEARCH"&&
-      q.search_visibility.includes("No Shadowban")
+      hasDualTopNoShadowbanEvidence(q.search_visibility)
     );
   if(!q.qualified||!supportsTarget){
     await setCircuitBreaker(
@@ -1648,6 +1605,10 @@ export async function runXProcurement(env:Env):Promise<XRunResult>{
     externalOrderId,
     idempotencyKey,
     procurementClass:q.procurement_class,
+    deliverySplitMode:
+      splitAcrossClasses
+        ?DUAL_TOP_SPLIT_MODE
+        :null,
     dryRun:false
   });
 
