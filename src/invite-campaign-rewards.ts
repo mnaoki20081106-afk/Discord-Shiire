@@ -239,7 +239,21 @@ async function deliverReward(
   }catch(error){
     const message=(error instanceof Error?error.message:String(error)).slice(0,500);
     if(error instanceof InviteCampaignDiscordError&&error.status<500){
-      await updateReward(env,reward.id,"DM_FAILED",{error:message});
+      const now=Date.now();
+      if(accountId){
+        await env.DB.batch([
+          env.DB.prepare(
+            "UPDATE purchased_accounts SET status='READY_FOR_DELIVERY' "+
+            "WHERE id=? AND status='INVITE_REWARD_RESERVED'"
+          ).bind(accountId),
+          env.DB.prepare(
+            "UPDATE invite_campaign_rewards SET status='DM_FAILED',account_id=NULL,"+
+            "error=?,updated_at=? WHERE id=?"
+          ).bind(message,now,reward.id)
+        ]);
+      }else{
+        await updateReward(env,reward.id,"DM_FAILED",{error:message});
+      }
       return "DM_FAILED";
     }
     await updateReward(env,reward.id,"DELIVERY_UNCERTAIN",{error:message});
@@ -286,7 +300,7 @@ async function ensureRewards(
 
   const pending=(await env.DB.prepare(
     "SELECT * FROM invite_campaign_rewards WHERE guild_id=? AND inviter_user_id=? "+
-    "AND status IN ('WAITING_STOCK','DM_FAILED') ORDER BY ordinal ASC LIMIT 20"
+    "AND status='WAITING_STOCK' ORDER BY ordinal ASC LIMIT 20"
   ).bind(progress.guild_id,progress.inviter_user_id).all<RewardRow>()).results;
   for(const reward of pending) await deliverReward(env,reward);
 }
@@ -310,7 +324,7 @@ export async function retryInviteCampaignRewards(env:Env){
   if(!settings.enabled) return {attempted:0,delivered:0};
   const rows=(await env.DB.prepare(
     "SELECT * FROM invite_campaign_rewards "+
-    "WHERE status IN ('WAITING_STOCK','DM_FAILED') ORDER BY created_at ASC LIMIT 20"
+    "WHERE status='WAITING_STOCK' ORDER BY created_at ASC LIMIT 20"
   ).all<RewardRow>()).results;
   let delivered=0;
   for(const row of rows){
