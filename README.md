@@ -601,20 +601,29 @@ Requirements:
 - default ceiling: `0.60 USD / account`
 - the configurable ceiling is restricted to `0.50 - 0.60 USD`
 
-### Preferred dual-capability source: HStora product 4841
+### Dynamic cheapest TOP-search source selection
 
-HStora product `4841` is treated as the preferred source when its live API data still explicitly confirms both TOP-search and No-Shadowban evidence and it remains inside the configured safety limits.
+No HStora product ID is hard-coded as the preferred source.
 
-For this product only:
+On every procurement scan, Discord-Shiire fetches the HStora catalog and product details and applies a fail-closed qualification pass before price ranking:
 
-- it may replenish either inventory class
+- the listing must be an X/Twitter account product
+- `TOP Search` or `TOP+Latest` evidence must be explicitly present for TOP-search procurement
+- price alone can never make a listing qualify as TOP-search
+- negated TOP wording such as `No TOP Search` / `TOP Search unavailable` is removed from positive evidence
+- the live product detail is re-qualified again immediately before an order is created
+- only after qualification succeeds are candidates ordered by effective unit price
+
+A listing that explicitly proves **both TOP-search and No Shadowban** is treated as a dual-capability source. These listings are preferred when replenishing the No-Shadowban inventory, so a cheaper No-Shadowban-only listing does not displace an available qualifying TOP-search source.
+
+For every dual-capability source, regardless of HStora product ID:
+
 - new purchase quantities are forced to an even number
 - delivered credentials are stored **50% as `TOP_SEARCH` and 50% as `NO_SHADOWBAN`**
 - delayed/retried HStora delivery reconciliation continues from the already-stored class counts so the final split does not drift
 - class-backed vending products receive only the stock count actually added to their class
-- if product 4841 becomes unavailable, loses required listing evidence, exceeds the configured price ceiling, or otherwise fails qualification, the engine falls back to the normal candidate scan rather than bypassing the safeguards
 
-Other HStora listings that contain both TOP Search and No Shadowban wording remain classified as `TOP_SEARCH` only unless a separate explicit policy is added.
+If no qualifying dual-capability listing is available, the existing No-Shadowban-only candidates remain a fallback rather than causing an unnecessary stock outage.
 
 Each class has independent inventory controls:
 
