@@ -2,7 +2,7 @@ import type { Env } from "./types";
 import { randomId } from "./crypto";
 import { decryptSensitive, type EncryptedSecret } from "./x-crypto";
 import {
-  earnedRewardCount,
+  effectiveEarnedRewardCount,
   remainingUntilNextReward
 } from "./invite-campaign-policy";
 import {
@@ -239,7 +239,21 @@ async function deliverReward(
   }catch(error){
     const message=(error instanceof Error?error.message:String(error)).slice(0,500);
     if(error instanceof InviteCampaignDiscordError&&error.status<500){
-      await updateReward(env,reward.id,"DM_FAILED",{error:message});
+      const now=Date.now();
+      if(accountId){
+        await env.DB.batch([
+          env.DB.prepare(
+            "UPDATE purchased_accounts SET status='READY_FOR_DELIVERY' "+
+            "WHERE id=? AND status='INVITE_REWARD_RESERVED'"
+          ).bind(accountId),
+          env.DB.prepare(
+            "UPDATE invite_campaign_rewards SET status='DM_FAILED',account_id=NULL,"+
+            "error=?,updated_at=? WHERE id=?"
+          ).bind(message,now,reward.id)
+        ]);
+      }else{
+        await updateReward(env,reward.id,"DM_FAILED",{error:message});
+      }
       return "DM_FAILED";
     }
     await updateReward(env,reward.id,"DELIVERY_UNCERTAIN",{error:message});
@@ -265,9 +279,10 @@ async function ensureRewards(
   progress:InviteCampaignProgress
 ):Promise<void>{
   const settings=await getInviteCampaignSettings(env);
-  const earned=earnedRewardCount(
+  const earned=effectiveEarnedRewardCount(
     progress.valid_invites,
-    settings.invites_per_reward
+    settings.invites_per_reward,
+    progress.rewards_earned
   );
   const now=Date.now();
   for(let ordinal=1;ordinal<=earned;ordinal++){
@@ -286,7 +301,7 @@ async function ensureRewards(
 
   const pending=(await env.DB.prepare(
     "SELECT * FROM invite_campaign_rewards WHERE guild_id=? AND inviter_user_id=? "+
-    "AND status IN ('WAITING_STOCK','DM_FAILED') ORDER BY ordinal ASC LIMIT 20"
+    "AND status='WAITING_STOCK' ORDER BY ordinal ASC LIMIT 20"
   ).bind(progress.guild_id,progress.inviter_user_id).all<RewardRow>()).results;
   for(const reward of pending) await deliverReward(env,reward);
 }
@@ -304,13 +319,30 @@ export async function applyInviteCampaignCredit(
   return progress;
 }
 
+export async function reconcileInviteCampaignRewards(env:Env){
+  await ensureInviteCampaignSchema(env);
+  const settings=await getInviteCampaignSettings(env);
+  if(!settings.enabled||!settings.guild_id){
+    return {processed:0};
+  }
+  const rows=(await env.DB.prepare(
+    "SELECT guild_id,inviter_user_id,valid_invites,excluded_invites,rewards_earned,updated_at "+
+    "FROM invite_campaign_progress WHERE guild_id=? "+
+    "ORDER BY updated_at ASC LIMIT 5000"
+  ).bind(settings.guild_id).all<InviteCampaignProgress>()).results;
+  for(const row of rows){
+    await ensureRewards(env,row);
+  }
+  return {processed:rows.length};
+}
+
 export async function retryInviteCampaignRewards(env:Env){
   await ensureInviteCampaignSchema(env);
   const settings=await getInviteCampaignSettings(env);
   if(!settings.enabled) return {attempted:0,delivered:0};
   const rows=(await env.DB.prepare(
     "SELECT * FROM invite_campaign_rewards "+
-    "WHERE status IN ('WAITING_STOCK','DM_FAILED') ORDER BY created_at ASC LIMIT 20"
+    "WHERE status='WAITING_STOCK' ORDER BY created_at ASC LIMIT 20"
   ).all<RewardRow>()).results;
   let delivered=0;
   for(const row of rows){
