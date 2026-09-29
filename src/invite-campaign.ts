@@ -35,7 +35,11 @@ export type InviteCampaignMemberEvent={
   };
 };
 
-async function refreshInviteSnapshot(env:Env,guildId:string):Promise<void>{
+async function refreshInviteSnapshot(
+  env:Env,
+  guildId:string,
+  countNewInviteUses=false
+):Promise<void>{
   await ensureInviteCampaignSchema(env);
   const current=await fetchDiscordGuildInvites(env,guildId);
   const previousRows=(await env.DB.prepare(
@@ -48,7 +52,11 @@ async function refreshInviteSnapshot(env:Env,guildId:string):Promise<void>{
     .map(invite=>{
       const previous=previousByCode.get(invite.code);
       const uses=Math.max(0,Math.floor(Number(invite.uses??0)));
-      const delta=previous?inviteUsesDelta(previous.uses,uses):0;
+      const delta=previous
+        ?inviteUsesDelta(previous.uses,uses)
+        :countNewInviteUses
+          ?uses
+          :0;
       const managed=previous?.owner_source==="managed";
       const ownerUserId=managed
         ?previous?.owner_user_id??null
@@ -104,7 +112,7 @@ async function consumePendingInvite(
   env:Env,
   guildId:string
 ):Promise<InviteRow|null>{
-  await refreshInviteSnapshot(env,guildId);
+  await refreshInviteSnapshot(env,guildId,true);
   for(let attempt=0;attempt<5;attempt++){
     const row=await env.DB.prepare(
       "SELECT * FROM invite_campaign_invites "+
