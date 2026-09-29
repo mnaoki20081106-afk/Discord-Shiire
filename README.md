@@ -601,29 +601,37 @@ Requirements:
 - default ceiling: `0.60 USD / account`
 - the configurable ceiling is restricted to `0.50 - 0.60 USD`
 
-### Dynamic cheapest TOP-search source selection
+### Preferred TOP sources + verified cheapest fallback
 
-No HStora product ID is hard-coded as the preferred source.
+HStora product IDs `4841` and `5132` are the trusted preferred TOP-search source group.
 
-On every procurement scan, Discord-Shiire fetches the HStora catalog and product details and applies a fail-closed qualification pass before price ranking:
+Selection order:
+
+1. Re-fetch and re-qualify products `4841` and `5132`.
+2. If one or both are valid and in stock, select the cheaper effective unit price among the valid preferred products.
+3. Only when neither preferred product is usable, scan the remaining HStora catalog for verified TOP-search products and select the cheapest qualifying fallback.
+
+Every candidate still goes through a fail-closed qualification pass:
 
 - the listing must be an X/Twitter account product
-- `TOP Search` or `TOP+Latest` evidence must be explicitly present for TOP-search procurement
+- `TOP Search`, `TOP+Latest`, or HStora's `TOP Latest` naming must be explicitly present
+- the product slug is also inspected after `-` / `_` normalization, so HStora URLs such as `top-latest` are recognized
 - price alone can never make a listing qualify as TOP-search
-- negated TOP wording such as `No TOP Search` / `TOP Search unavailable` is removed from positive evidence
+- negated wording such as `No TOP Search`, `No TOP Latest`, `TOP Search unavailable`, or `TOP Latest unavailable` is excluded from positive TOP evidence
 - the live product detail is re-qualified again immediately before an order is created
-- only after qualification succeeds are candidates ordered by effective unit price
 
-A listing that explicitly proves **both TOP-search and No Shadowban** is treated as a dual-capability source. These listings are preferred when replenishing the No-Shadowban inventory, so a cheaper No-Shadowban-only listing does not displace an available qualifying TOP-search source.
+Products `4841` and `5132` are treated as trusted manual-approved sources when manual-product-approval mode is active, but they still must pass the live TOP/in-stock/price checks.
 
-For every dual-capability source, regardless of HStora product ID:
+A listing that explicitly proves **both TOP-search and No Shadowban** is treated as a dual-capability source. Preferred IDs `4841` / `5132` come first; after them, other verified dual-capability TOP listings are preferred over No-Shadowban-only listings.
+
+For every dual-capability source:
 
 - new purchase quantities are forced to an even number
 - delivered credentials are stored **50% as `TOP_SEARCH` and 50% as `NO_SHADOWBAN`**
 - delayed/retried HStora delivery reconciliation continues from the already-stored class counts so the final split does not drift
 - class-backed vending products receive only the stock count actually added to their class
 
-If no qualifying dual-capability listing is available, the existing No-Shadowban-only candidates remain a fallback rather than causing an unnecessary stock outage.
+If no qualifying dual-capability listing exists, the existing No-Shadowban-only candidates remain a final fallback rather than causing an unnecessary stock outage.
 
 Each class has independent inventory controls:
 
