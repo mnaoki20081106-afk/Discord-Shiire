@@ -20,6 +20,18 @@ export function earnedRewardCount(
   return Math.floor(valid/threshold);
 }
 
+export function effectiveEarnedRewardCount(
+  validInvites:number,
+  invitesPerReward:number,
+  previousEarned:number
+):number{
+  const previous=Math.max(0,Math.floor(Number(previousEarned)||0));
+  return Math.max(
+    previous,
+    earnedRewardCount(validInvites,invitesPerReward)
+  );
+}
+
 export function remainingUntilNextReward(
   validInvites:number,
   invitesPerReward:number
