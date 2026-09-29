@@ -1,6 +1,7 @@
 import type { Env } from "./types";
 import { hmacHex, randomId } from "./crypto";
 import { encryptSensitive } from "./x-crypto";
+import { isPrimarySplitHstoraProduct } from "./x-procurement-policy";
 
 let schemaReady=false;
 
@@ -423,6 +424,15 @@ function deliveryItems(response:any):unknown[]{
   return Array.isArray(items)?items:[];
 }
 
+export type StoredDeliveryResult={
+  inserted:number;
+  byClass:{
+    TOP_SEARCH:number;
+    NO_SHADOWBAN:number;
+    UNCLASSIFIED:number;
+  };
+};
+
 export async function storeDeliveredAccounts(env:Env,input:{
   purchaseOrderId:string;
   supplier:string;
@@ -430,11 +440,53 @@ export async function storeDeliveredAccounts(env:Env,input:{
   purchasePrice:number;
   procurementClass?:"TOP_SEARCH"|"NO_SHADOWBAN"|null;
   orderResponse:unknown;
-}):Promise<number>{
+}):Promise<StoredDeliveryResult>{
   await ensureXSchema(env);
   const items=deliveryItems(input.orderResponse);
   let inserted=0;
+  const byClass={
+    TOP_SEARCH:0,
+    NO_SHADOWBAN:0,
+    UNCLASSIFIED:0
+  };
   const now=Date.now();
+
+  const splitPrimary=
+    input.supplier==="hstora"&&
+    isPrimarySplitHstoraProduct(input.supplierProductId);
+
+  let splitTopCount=0;
+  let splitNoShadowCount=0;
+  let splitTopTarget=0;
+  let splitNoShadowTarget=0;
+
+  if(splitPrimary){
+    const order=await env.DB.prepare(
+      "SELECT quantity FROM purchase_orders WHERE id=?"
+    ).bind(input.purchaseOrderId).first<{quantity:number}>();
+    const orderedQuantity=Math.max(
+      items.length,
+      Math.max(0,Math.floor(Number(order?.quantity??items.length)))
+    );
+    splitTopTarget=Math.ceil(orderedQuantity/2);
+    splitNoShadowTarget=Math.floor(orderedQuantity/2);
+
+    const existing=(await env.DB.prepare(
+      "SELECT procurement_class,COUNT(*) AS quantity FROM purchased_accounts "+
+      "WHERE purchase_order_id=? GROUP BY procurement_class"
+    ).bind(input.purchaseOrderId).all<{
+      procurement_class:string|null;
+      quantity:number;
+    }>()).results;
+    for(const row of existing){
+      if(row.procurement_class==="TOP_SEARCH"){
+        splitTopCount+=Math.max(0,Number(row.quantity??0));
+      }else if(row.procurement_class==="NO_SHADOWBAN"){
+        splitNoShadowCount+=Math.max(0,Number(row.quantity??0));
+      }
+    }
+  }
+
   for(const item of items){
     const raw=typeof item==="string"?item:JSON.stringify(item);
     const fingerprintSecret=env.CREDENTIALS_ENCRYPTION_KEY?.trim()??"";
@@ -444,16 +496,54 @@ export async function storeDeliveredAccounts(env:Env,input:{
       "credential-fingerprint\n"+raw
     );
     const encrypted=await encryptSensitive(env,raw);
+
+    let assignedClass=input.procurementClass??null;
+    if(splitPrimary){
+      const topRemaining=Math.max(0,splitTopTarget-splitTopCount);
+      const noShadowRemaining=Math.max(
+        0,
+        splitNoShadowTarget-splitNoShadowCount
+      );
+      if(topRemaining>0&&noShadowRemaining>0){
+        assignedClass=
+          splitTopCount<=splitNoShadowCount
+            ?"TOP_SEARCH"
+            :"NO_SHADOWBAN";
+      }else if(topRemaining>0){
+        assignedClass="TOP_SEARCH";
+      }else if(noShadowRemaining>0){
+        assignedClass="NO_SHADOWBAN";
+      }else{
+        assignedClass=
+          splitTopCount<=splitNoShadowCount
+            ?"TOP_SEARCH"
+            :"NO_SHADOWBAN";
+      }
+    }
+
     const id=randomId();
     const result=await env.DB.prepare(`INSERT OR IGNORE INTO purchased_accounts(
       id,supplier,supplier_product_id,purchase_order_id,purchase_price,purchased_at,
       credentials_ciphertext,email_ciphertext,two_factor_ciphertext,credential_fingerprint,procurement_class,status,created_at
     ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(
       id,input.supplier,input.supplierProductId,input.purchaseOrderId,input.purchasePrice,now,
-      JSON.stringify(encrypted),null,null,fingerprint,input.procurementClass??null,"READY_FOR_DELIVERY",now
+      JSON.stringify(encrypted),null,null,fingerprint,assignedClass,"READY_FOR_DELIVERY",now
     ).run();
-    if((result.meta?.changes??0)>0) inserted++;
+
+    if((result.meta?.changes??0)>0){
+      inserted++;
+      if(assignedClass==="TOP_SEARCH"){
+        byClass.TOP_SEARCH++;
+        if(splitPrimary) splitTopCount++;
+      }else if(assignedClass==="NO_SHADOWBAN"){
+        byClass.NO_SHADOWBAN++;
+        if(splitPrimary) splitNoShadowCount++;
+      }else{
+        byClass.UNCLASSIFIED++;
+      }
+    }
   }
+
   if(inserted>0){
     await env.DB.prepare(`INSERT INTO inventory(id,supplier_product_id,status,quantity,updated_at)
       VALUES(?,?,?,?,?)
@@ -461,7 +551,7 @@ export async function storeDeliveredAccounts(env:Env,input:{
         quantity=quantity+excluded.quantity,updated_at=excluded.updated_at`
     ).bind(randomId(),input.supplierProductId,"READY_FOR_DELIVERY",inserted,now).run();
   }
-  return inserted;
+  return {inserted,byClass};
 }
 
 export async function purchasedAccountCountForOrder(
