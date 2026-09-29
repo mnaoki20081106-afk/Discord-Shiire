@@ -1,9 +1,12 @@
 import type { ProcurementClass } from "./x-qualification";
 
-export const PRIMARY_SPLIT_HSTORA_PRODUCT_ID=4841;
+export const DUAL_TOP_SPLIT_MODE="TOP_SEARCH_NO_SHADOWBAN_50_50" as const;
 
-export function isPrimarySplitHstoraProduct(productId:unknown):boolean{
-  return Number(productId)===PRIMARY_SPLIT_HSTORA_PRODUCT_ID;
+export function hasDualTopNoShadowbanEvidence(labels:readonly string[]):boolean{
+  const hasTop=
+    labels.includes("TOP+Latest")||
+    labels.includes("TOP Search");
+  return hasTop&&labels.includes("No Shadowban");
 }
 
 export function evenSplitPurchaseQuantity(value:number):number{
