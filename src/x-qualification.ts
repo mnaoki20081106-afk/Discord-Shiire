@@ -16,7 +16,7 @@ export type ProductQualification={
 };
 
 const VISIBILITY_RULES:Array<{label:string;patterns:RegExp[]}>= [
-  {label:"TOP+Latest",patterns:[/\btop\s*\+\s*latest\b/i,/\btop\s*(?:and|&)\s*latest\b/i]},
+  {label:"TOP+Latest",patterns:[/\btop\s*\+\s*latest\b/i,/\btop\s*(?:and|&)\s*latest\b/i,/\btop\s+latest\b/i]},
   {label:"TOP Search",patterns:[/\btop\s+search\b/i,/\btop\s+searchable\b/i]},
   {label:"Latest Search",patterns:[/\blatest\s+search\b/i,/\blatest\s+searchable\b/i]},
   {label:"No Shadowban",patterns:[/\bno\s+shadow\s*ban\b/i,/\bnot\s+shadow\s*banned\b/i]},
@@ -28,14 +28,18 @@ type VisibilityProduct=Pick<HstoraProduct,"name"|"slug"|"short_description">&
 
 const NEGATED_TOP_PATTERNS:RegExp[]=[
   /\b(?:no|not|without)\s+top\s+search(?:able)?\b/gi,
-  /\b(?:no|not|without)\s+top\s*(?:\+|and|&)\s*latest(?:\s+search)?\b/gi,
+  /\b(?:no|not|without)\s+top\s*(?:\+|and|&|\s)\s*latest(?:\s+search)?\b/gi,
   /\btop\s+search(?:able)?\s+(?:unavailable|disabled|unsupported|not\s+available)\b/gi,
-  /\btop\s*(?:\+|and|&)\s*latest(?:\s+search)?\s+(?:unavailable|disabled|unsupported|not\s+available)\b/gi
+  /\btop\s*(?:\+|and|&|\s)\s*latest(?:\s+search)?\s+(?:unavailable|disabled|unsupported|not\s+available)\b/gi
 ];
 
 function productText(product:VisibilityProduct):string{
-  return [product.name,product.short_description??"",product.description??""]
-    .join("\n").replace(/\s+/g," ").trim();
+  return [
+    product.name,
+    String(product.slug??"").replace(/[_-]+/g," "),
+    product.short_description??"",
+    product.description??""
+  ].join("\n").replace(/\s+/g," ").trim();
 }
 
 export function isXAccountProduct(product:VisibilityProduct):boolean{

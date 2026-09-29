@@ -601,20 +601,37 @@ Requirements:
 - default ceiling: `0.60 USD / account`
 - the configurable ceiling is restricted to `0.50 - 0.60 USD`
 
-### Preferred dual-capability source: HStora product 4841
+### Preferred TOP sources + verified cheapest fallback
 
-HStora product `4841` is treated as the preferred source when its live API data still explicitly confirms both TOP-search and No-Shadowban evidence and it remains inside the configured safety limits.
+HStora product IDs `4841` and `5132` are the trusted preferred TOP-search source group.
 
-For this product only:
+Selection order:
 
-- it may replenish either inventory class
+1. Re-fetch and re-qualify products `4841` and `5132`.
+2. If one or both are valid and in stock, select the cheaper effective unit price among the valid preferred products.
+3. Only when neither preferred product is usable, scan the remaining HStora catalog for verified TOP-search products and select the cheapest qualifying fallback.
+
+Every candidate still goes through a fail-closed qualification pass:
+
+- the listing must be an X/Twitter account product
+- `TOP Search`, `TOP+Latest`, or HStora's `TOP Latest` naming must be explicitly present
+- the product slug is also inspected after `-` / `_` normalization, so HStora URLs such as `top-latest` are recognized
+- price alone can never make a listing qualify as TOP-search
+- negated wording such as `No TOP Search`, `No TOP Latest`, `TOP Search unavailable`, or `TOP Latest unavailable` is excluded from positive TOP evidence
+- the live product detail is re-qualified again immediately before an order is created
+
+Products `4841` and `5132` are treated as trusted manual-approved sources when manual-product-approval mode is active, but they still must pass the live TOP/in-stock/price checks.
+
+A listing that explicitly proves **both TOP-search and No Shadowban** is treated as a dual-capability source. Preferred IDs `4841` / `5132` come first; after them, other verified dual-capability TOP listings are preferred over No-Shadowban-only listings.
+
+For every dual-capability source:
+
 - new purchase quantities are forced to an even number
 - delivered credentials are stored **50% as `TOP_SEARCH` and 50% as `NO_SHADOWBAN`**
 - delayed/retried HStora delivery reconciliation continues from the already-stored class counts so the final split does not drift
 - class-backed vending products receive only the stock count actually added to their class
-- if product 4841 becomes unavailable, loses required listing evidence, exceeds the configured price ceiling, or otherwise fails qualification, the engine falls back to the normal candidate scan rather than bypassing the safeguards
 
-Other HStora listings that contain both TOP Search and No Shadowban wording remain classified as `TOP_SEARCH` only unless a separate explicit policy is added.
+If no qualifying dual-capability listing exists, the existing No-Shadowban-only candidates remain a final fallback rather than causing an unnecessary stock outage.
 
 Each class has independent inventory controls:
 
@@ -630,7 +647,7 @@ NO_SHADOWBAN
 
 When both classes are below their reorder points, TOP_SEARCH is replenished first.
 
-Within each class, qualified HStora listings are sorted cheapest-first. TOP_SEARCH is sorted by effective JPY unit price and NO_SHADOWBAN is sorted by effective USD unit price. The price tier is recalculated using the quantity that will actually be ordered, including first-product trial limits.
+Within each class, source priority is applied first and effective price second. Products 4841/5132 form the preferred source group; candidates inside that group are sorted by effective unit price. If the preferred group has no usable candidate, verified fallback candidates are sorted cheapest-first. TOP_SEARCH uses effective JPY unit price and NO_SHADOWBAN uses effective USD unit price. The price tier is recalculated using the quantity that will actually be ordered, including first-product trial limits.
 
 Existing purchased accounts are backfilled into the new procurement classes when their HStora product is re-evaluated. The engine recounts class inventory after this backfill before placing a new order, preventing a migration-time extra batch.
 

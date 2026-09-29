@@ -1,7 +1,7 @@
 import type { Env } from "./types";
 import { hmacHex, randomId } from "./crypto";
 import { encryptSensitive } from "./x-crypto";
-import { isPrimarySplitHstoraProduct } from "./x-procurement-policy";
+import { DUAL_TOP_SPLIT_MODE } from "./x-procurement-policy";
 
 let schemaReady=false;
 
@@ -44,6 +44,7 @@ const SCHEMA=[
   idempotency_key TEXT NOT NULL UNIQUE,
   supplier_order_id TEXT,
   procurement_class TEXT,
+  delivery_split_mode TEXT,
   dry_run INTEGER NOT NULL DEFAULT 1,
   response_meta_json TEXT NOT NULL DEFAULT '{}',
   error_code TEXT,
@@ -145,6 +146,7 @@ export async function ensureXSchema(env:Env){
   const migrations:Array<[string,string,string]>= [
     ["supplier_products","procurement_class","TEXT"],
     ["purchase_orders","procurement_class","TEXT"],
+    ["purchase_orders","delivery_split_mode","TEXT"],
     ["purchased_accounts","procurement_class","TEXT"]
   ];
   for(const [table,column,type] of migrations){
@@ -378,6 +380,7 @@ export async function createPurchaseOrderRecord(env:Env,input:{
   externalOrderId:string;
   idempotencyKey:string;
   procurementClass?:"TOP_SEARCH"|"NO_SHADOWBAN"|null;
+  deliverySplitMode?:typeof DUAL_TOP_SPLIT_MODE|null;
   dryRun:boolean;
 }){
   await ensureXSchema(env);
@@ -385,11 +388,11 @@ export async function createPurchaseOrderRecord(env:Env,input:{
   const id=randomId();
   await env.DB.prepare(`INSERT INTO purchase_orders(
     id,supplier,supplier_product_id,quantity,unit_price,total_amount,currency,status,
-    external_order_id,idempotency_key,procurement_class,dry_run,created_at,updated_at
-  ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(
+    external_order_id,idempotency_key,procurement_class,delivery_split_mode,dry_run,created_at,updated_at
+  ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(
     id,input.supplier,input.supplierProductId,input.quantity,input.unitPrice,input.totalAmount,input.currency,
     input.dryRun?"DRY_RUN":"CREATED",input.externalOrderId,input.idempotencyKey,
-    input.procurementClass??null,input.dryRun?1:0,now,now
+    input.procurementClass??null,input.deliverySplitMode??null,input.dryRun?1:0,now,now
   ).run();
   return id;
 }
@@ -451,19 +454,21 @@ export async function storeDeliveredAccounts(env:Env,input:{
   };
   const now=Date.now();
 
-  const splitPrimary=
-    input.supplier==="hstora"&&
-    isPrimarySplitHstoraProduct(input.supplierProductId);
+  const order=await env.DB.prepare(
+    "SELECT quantity,delivery_split_mode FROM purchase_orders WHERE id=?"
+  ).bind(input.purchaseOrderId).first<{
+    quantity:number;
+    delivery_split_mode:string|null;
+  }>();
+  const splitAcrossClasses=
+    order?.delivery_split_mode===DUAL_TOP_SPLIT_MODE;
 
   let splitTopCount=0;
   let splitNoShadowCount=0;
   let splitTopTarget=0;
   let splitNoShadowTarget=0;
 
-  if(splitPrimary){
-    const order=await env.DB.prepare(
-      "SELECT quantity FROM purchase_orders WHERE id=?"
-    ).bind(input.purchaseOrderId).first<{quantity:number}>();
+  if(splitAcrossClasses){
     const orderedQuantity=Math.max(
       items.length,
       Math.max(0,Math.floor(Number(order?.quantity??items.length)))
@@ -498,7 +503,7 @@ export async function storeDeliveredAccounts(env:Env,input:{
     const encrypted=await encryptSensitive(env,raw);
 
     let assignedClass=input.procurementClass??null;
-    if(splitPrimary){
+    if(splitAcrossClasses){
       const topRemaining=Math.max(0,splitTopTarget-splitTopCount);
       const noShadowRemaining=Math.max(
         0,
@@ -534,10 +539,10 @@ export async function storeDeliveredAccounts(env:Env,input:{
       inserted++;
       if(assignedClass==="TOP_SEARCH"){
         byClass.TOP_SEARCH++;
-        if(splitPrimary) splitTopCount++;
+        if(splitAcrossClasses) splitTopCount++;
       }else if(assignedClass==="NO_SHADOWBAN"){
         byClass.NO_SHADOWBAN++;
-        if(splitPrimary) splitNoShadowCount++;
+        if(splitAcrossClasses) splitNoShadowCount++;
       }else{
         byClass.UNCLASSIFIED++;
       }
