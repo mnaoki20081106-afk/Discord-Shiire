@@ -386,6 +386,12 @@ async function selectCandidate(
   }
 
   candidates.sort((a,b)=>{
+    if(targetClass==="NO_SHADOWBAN"){
+      const aDual=hasDualTopNoShadowbanEvidence(a.q.search_visibility);
+      const bDual=hasDualTopNoShadowbanEvidence(b.q.search_visibility);
+      if(aDual!==bDual) return aDual?-1:1;
+    }
+
     const aPrice=
       targetClass==="NO_SHADOWBAN"
         ?Number(a.q.unit_price_source)
