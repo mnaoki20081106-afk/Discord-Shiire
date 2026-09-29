@@ -19,6 +19,16 @@ import {
 } from "./x-funding";
 import { runLtcAutoPurchase, runXProcurement } from "./x-engine";
 import {
+  getInviteCampaignDashboard,
+  saveInviteCampaignSettings
+} from "./invite-campaign-db";
+import { seedInviteCampaignSnapshot } from "./invite-campaign";
+import { retryInviteCampaignReward } from "./invite-campaign-rewards";
+import {
+  ensureInviteCampaignGateway,
+  stopInviteCampaignGateway
+} from "./invite-gateway";
+import {
   getBinanceApiRestrictions,
   getBinanceBalance,
   getBinanceLtcCoinInfo,
@@ -100,6 +110,74 @@ export async function handleXAdminApi(
   url:URL
 ):Promise<Response|null>{
   await ensureXSchema(env);
+
+  if(url.pathname==="/api/x/invite-campaign"&&request.method==="GET"){
+    return json(await getInviteCampaignDashboard(env));
+  }
+
+  if(
+    url.pathname==="/api/x/invite-campaign/settings"&&
+    (request.method==="POST"||request.method==="PATCH"||request.method==="PUT")
+  ){
+    const raw=await requestJson(request);
+    if(!raw) return json({error:"INVALID_JSON"},400);
+    try{
+      const settings=await saveInviteCampaignSettings(env,{
+        enabled:raw.enabled,
+        guildId:raw.guildId,
+        invitesPerReward:raw.invitesPerReward,
+        targetStock:raw.targetStock
+      });
+      if(settings.enabled){
+        try{
+          await ensureInviteCampaignGateway(env);
+          await seedInviteCampaignSnapshot(env,settings.guild_id);
+        }catch(error){
+          await saveInviteCampaignSettings(env,{enabled:false});
+          await stopInviteCampaignGateway(env).catch(()=>undefined);
+          return json({
+            error:"INVITE_CAMPAIGN_START_FAILED",
+            message:error instanceof Error?error.message:String(error),
+            settings:await getInviteCampaignDashboard(env)
+          },409);
+        }
+      }else{
+        await stopInviteCampaignGateway(env);
+      }
+      return json({ok:true,...await getInviteCampaignDashboard(env)});
+    }catch(error){
+      const message=error instanceof Error?error.message:String(error);
+      return json({error:message},400);
+    }
+  }
+
+  if(url.pathname==="/api/x/invite-campaign/seed"&&request.method==="POST"){
+    try{
+      const result=await seedInviteCampaignSnapshot(env);
+      return json({ok:true,result,...await getInviteCampaignDashboard(env)});
+    }catch(error){
+      return json({
+        error:"INVITE_CAMPAIGN_SEED_FAILED",
+        message:error instanceof Error?error.message:String(error)
+      },409);
+    }
+  }
+
+  const inviteRewardRetry=url.pathname.match(
+    /^\/api\/x\/invite-campaign\/rewards\/([^/]+)\/retry$/
+  );
+  if(inviteRewardRetry&&request.method==="POST"){
+    try{
+      const result=await retryInviteCampaignReward(
+        env,
+        decodeURIComponent(inviteRewardRetry[1]!)
+      );
+      return json({ok:true,result,...await getInviteCampaignDashboard(env)});
+    }catch(error){
+      const message=error instanceof Error?error.message:String(error);
+      return json({error:message},409);
+    }
+  }
 
   if(url.pathname==="/api/x/settings"){
     if(request.method==="GET"){
@@ -494,7 +572,7 @@ pre{white-space:pre-wrap;word-break:break-word;font-size:12px;color:#cbd2df;max-
 <nav id="nav"></nav>
 <main id="main"><div class="card">ADMIN_TOKENを入力して接続してください。</div></main>
 <script>
-const tabs=["Dashboard","Funding","Binance","LTC Wallet","HStora","Inventory","Orders","Logs","Settings"];
+const tabs=["Dashboard","Funding","Binance","LTC Wallet","HStora","招待キャンペーン","Inventory","Orders","Logs","Settings"];
 let current="Dashboard";
 const token=document.querySelector("#token");
 token.value=sessionStorage.getItem("shiireAdminToken")||"";
@@ -525,6 +603,27 @@ async function saveFundingMode(){
 async function cancelPendingFunding(){await api("/api/x/funding/pending/cancel",{method:"POST",body:"{}"});await load()}
 async function approveBulk(){await api("/api/x/bulk-approval",{method:"POST",body:JSON.stringify({minutes:10})});await load()}
 async function resetEmergency(){await api("/api/x/emergency-stop/reset",{method:"POST",body:"{}"});await load()}
+async function saveInviteCampaign(){
+ const enabled=Boolean(document.querySelector("#inviteEnabled")?.checked);
+ const guildId=String(document.querySelector("#inviteGuildId")?.value||"").trim();
+ const invitesPerReward=Number(document.querySelector("#invitesPerReward")?.value);
+ const targetStock=Number(document.querySelector("#inviteTargetStock")?.value);
+ await api("/api/x/invite-campaign/settings",{
+  method:"POST",
+  body:JSON.stringify({enabled,guildId,invitesPerReward,targetStock})
+ });
+ await load();
+}
+async function seedInviteCampaign(){
+ await api("/api/x/invite-campaign/seed",{method:"POST",body:"{}"});
+ await load();
+}
+async function retryInviteReward(id){
+ await api("/api/x/invite-campaign/rewards/"+encodeURIComponent(id)+"/retry",{
+  method:"POST",body:"{}"
+ });
+ await load();
+}
 function metrics(data){
  const f=data.funding?.data?.allowance;
  const ready=data.inventory?.READY_FOR_DELIVERY??0;
@@ -620,6 +719,51 @@ async function load(){
     document.querySelector("#saveFx").onclick=()=>observeFx().catch(e=>alert(e.message));
   }else if(current==="Binance"){data=await api("/api/x/binance");main.innerHTML=card(current,data)}
   else if(current==="HStora"){data=await api("/api/x/hstora");main.innerHTML=card(current,data)}
+  else if(current==="招待キャンペーン"){
+    data=await api("/api/x/invite-campaign");
+    const s=data.settings||{};
+    const guildOptions=(data.guilds||[]).map(g=>
+      '<option value="'+esc(g.guild_id)+'">'+esc(g.name)+'</option>'
+    ).join("");
+    const progress=(data.progress||[]).slice(0,30).map(row=>
+      '<div class="metric"><small>'+esc(row.inviter_user_id)+'</small>'+
+      '<strong>'+esc(row.valid_invites)+'人</strong>'+
+      '<div class="hint">対象外 '+esc(row.excluded_invites)+' / 報酬 '+esc(row.rewards_earned)+'</div></div>'
+    ).join("");
+    const rewards=(data.rewards||[]).slice(0,30).map(row=>{
+      const retryable=row.status==="WAITING_STOCK"||row.status==="DM_FAILED"||row.status==="ERROR";
+      return '<div class="metric"><small>'+esc(row.inviter_user_id)+' / #'+esc(row.ordinal)+'</small>'+
+        '<strong>'+esc(row.status)+'</strong>'+
+        (row.error?'<div class="hint">'+esc(row.error)+'</div>':'')+
+        (retryable?'<div class="formrow"><button data-retry-reward="'+esc(row.id)+'">再試行</button></div>':'')+
+        '</div>';
+    }).join("");
+    main.innerHTML=
+      '<section class="card"><strong>招待キャンペーン設定</strong>'+
+      '<p class="hint">ユーザーは /invite-link で専用招待リンクを発行できます。有効招待が設定人数に達するたび、キャンペーン専用在庫からXアカウントを1個DMで自動配布します。</p>'+
+      '<div class="formrow"><label style="display:flex;align-items:center;gap:8px"><input id="inviteEnabled" type="checkbox" style="flex:0" '+(s.enabled?'checked':'')+'>キャンペーンを有効化</label></div>'+
+      '<datalist id="inviteGuildOptions">'+guildOptions+'</datalist>'+
+      '<div class="formrow"><input id="inviteGuildId" list="inviteGuildOptions" placeholder="対象サーバーID" value="'+esc(s.guild_id||"")+'"></div>'+
+      '<div class="formrow"><input id="invitesPerReward" type="number" min="1" max="1000" step="1" value="'+esc(s.invites_per_reward||5)+'" placeholder="何人ごとに1垢"><input id="inviteTargetStock" type="number" min="1" max="10000" step="1" value="'+esc(s.target_stock||20)+'" placeholder="恒常在庫数"></div>'+
+      '<div class="hint">左: 何人招待ごとに1垢 / 右: キャンペーン専用の恒常在庫数</div>'+
+      '<div class="formrow"><button id="saveInviteCampaign">設定を保存</button><button id="seedInviteCampaign">招待状態を再同期</button><button id="runInviteProcurement">在庫補充判定</button></div>'+
+      '</section>'+
+      '<div class="grid">'+
+      '<div class="metric"><small>キャンペーン在庫</small><strong>'+esc(data.stock?.available??0)+' / '+esc(data.stock?.target??20)+'</strong></div>'+
+      '<div class="metric"><small>不足数</small><strong>'+esc(data.stock?.deficit??0)+'</strong></div>'+
+      '<div class="metric"><small>未解決の報酬</small><strong>'+esc(data.unresolvedRewards??0)+'</strong></div>'+
+      '<div class="metric"><small>Gateway</small><strong>'+(data.runtime?.gateway_ready_at?'接続済み':'未接続')+'</strong></div>'+
+      '</div>'+
+      (data.runtime?.last_error?'<section class="card bad"><strong>Gateway / キャンペーンエラー</strong><pre>'+esc(data.runtime.last_error)+'</pre></section>':'')+
+      '<section class="card"><strong>招待実績</strong><div class="grid" style="margin-top:10px">'+(progress||'<div class="hint">まだ招待実績はありません。</div>')+'</div></section>'+
+      '<section class="card"><strong>報酬履歴</strong><div class="grid" style="margin-top:10px">'+(rewards||'<div class="hint">まだ報酬履歴はありません。</div>')+'</div></section>';
+    document.querySelector("#saveInviteCampaign").onclick=()=>saveInviteCampaign().catch(e=>alert(e.message));
+    document.querySelector("#seedInviteCampaign").onclick=()=>seedInviteCampaign().catch(e=>alert(e.message));
+    document.querySelector("#runInviteProcurement").onclick=()=>runNow().catch(e=>alert(e.message));
+    document.querySelectorAll("[data-retry-reward]").forEach(el=>{
+      el.onclick=()=>retryInviteReward(el.getAttribute("data-retry-reward")).catch(e=>alert(e.message));
+    });
+  }
   else if(current==="Inventory"){data=await api("/api/x/inventory");main.innerHTML=card(current,data)}
   else if(current==="Orders"){data=await api("/api/x/orders");main.innerHTML=card(current,data)}
   else if(current==="Logs"){data=await api("/api/x/logs");main.innerHTML=card(current,data)}
