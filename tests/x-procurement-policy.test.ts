@@ -2,10 +2,13 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   DUAL_TOP_SPLIT_MODE,
+  PREFERRED_NO_SHADOWBAN_HSTORA_PRODUCT_IDS,
   PREFERRED_TOP_HSTORA_PRODUCT_IDS,
   evenSplitPurchaseQuantity,
   hasDualTopNoShadowbanEvidence,
+  isPreferredNoShadowbanHstoraSource,
   isPreferredTopHstoraSource,
+  procurementClassOverrideForHstoraProduct,
   splitProcurementClassAtRank
 } from "../src/x-procurement-policy.ts";
 
@@ -14,6 +17,15 @@ test("trusted preferred TOP sources are 4841 and 5132",()=>{
   assert.equal(isPreferredTopHstoraSource(4841),true);
   assert.equal(isPreferredTopHstoraSource("5132"),true);
   assert.equal(isPreferredTopHstoraSource(9999),false);
+});
+
+test("HStora 4521 is a preferred no-shadowban-only exception",()=>{
+  assert.deepEqual([...PREFERRED_NO_SHADOWBAN_HSTORA_PRODUCT_IDS],[4521]);
+  assert.equal(isPreferredNoShadowbanHstoraSource(4521),true);
+  assert.equal(isPreferredNoShadowbanHstoraSource("4521"),true);
+  assert.equal(isPreferredNoShadowbanHstoraSource(4841),false);
+  assert.equal(procurementClassOverrideForHstoraProduct(4521),"NO_SHADOWBAN");
+  assert.equal(procurementClassOverrideForHstoraProduct(5132),null);
 });
 
 test("dual split mode is generic and not tied to a product id",()=>{

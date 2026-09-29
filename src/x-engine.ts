@@ -53,10 +53,13 @@ import {
 } from "./x-qualification";
 import {
   DUAL_TOP_SPLIT_MODE,
+  PREFERRED_NO_SHADOWBAN_HSTORA_PRODUCT_IDS,
   PREFERRED_TOP_HSTORA_PRODUCT_IDS,
   evenSplitPurchaseQuantity,
   hasDualTopNoShadowbanEvidence,
-  isPreferredTopHstoraSource
+  isPreferredNoShadowbanHstoraSource,
+  isPreferredTopHstoraSource,
+  procurementClassOverrideForHstoraProduct
 } from "./x-procurement-policy";
 import { notifyDiscord } from "./x-alerts";
 import { notifyShiireVendingStockArrival } from "./shiire-vending";
@@ -233,6 +236,7 @@ async function selectCandidate(
   const settings=await loadXSettings(env);
   const trustedApprovedIds=[...new Set([
     ...PREFERRED_TOP_HSTORA_PRODUCT_IDS,
+    ...PREFERRED_NO_SHADOWBAN_HSTORA_PRODUCT_IDS,
     ...settings.approved_hstora_product_ids
   ])];
   const approvedIds=
@@ -262,6 +266,8 @@ async function selectCandidate(
     const dualCapability=hasDualTopNoShadowbanEvidence(
       visibility.labels
     );
+    const forceNoShadowban=
+      procurementClassOverrideForHstoraProduct(product.id)==="NO_SHADOWBAN";
     const baseJpy=catalogBasePriceJpy(product,settings);
     const baseUsd=
       String(product.currency??"").toUpperCase()==="USD"
@@ -269,15 +275,19 @@ async function selectCandidate(
         :null;
 
     if(targetClass==="TOP_SEARCH"){
+      // Product 4521 is intentionally excluded from TOP inventory even when
+      // HStora advertises TOP capability; its quality is only trusted for the
+      // No-Shadowban class.
+      if(forceNoShadowban) continue;
       // Fail closed: price is never enough to make a product a TOP_SEARCH
       // candidate. Explicit positive TOP evidence is mandatory.
       if(!hasTop) continue;
       if(baseJpy===null||baseJpy>settings.max_unit_price_jpy) continue;
     }else{
-      // NO_SHADOWBAN can be replenished from a dual-capability TOP listing
-      // only when both positive evidences are explicit. Other TOP listings are
-      // kept out of this class.
-      if(hasTop&&!dualCapability) continue;
+      // Product 4521 is a deliberate class exception: TOP wording is ignored
+      // for inventory classification, but explicit No-Shadowban evidence is
+      // still mandatory. Other TOP listings need dual-capability evidence.
+      if(hasTop&&!dualCapability&&!forceNoShadowban) continue;
       if(!hasNoShadow) continue;
       if(
         baseUsd===null||
@@ -313,21 +323,37 @@ async function selectCandidate(
     const fullDualCapability=hasDualTopNoShadowbanEvidence(
       fullVisibility.labels
     );
+    const fullForceNoShadowban=
+      procurementClassOverrideForHstoraProduct(full.id)==="NO_SHADOWBAN";
     let plannedQuantity=Math.min(
       quantityLimit,
       Math.max(1,trialCap),
       Math.max(0,Number(full.stock_available??0))
     );
-    if(fullDualCapability){
+    if(fullDualCapability&&!fullForceNoShadowban){
       plannedQuantity=evenSplitPurchaseQuantity(plannedQuantity);
     }
     if(plannedQuantity<=0) continue;
 
-    const q=qualifyHstoraProduct(
+    const classOverride=
+      procurementClassOverrideForHstoraProduct(full.id)??undefined;
+    const policyQualification=qualifyHstoraProduct(
       full,
       qualificationSettings,
-      plannedQuantity
+      plannedQuantity,
+      Date.now(),
+      classOverride
     );
+    const q=
+      classOverride
+        ?{
+          ...policyQualification,
+          evidence:[
+            ...policyQualification.evidence,
+            "POLICY_OVERRIDE_HSTORA_4521_NO_SHADOWBAN"
+          ]
+        }
+        :policyQualification;
     const previous=await getSupplierProductRecord(env,String(full.id));
     const previousPrice=Number(previous?.unit_price??0);
     const currentPrice=Number(full.price??0);
@@ -396,9 +422,20 @@ async function selectCandidate(
   }
 
   candidates.sort((a,b)=>{
-    const aPreferred=isPreferredTopHstoraSource(a.product.id);
-    const bPreferred=isPreferredTopHstoraSource(b.product.id);
-    if(aPreferred!==bPreferred) return aPreferred?-1:1;
+    if(targetClass==="NO_SHADOWBAN"){
+      const aPreferredNoShadow=isPreferredNoShadowbanHstoraSource(a.product.id);
+      const bPreferredNoShadow=isPreferredNoShadowbanHstoraSource(b.product.id);
+      if(aPreferredNoShadow!==bPreferredNoShadow){
+        return aPreferredNoShadow?-1:1;
+      }
+      const aPreferredTop=isPreferredTopHstoraSource(a.product.id);
+      const bPreferredTop=isPreferredTopHstoraSource(b.product.id);
+      if(aPreferredTop!==bPreferredTop) return aPreferredTop?-1:1;
+    }else{
+      const aPreferred=isPreferredTopHstoraSource(a.product.id);
+      const bPreferred=isPreferredTopHstoraSource(b.product.id);
+      if(aPreferred!==bPreferred) return aPreferred?-1:1;
+    }
 
     if(targetClass==="NO_SHADOWBAN"){
       const aDual=hasDualTopNoShadowbanEvidence(a.q.search_visibility);
@@ -1496,9 +1533,11 @@ export async function runXProcurement(env:Env):Promise<XRunResult>{
   const prior=await successfulPurchaseCountForProduct(env,String(fresh.id));
   const trialCap=prior===0?settings.trial_purchase_count:batch;
   const freshVisibility=detectSearchVisibility(fresh);
-  const splitAcrossClasses=hasDualTopNoShadowbanEvidence(
-    freshVisibility.labels
-  );
+  const freshForceNoShadowban=
+    procurementClassOverrideForHstoraProduct(fresh.id)==="NO_SHADOWBAN";
+  const splitAcrossClasses=
+    !freshForceNoShadowban&&
+    hasDualTopNoShadowbanEvidence(freshVisibility.labels);
   let quantity=Math.min(
     batch,
     Math.max(1,trialCap),
@@ -1521,13 +1560,32 @@ export async function runXProcurement(env:Env):Promise<XRunResult>{
   // trial purchase above the JPY ceiling.
   const trustedApprovedIds=[...new Set([
     ...PREFERRED_TOP_HSTORA_PRODUCT_IDS,
+    ...PREFERRED_NO_SHADOWBAN_HSTORA_PRODUCT_IDS,
     ...settings.approved_hstora_product_ids
   ])];
   const qualificationSettings=
     settings.seller_quality_mode==="manual_product_approval"
       ?{...settings,approved_hstora_product_ids:trustedApprovedIds}
       :settings;
-  const q=qualifyHstoraProduct(fresh,qualificationSettings,quantity);
+  const classOverride=
+    procurementClassOverrideForHstoraProduct(fresh.id)??undefined;
+  const policyQualification=qualifyHstoraProduct(
+    fresh,
+    qualificationSettings,
+    quantity,
+    Date.now(),
+    classOverride
+  );
+  const q=
+    classOverride
+      ?{
+        ...policyQualification,
+        evidence:[
+          ...policyQualification.evidence,
+          "POLICY_OVERRIDE_HSTORA_4521_NO_SHADOWBAN"
+        ]
+      }
+      :policyQualification;
   const supportsTarget=
     q.procurement_class===targetClass||
     (

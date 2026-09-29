@@ -106,11 +106,14 @@ export function qualifyHstoraProduct(
   product:HstoraProduct,
   settings:XSettings,
   quantity=1,
-  now=Date.now()
+  now=Date.now(),
+  procurementClassOverride?:ProcurementClass
 ):ProductQualification{
   const reasons:string[]=[];
   const visibility=detectSearchVisibility(product);
-  const procurementClass=classifyProcurementClass(product);
+  const detectedProcurementClass=classifyProcurementClass(product);
+  const procurementClass=
+    procurementClassOverride??detectedProcurementClass;
   const unitSource=tierUnitPrice(product,quantity);
   const currency=String(product.currency??"").toUpperCase();
 
@@ -131,6 +134,12 @@ export function qualifyHstoraProduct(
   if(!isXAccountProduct(product)) reasons.push("NOT_X_ACCOUNT_PRODUCT");
   if(!procurementClass){
     reasons.push("SUPPORTED_X_PRODUCT_CLASS_NOT_CONFIRMED");
+  }
+  if(
+    procurementClass==="NO_SHADOWBAN"&&
+    !visibility.labels.includes("No Shadowban")
+  ){
+    reasons.push("NO_SHADOWBAN_EVIDENCE_NOT_CONFIRMED");
   }
   if(product.stock_available<settings.minimum_stock) reasons.push("STOCK_BELOW_MINIMUM");
 
