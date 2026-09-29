@@ -16,6 +16,9 @@ import { runAllProducts, runProduct } from "./engine";
 import { handleXAdminApi, xAdminPage } from "./x-admin";
 import { runLtcAutoPurchase, runXProcurement } from "./x-engine";
 import { loadXSettings } from "./x-settings";
+import { createInviteCampaignLink } from "./invite-campaign";
+import { retryInviteCampaignRewards } from "./invite-campaign-rewards";
+import { ensureInviteCampaignGateway, InviteGateway } from "./invite-gateway";
 import { isBinanceAutoFundingServerEnabled } from "./x-funding-mode";
 import { handleHstoraWebhook } from "./x-webhooks";
 import {
@@ -25,6 +28,8 @@ import {
   shiireVendingSweep,
   ShiireVendingError
 } from "./shiire-vending";
+
+export { InviteGateway };
 
 class HttpError extends Error{
   constructor(public status:number,message:string){super(message);}
@@ -158,12 +163,40 @@ async function handleInteraction(
     if(vending) return vending;
     return interactionResponse("未対応の操作です。");
   }
-  if(interaction.type!==2) return interactionResponse("未対応の操作です。");
+  if(interaction.type!==2) return interactionResponse("未対応の操作です.");
+
+  const name=String(interaction.data?.name??"");
+  if(name==="invite-link"){
+    const guildId=String(interaction.guild_id??"");
+    const channelId=String(interaction.channel_id??"");
+    const ownerUserId=String(
+      interaction.member?.user?.id??interaction.user?.id??""
+    );
+    if(!guildId||!channelId||!ownerUserId){
+      return interactionResponse("このコマンドはキャンペーン対象サーバー内で実行してください。");
+    }
+    try{
+      const invite=await createInviteCampaignLink(env,{
+        guildId,
+        channelId,
+        ownerUserId
+      });
+      return interactionResponse(
+        "あなた専用の招待キャンペーンリンクです。\n"+
+        invite.url+
+        "\n\nこのリンク経由の有効招待がカウントされるとDMで進捗を通知します。"
+      );
+    }catch(error){
+      return interactionResponse(
+        "招待リンクの発行に失敗しました: "+
+        (error instanceof Error?error.message:String(error))
+      );
+    }
+  }
+
   if(!canManage(interaction)){
     return interactionResponse("このコマンドには「サーバー管理」権限が必要です。");
   }
-
-  const name=String(interaction.data?.name??"");
   if(name==="shiire-status"){
     ctx.waitUntil((async()=>{
       try{
@@ -225,6 +258,10 @@ async function registerCommands(env:Env){
   const token=env.DISCORD_BOT_TOKEN?.trim();
   if(!applicationId||!token) throw new HttpError(503,"DISCORD_BOT_NOT_CONFIGURED");
   const commands=[
+    {
+      name:"invite-link",
+      description:"招待キャンペーン用のあなた専用リンクを発行します"
+    },
     {
       name:"shiire-status",
       description:"自動仕入れ商品の在庫と最終ジョブを確認します"
@@ -450,6 +487,12 @@ export default {
   async scheduled(_controller:ScheduledController,env:Env,ctx:ExecutionContext){
     ctx.waitUntil((async()=>{
       try{
+        await ensureInviteCampaignGateway(env);
+      }catch(error){
+        console.error("scheduled invite campaign gateway failed",error);
+      }
+
+      try{
         await runAllProducts(env);
       }catch(error){
         console.error("scheduled generic procurement failed",error);
@@ -473,6 +516,12 @@ export default {
         }
       }catch(error){
         console.error("scheduled X automation settings load failed",error);
+      }
+
+      try{
+        await retryInviteCampaignRewards(env);
+      }catch(error){
+        console.error("scheduled invite reward retry failed",error);
       }
 
       try{

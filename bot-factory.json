@@ -8,7 +8,7 @@
   "d1_schema_files": [],
   "setup": {
     "title": "Discord-Shiire / Xアカウント仕入れBOT",
-    "description": "Xaccount-Botと連携する仕入れ・在庫・自販機BOTをCloudflare Workersへ起動します。初期状態はHStoraへのLTC手動補充 / Dry Run / 自動仕入れOFFです。",
+    "description": "Xaccount-Botと連携する仕入れ・在庫・自販機・招待キャンペーンBOTをCloudflare Workersへ起動します。初期状態はHStoraへのLTC手動補充 / Dry Run / 自動仕入れOFFです。",
     "fields": [
       {
         "key": "DISCORD_BOT_TOKEN",
@@ -176,7 +176,16 @@
       }
     ],
     "discord": {
-      "intents": [],
+      "intents": [
+        {
+          "id": "server-members-intent",
+          "label": "Server Members Intent",
+          "required": true,
+          "description": "招待キャンペーンでGUILD_MEMBER_ADDを受信し、参加者をリアルタイム検知するために必要です。",
+          "path": "Discord Developer Portal > Bot > Privileged Gateway Intents",
+          "url": "https://discord.com/developers/applications"
+        }
+      ],
       "permissions": [
         {
           "id": "view-channels",
@@ -219,6 +228,20 @@
           "required": true,
           "description": "自販機で購入後ロールを付与する場合に必要です。Discord-Shiireロールを付与対象ロールより上に配置してください。",
           "discord_permission": "MANAGE_ROLES"
+        },
+        {
+          "id": "manage-guild",
+          "label": "サーバーの管理",
+          "required": true,
+          "description": "招待キャンペーンでGuild Invitesの利用回数を取得し、誰の招待かを照合するために必要です。",
+          "discord_permission": "MANAGE_GUILD"
+        },
+        {
+          "id": "create-instant-invite",
+          "label": "招待を作成",
+          "required": true,
+          "description": "/invite-link からユーザー専用の招待キャンペーンURLを発行するために必要です。",
+          "discord_permission": "CREATE_INSTANT_INVITE"
         }
       ],
       "checks": [
@@ -238,11 +261,12 @@
         }
       ],
       "notes": [
-        "Privileged Gateway Intentsは現在のDiscord-Shiire実装では不要です。",
+        "招待キャンペーンを使うため、Discord Developer PortalでServer Members IntentをONにしてください。",
         "Binance出金キー・固定IP・Travel Rule設定は現在のHStora手動入金境界では不要です。",
         "初期状態は funding_mode=manual_hstora / Dry Run=true / Binance自動購入OFF / 自動仕入れOFFです。",
         "在庫通知でロールをpingする場合は、通知対象ロールをDiscord側でメンション可能にしてください。BOTへMention Everyone権限を広く付ける構成にはしていません。",
-        "BINANCE_AUTO_FUNDING_ENABLEDは通常OFFです。ONにしない限り、Binanceの実LTC購入はコード側で拒否されます。"
+        "BINANCE_AUTO_FUNDING_ENABLEDは通常OFFです。ONにしない限り、Binanceの実LTC購入はコード側で拒否されます。",
+        "デプロイ後、管理APIのPOST /api/discord/registerを1回実行して /invite-link をDiscordへ登録してください。"
       ]
     }
   }
