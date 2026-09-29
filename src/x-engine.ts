@@ -51,6 +51,11 @@ import {
   qualifyHstoraProduct,
   type ProcurementClass
 } from "./x-qualification";
+import {
+  PRIMARY_SPLIT_HSTORA_PRODUCT_ID,
+  evenSplitPurchaseQuantity,
+  isPrimarySplitHstoraProduct
+} from "./x-procurement-policy";
 import { notifyDiscord } from "./x-alerts";
 import { notifyShiireVendingStockArrival } from "./shiire-vending";
 
@@ -90,7 +95,7 @@ export async function reconcilePendingXOrders(env:Env){
       const status=String(order.status??"").toUpperCase();
       const hasDelivery=Boolean(order.delivery?.available&&Array.isArray(order.delivery?.items));
       if(hasDelivery){
-        const added=await storeDeliveredAccounts(env,{
+        const stored=await storeDeliveredAccounts(env,{
           purchaseOrderId:String(row.id),
           supplier:"hstora",
           supplierProductId:String(row.supplier_product_id),
@@ -102,11 +107,13 @@ export async function reconcilePendingXOrders(env:Env){
               :null,
           orderResponse:order
         });
+        const added=stored.inserted;
         if(added>0){
           await notifyShiireVendingStockArrival(
             env,
             String(row.supplier_product_id),
-            added
+            added,
+            stored.byClass
           ).catch(()=>undefined);
         }
         const storedTotal=await purchasedAccountCountForOrder(env,String(row.id));
@@ -224,9 +231,28 @@ async function selectCandidate(
   const settings=await loadXSettings(env);
   const approvedIds=
     settings.seller_quality_mode==="manual_product_approval"
-      ?settings.approved_hstora_product_ids
+      ?[...new Set([
+        PRIMARY_SPLIT_HSTORA_PRODUCT_ID,
+        ...settings.approved_hstora_product_ids
+      ])]
       :[];
   const products=await catalogProducts(env,approvedIds);
+  if(!products.some(product=>
+    isPrimarySplitHstoraProduct(product.id)
+  )){
+    try{
+      products.unshift(
+        await getHstoraProduct(env,PRIMARY_SPLIT_HSTORA_PRODUCT_ID)
+      );
+    }catch(error){
+      await auditX(env,{
+        level:"warn",
+        kind:"HSTORA_PRIMARY_PRODUCT_FETCH_FAILED",
+        message:error instanceof Error?error.message:String(error),
+        details:{productId:PRIMARY_SPLIT_HSTORA_PRODUCT_ID,targetClass}
+      });
+    }
+  }
   const candidates:Array<{
     product:HstoraProduct;
     q:ReturnType<typeof qualifyHstoraProduct>;
@@ -242,6 +268,7 @@ async function selectCandidate(
       visibility.labels.includes("TOP+Latest")||
       visibility.labels.includes("TOP Search");
     const hasNoShadow=visibility.labels.includes("No Shadowban");
+    const preferredSplit=isPrimarySplitHstoraProduct(product.id);
     const baseJpy=catalogBasePriceJpy(product,settings);
     const baseUsd=
       String(product.currency??"").toUpperCase()==="USD"
@@ -256,9 +283,10 @@ async function selectCandidate(
         continue;
       }
     }else{
-      // No Shadowban is a separate product class. Listings that already state
-      // TOP Search belong to TOP_SEARCH and are never double-counted here.
-      if(hasTop) continue;
+      // Ordinary listings remain class-exclusive. Product 4841 is explicitly
+      // dual-capability and is allowed to replenish either class because its
+      // delivered credentials are split 50:50 at storage time.
+      if(hasTop&&!preferredSplit) continue;
       if(
         !hasNoShadow&&
         (
@@ -292,14 +320,33 @@ async function selectCandidate(
       priorPurchases===0
         ?settings.trial_purchase_count
         :quantityLimit;
-    const plannedQuantity=Math.min(
+    let plannedQuantity=Math.min(
       quantityLimit,
       Math.max(1,trialCap),
       Math.max(0,Number(full.stock_available??0))
     );
+    if(isPrimarySplitHstoraProduct(full.id)){
+      plannedQuantity=evenSplitPurchaseQuantity(plannedQuantity);
+    }
     if(plannedQuantity<=0) continue;
 
-    const q=qualifyHstoraProduct(full,settings,plannedQuantity);
+    const qualificationSettings=
+      isPrimarySplitHstoraProduct(full.id)&&
+      settings.seller_quality_mode==="manual_product_approval"&&
+      !settings.approved_hstora_product_ids.includes(PRIMARY_SPLIT_HSTORA_PRODUCT_ID)
+        ?{
+          ...settings,
+          approved_hstora_product_ids:[
+            ...settings.approved_hstora_product_ids,
+            PRIMARY_SPLIT_HSTORA_PRODUCT_ID
+          ]
+        }
+        :settings;
+    const q=qualifyHstoraProduct(
+      full,
+      qualificationSettings,
+      plannedQuantity
+    );
     const previous=await getSupplierProductRecord(env,String(full.id));
     const previousPrice=Number(previous?.unit_price??0);
     const currentPrice=Number(full.price??0);
@@ -355,12 +402,24 @@ async function selectCandidate(
       seller:null
     });
 
-    if(q.qualified&&q.procurement_class===targetClass){
+    const supportsTarget=
+      q.procurement_class===targetClass||
+      (
+        targetClass==="NO_SHADOWBAN"&&
+        isPrimarySplitHstoraProduct(full.id)&&
+        q.procurement_class==="TOP_SEARCH"&&
+        q.search_visibility.includes("No Shadowban")
+      );
+    if(q.qualified&&supportsTarget){
       candidates.push({product:full,q,plannedQuantity,priorPurchases});
     }
   }
 
   candidates.sort((a,b)=>{
+    const aPreferred=isPrimarySplitHstoraProduct(a.product.id);
+    const bPreferred=isPrimarySplitHstoraProduct(b.product.id);
+    if(aPreferred!==bPreferred) return aPreferred?-1:1;
+
     const aPrice=
       targetClass==="NO_SHADOWBAN"
         ?Number(a.q.unit_price_source)
@@ -1450,11 +1509,14 @@ export async function runXProcurement(env:Env):Promise<XRunResult>{
   const fresh=await getHstoraProduct(env,Number(candidate.product.id));
   const prior=await successfulPurchaseCountForProduct(env,String(fresh.id));
   const trialCap=prior===0?settings.trial_purchase_count:batch;
-  const quantity=Math.min(
+  let quantity=Math.min(
     batch,
     Math.max(1,trialCap),
     Math.max(0,Number(fresh.stock_available??0))
   );
+  if(isPrimarySplitHstoraProduct(fresh.id)){
+    quantity=evenSplitPurchaseQuantity(quantity);
+  }
   if(quantity<=0){
     return {
       action:"PRODUCT_OUT_OF_STOCK",
@@ -1467,8 +1529,28 @@ export async function runXProcurement(env:Env):Promise<XRunResult>{
   // Recalculate the effective tier price using the quantity that will really
   // be ordered. This prevents a 20-unit discount from qualifying a 10-unit
   // trial purchase above the JPY ceiling.
-  const q=qualifyHstoraProduct(fresh,settings,quantity);
-  if(!q.qualified||q.procurement_class!==targetClass){
+  const qualificationSettings=
+    isPrimarySplitHstoraProduct(fresh.id)&&
+    settings.seller_quality_mode==="manual_product_approval"&&
+    !settings.approved_hstora_product_ids.includes(PRIMARY_SPLIT_HSTORA_PRODUCT_ID)
+      ?{
+        ...settings,
+        approved_hstora_product_ids:[
+          ...settings.approved_hstora_product_ids,
+          PRIMARY_SPLIT_HSTORA_PRODUCT_ID
+        ]
+      }
+      :settings;
+  const q=qualifyHstoraProduct(fresh,qualificationSettings,quantity);
+  const supportsTarget=
+    q.procurement_class===targetClass||
+    (
+      targetClass==="NO_SHADOWBAN"&&
+      isPrimarySplitHstoraProduct(fresh.id)&&
+      q.procurement_class==="TOP_SEARCH"&&
+      q.search_visibility.includes("No Shadowban")
+    );
+  if(!q.qualified||!supportsTarget){
     await setCircuitBreaker(
       env,
       "product_price",
@@ -1584,7 +1666,7 @@ export async function runXProcurement(env:Env):Promise<XRunResult>{
     });
     const status=String(order.status??"SUBMITTED").toUpperCase();
     await allowExpectedHstoraDecrease(env,totalSource);
-    const added=order.delivery?.available
+    const stored=order.delivery?.available
       ?await storeDeliveredAccounts(env,{
         purchaseOrderId:recordId,
         supplier:"hstora",
@@ -1593,12 +1675,14 @@ export async function runXProcurement(env:Env):Promise<XRunResult>{
         procurementClass:q.procurement_class,
         orderResponse:order
       })
-      :0;
+      :null;
+    const added=stored?.inserted??0;
     if(added>0){
       await notifyShiireVendingStockArrival(
         env,
         String(fresh.id),
-        added
+        added,
+        stored?.byClass
       ).catch(()=>undefined);
     }
     const storedTotal=order.delivery?.available
@@ -1655,7 +1739,7 @@ export async function runXProcurement(env:Env):Promise<XRunResult>{
       recovered=true;
       const status=String(order.status??"PROCESSING").toUpperCase();
       await allowExpectedHstoraDecrease(env,totalSource);
-      const added=order.delivery?.available
+      const stored=order.delivery?.available
         ?await storeDeliveredAccounts(env,{
           purchaseOrderId:recordId,
           supplier:"hstora",
@@ -1664,12 +1748,14 @@ export async function runXProcurement(env:Env):Promise<XRunResult>{
           procurementClass:q.procurement_class,
           orderResponse:order
         })
-        :0;
+        :null;
+      const added=stored?.inserted??0;
       if(added>0){
         await notifyShiireVendingStockArrival(
           env,
           String(fresh.id),
-          added
+          added,
+          stored?.byClass
         ).catch(()=>undefined);
       }
       const recoveredStoredTotal=order.delivery?.available
