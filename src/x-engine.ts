@@ -53,8 +53,10 @@ import {
 } from "./x-qualification";
 import {
   DUAL_TOP_SPLIT_MODE,
+  PREFERRED_TOP_HSTORA_PRODUCT_IDS,
   evenSplitPurchaseQuantity,
-  hasDualTopNoShadowbanEvidence
+  hasDualTopNoShadowbanEvidence,
+  isPreferredTopHstoraSource
 } from "./x-procurement-policy";
 import { notifyDiscord } from "./x-alerts";
 import { notifyShiireVendingStockArrival } from "./shiire-vending";
@@ -229,10 +231,18 @@ async function selectCandidate(
   targetClass:ProcurementClass
 ){
   const settings=await loadXSettings(env);
+  const trustedApprovedIds=[...new Set([
+    ...PREFERRED_TOP_HSTORA_PRODUCT_IDS,
+    ...settings.approved_hstora_product_ids
+  ])];
   const approvedIds=
     settings.seller_quality_mode==="manual_product_approval"
-      ?settings.approved_hstora_product_ids
+      ?trustedApprovedIds
       :[];
+  const qualificationSettings=
+    settings.seller_quality_mode==="manual_product_approval"
+      ?{...settings,approved_hstora_product_ids:trustedApprovedIds}
+      :settings;
   const products=await catalogProducts(env,approvedIds);
   const candidates:Array<{
     product:HstoraProduct;
@@ -315,7 +325,7 @@ async function selectCandidate(
 
     const q=qualifyHstoraProduct(
       full,
-      settings,
+      qualificationSettings,
       plannedQuantity
     );
     const previous=await getSupplierProductRecord(env,String(full.id));
@@ -386,6 +396,10 @@ async function selectCandidate(
   }
 
   candidates.sort((a,b)=>{
+    const aPreferred=isPreferredTopHstoraSource(a.product.id);
+    const bPreferred=isPreferredTopHstoraSource(b.product.id);
+    if(aPreferred!==bPreferred) return aPreferred?-1:1;
+
     if(targetClass==="NO_SHADOWBAN"){
       const aDual=hasDualTopNoShadowbanEvidence(a.q.search_visibility);
       const bDual=hasDualTopNoShadowbanEvidence(b.q.search_visibility);
@@ -1505,7 +1519,15 @@ export async function runXProcurement(env:Env):Promise<XRunResult>{
   // Recalculate the effective tier price using the quantity that will really
   // be ordered. This prevents a 20-unit discount from qualifying a 10-unit
   // trial purchase above the JPY ceiling.
-  const q=qualifyHstoraProduct(fresh,settings,quantity);
+  const trustedApprovedIds=[...new Set([
+    ...PREFERRED_TOP_HSTORA_PRODUCT_IDS,
+    ...settings.approved_hstora_product_ids
+  ])];
+  const qualificationSettings=
+    settings.seller_quality_mode==="manual_product_approval"
+      ?{...settings,approved_hstora_product_ids:trustedApprovedIds}
+      :settings;
+  const q=qualifyHstoraProduct(fresh,qualificationSettings,quantity);
   const supportsTarget=
     q.procurement_class===targetClass||
     (
