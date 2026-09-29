@@ -2,7 +2,7 @@ import type { Env } from "./types";
 import { randomId } from "./crypto";
 import { decryptSensitive, type EncryptedSecret } from "./x-crypto";
 import {
-  earnedRewardCount,
+  effectiveEarnedRewardCount,
   remainingUntilNextReward
 } from "./invite-campaign-policy";
 import {
@@ -279,9 +279,10 @@ async function ensureRewards(
   progress:InviteCampaignProgress
 ):Promise<void>{
   const settings=await getInviteCampaignSettings(env);
-  const earned=earnedRewardCount(
+  const earned=effectiveEarnedRewardCount(
     progress.valid_invites,
-    settings.invites_per_reward
+    settings.invites_per_reward,
+    progress.rewards_earned
   );
   const now=Date.now();
   for(let ordinal=1;ordinal<=earned;ordinal++){
@@ -316,6 +317,23 @@ export async function applyInviteCampaignCredit(
   await sendProgress(env,progress,kind,reason).catch(()=>undefined);
   if(kind==="valid") await ensureRewards(env,progress);
   return progress;
+}
+
+export async function reconcileInviteCampaignRewards(env:Env){
+  await ensureInviteCampaignSchema(env);
+  const settings=await getInviteCampaignSettings(env);
+  if(!settings.enabled||!settings.guild_id){
+    return {processed:0};
+  }
+  const rows=(await env.DB.prepare(
+    "SELECT guild_id,inviter_user_id,valid_invites,excluded_invites,rewards_earned,updated_at "+
+    "FROM invite_campaign_progress WHERE guild_id=? "+
+    "ORDER BY updated_at ASC LIMIT 5000"
+  ).bind(settings.guild_id).all<InviteCampaignProgress>()).results;
+  for(const row of rows){
+    await ensureRewards(env,row);
+  }
+  return {processed:rows.length};
 }
 
 export async function retryInviteCampaignRewards(env:Env){
