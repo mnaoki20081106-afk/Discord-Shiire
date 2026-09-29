@@ -335,22 +335,25 @@ async function selectCandidate(
     }
     if(plannedQuantity<=0) continue;
 
-    const rawQualification=qualifyHstoraProduct(
+    const classOverride=
+      procurementClassOverrideForHstoraProduct(full.id)??undefined;
+    const policyQualification=qualifyHstoraProduct(
       full,
       qualificationSettings,
-      plannedQuantity
+      plannedQuantity,
+      Date.now(),
+      classOverride
     );
     const q=
-      fullForceNoShadowban
+      classOverride
         ?{
-          ...rawQualification,
-          procurement_class:"NO_SHADOWBAN" as const,
+          ...policyQualification,
           evidence:[
-            ...rawQualification.evidence,
+            ...policyQualification.evidence,
             "POLICY_OVERRIDE_HSTORA_4521_NO_SHADOWBAN"
           ]
         }
-        :rawQualification;
+        :policyQualification;
     const previous=await getSupplierProductRecord(env,String(full.id));
     const previousPrice=Number(previous?.unit_price??0);
     const currentPrice=Number(full.price??0);
@@ -1561,22 +1564,25 @@ export async function runXProcurement(env:Env):Promise<XRunResult>{
     settings.seller_quality_mode==="manual_product_approval"
       ?{...settings,approved_hstora_product_ids:trustedApprovedIds}
       :settings;
-  const rawQualification=qualifyHstoraProduct(
+  const classOverride=
+    procurementClassOverrideForHstoraProduct(fresh.id)??undefined;
+  const policyQualification=qualifyHstoraProduct(
     fresh,
     qualificationSettings,
-    quantity
+    quantity,
+    Date.now(),
+    classOverride
   );
   const q=
-    freshForceNoShadowban
+    classOverride
       ?{
-        ...rawQualification,
-        procurement_class:"NO_SHADOWBAN" as const,
+        ...policyQualification,
         evidence:[
-          ...rawQualification.evidence,
+          ...policyQualification.evidence,
           "POLICY_OVERRIDE_HSTORA_4521_NO_SHADOWBAN"
         ]
       }
-      :rawQualification;
+      :policyQualification;
   const supportsTarget=
     q.procurement_class===targetClass||
     (
