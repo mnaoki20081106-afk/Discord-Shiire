@@ -8,6 +8,8 @@
   ],
   "workers_dev": true,
   "preview_urls": true,
+  "durable_objects": {"bindings":[{"name":"INVITE_GATEWAY","class_name":"InviteGateway"}]},
+  "migrations": [{"tag":"invite-gateway-v1","new_sqlite_classes":["InviteGateway"]}],
   "d1_databases": [
     {
       "binding": "DB"
