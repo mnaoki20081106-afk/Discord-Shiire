@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   earnedRewardCount,
+  effectiveEarnedRewardCount,
   inviteUsesDelta,
   remainingUntilNextReward
 } from "../src/invite-campaign-policy.ts";
@@ -21,4 +22,10 @@ test("invite use deltas never go negative",()=>{
   assert.equal(inviteUsesDelta(3,5),2);
   assert.equal(inviteUsesDelta(5,3),0);
   assert.equal(inviteUsesDelta(undefined,4),4);
+});
+
+test("earned invite rewards are never revoked when threshold changes",()=>{
+  assert.equal(effectiveEarnedRewardCount(10,5,2),2);
+  assert.equal(effectiveEarnedRewardCount(10,20,2),2);
+  assert.equal(effectiveEarnedRewardCount(10,3,2),3);
 });
