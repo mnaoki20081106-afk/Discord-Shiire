@@ -16,7 +16,6 @@ import { runAllProducts, runProduct } from "./engine";
 import { handleXAdminApi, xAdminPage } from "./x-admin";
 import { runLtcAutoPurchase, runXProcurement } from "./x-engine";
 import { loadXSettings } from "./x-settings";
-import { createInviteCampaignLink } from "./invite-campaign";
 import { retryInviteCampaignRewards } from "./invite-campaign-rewards";
 import { ensureInviteCampaignGateway, InviteGateway } from "./invite-gateway";
 import { isBinanceAutoFundingServerEnabled } from "./x-funding-mode";
@@ -166,34 +165,6 @@ async function handleInteraction(
   if(interaction.type!==2) return interactionResponse("未対応の操作です.");
 
   const name=String(interaction.data?.name??"");
-  if(name==="invite-link"){
-    const guildId=String(interaction.guild_id??"");
-    const channelId=String(interaction.channel_id??"");
-    const ownerUserId=String(
-      interaction.member?.user?.id??interaction.user?.id??""
-    );
-    if(!guildId||!channelId||!ownerUserId){
-      return interactionResponse("このコマンドはキャンペーン対象サーバー内で実行してください。");
-    }
-    try{
-      const invite=await createInviteCampaignLink(env,{
-        guildId,
-        channelId,
-        ownerUserId
-      });
-      return interactionResponse(
-        "あなた専用の招待キャンペーンリンクです。\n"+
-        invite.url+
-        "\n\nこのリンク経由の有効招待がカウントされるとDMで進捗を通知します。"
-      );
-    }catch(error){
-      return interactionResponse(
-        "招待リンクの発行に失敗しました: "+
-        (error instanceof Error?error.message:String(error))
-      );
-    }
-  }
-
   if(!canManage(interaction)){
     return interactionResponse("このコマンドには「サーバー管理」権限が必要です。");
   }
@@ -258,10 +229,6 @@ async function registerCommands(env:Env){
   const token=env.DISCORD_BOT_TOKEN?.trim();
   if(!applicationId||!token) throw new HttpError(503,"DISCORD_BOT_NOT_CONFIGURED");
   const commands=[
-    {
-      name:"invite-link",
-      description:"招待キャンペーン用のあなた専用リンクを発行します"
-    },
     {
       name:"shiire-status",
       description:"自動仕入れ商品の在庫と最終ジョブを確認します"

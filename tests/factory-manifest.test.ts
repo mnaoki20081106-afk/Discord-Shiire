@@ -66,18 +66,21 @@ test("Factory includes Manage Roles for vending buyer-role fulfillment",()=>{
 });
 
 
-test("Factory exposes invite campaign Discord requirements",()=>{
+test("Factory exposes native-invite campaign Discord requirements",()=>{
   const intent=manifest.setup.discord?.intents?.find(
     item=>item.id==="server-members-intent"
   );
   assert.ok(intent);
   assert.equal(intent.required,true);
 
-  for(const id of ["manage-guild","create-instant-invite"]){
-    const permission=manifest.setup.discord?.permissions?.find(
-      item=>item.id===id
-    );
-    assert.ok(permission,id);
-    assert.equal(permission.required,true,id);
-  }
+  const manageGuild=manifest.setup.discord?.permissions?.find(
+    item=>item.id==="manage-guild"
+  );
+  assert.ok(manageGuild);
+  assert.equal(manageGuild.required,true);
+
+  const botInvitePermission=manifest.setup.discord?.permissions?.find(
+    item=>item.id==="create-instant-invite"
+  );
+  assert.equal(botInvitePermission,undefined);
 });

@@ -55,25 +55,6 @@ export function fetchDiscordGuildInvites(env:Env,guildId:string){
   );
 }
 
-export async function createDiscordCampaignInvite(
-  env:Env,
-  channelId:string
-):Promise<DiscordInviteSnapshot>{
-  return inviteDiscordJson<DiscordInviteSnapshot>(
-    env,
-    "/channels/"+encodeURIComponent(channelId)+"/invites",
-    {
-      method:"POST",
-      body:JSON.stringify({
-        max_age:0,
-        max_uses:0,
-        temporary:false,
-        unique:true
-      })
-    }
-  );
-}
-
 export async function sendInviteCampaignDm(
   env:Env,
   userId:string,

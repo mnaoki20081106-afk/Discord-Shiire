@@ -6,10 +6,7 @@ import {
   markInviteCampaignEvent,
   recordInviteCampaignRuntimeError
 } from "./invite-campaign-db";
-import {
-  createDiscordCampaignInvite,
-  fetchDiscordGuildInvites
-} from "./invite-campaign-discord";
+import { fetchDiscordGuildInvites } from "./invite-campaign-discord";
 import { applyInviteCampaignCredit } from "./invite-campaign-rewards";
 
 type InviteRow={
@@ -203,43 +200,4 @@ export async function handleInviteCampaignMemberJoin(
     await recordInviteCampaignRuntimeError(env,error);
     throw error;
   }
-}
-
-export async function createInviteCampaignLink(
-  env:Env,
-  input:{guildId:string;channelId:string;ownerUserId:string}
-):Promise<{code:string;url:string}>{
-  const settings=await getInviteCampaignSettings(env);
-  if(!settings.enabled||settings.guild_id!==input.guildId){
-    throw new Error("INVITE_CAMPAIGN_NOT_ENABLED_FOR_GUILD");
-  }
-  if(
-    !/^\d{15,22}$/.test(input.channelId)||
-    !/^\d{15,22}$/.test(input.ownerUserId)
-  ){
-    throw new Error("INVALID_DISCORD_ID");
-  }
-
-  const invite=await createDiscordCampaignInvite(env,input.channelId);
-  if(!invite.code) throw new Error("DISCORD_INVITE_CODE_MISSING");
-  await ensureInviteCampaignSchema(env);
-  const now=Date.now();
-  await env.DB.prepare(
-    "INSERT INTO invite_campaign_invites"+
-    "(guild_id,code,owner_user_id,owner_source,uses,pending_uses,channel_id,max_uses,"+
-    "expires_at,last_seen_at) VALUES(?,?,?,'managed',?,0,?,?,?,?) "+
-    "ON CONFLICT(guild_id,code) DO UPDATE SET owner_user_id=excluded.owner_user_id,"+
-    "owner_source='managed',uses=excluded.uses,channel_id=excluded.channel_id,"+
-    "max_uses=excluded.max_uses,expires_at=excluded.expires_at,last_seen_at=excluded.last_seen_at"
-  ).bind(
-    input.guildId,
-    invite.code,
-    input.ownerUserId,
-    Math.max(0,Math.floor(Number(invite.uses??0))),
-    invite.channel?.id??input.channelId,
-    Math.max(0,Math.floor(Number(invite.max_uses??0))),
-    invite.expires_at??null,
-    now
-  ).run();
-  return {code:invite.code,url:"https://discord.gg/"+invite.code};
 }
