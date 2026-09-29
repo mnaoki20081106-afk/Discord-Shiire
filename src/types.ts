@@ -1,5 +1,6 @@
 export interface Env {
   DB: D1Database;
+  INVITE_GATEWAY: DurableObjectNamespace;
   MAIN_BOT_BASE_URL?: string;
   XACCOUNT_BOT_BASE_URL?: string;
   ADMIN_TOKEN: string;
