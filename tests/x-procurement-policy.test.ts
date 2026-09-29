@@ -2,10 +2,19 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   DUAL_TOP_SPLIT_MODE,
+  PREFERRED_TOP_HSTORA_PRODUCT_IDS,
   evenSplitPurchaseQuantity,
   hasDualTopNoShadowbanEvidence,
+  isPreferredTopHstoraSource,
   splitProcurementClassAtRank
 } from "../src/x-procurement-policy.ts";
+
+test("trusted preferred TOP sources are 4841 and 5132",()=>{
+  assert.deepEqual([...PREFERRED_TOP_HSTORA_PRODUCT_IDS],[4841,5132]);
+  assert.equal(isPreferredTopHstoraSource(4841),true);
+  assert.equal(isPreferredTopHstoraSource("5132"),true);
+  assert.equal(isPreferredTopHstoraSource(9999),false);
+});
 
 test("dual split mode is generic and not tied to a product id",()=>{
   assert.equal(DUAL_TOP_SPLIT_MODE,"TOP_SEARCH_NO_SHADOWBAN_50_50");
