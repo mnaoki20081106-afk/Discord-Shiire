@@ -63,6 +63,10 @@ import {
 } from "./x-procurement-policy";
 import { notifyDiscord } from "./x-alerts";
 import { notifyShiireVendingStockArrival } from "./shiire-vending";
+import {
+  getInviteCampaignSettings,
+  inviteCampaignStockCount
+} from "./invite-campaign-db";
 
 const PAYPAY_DIRECT_PURCHASE_MIN_JPY=1_000;
 const PAYPAY_JPY_DEPOSIT_MIN_GROSS_JPY=1_000;
@@ -77,6 +81,8 @@ export type XRunResult={
   unitPriceJpy?:number|null;
   details?:unknown;
 };
+
+type ProcurementTarget=ProcurementClass|"INVITE_CAMPAIGN";
 
 function jstPeriodStarts(now=Date.now()){
   const JST=9*60*60*1000;
@@ -107,7 +113,8 @@ export async function reconcilePendingXOrders(env:Env){
           purchasePrice:Number(row.unit_price),
           procurementClass:
             row.procurement_class==="TOP_SEARCH"||
-            row.procurement_class==="NO_SHADOWBAN"
+            row.procurement_class==="NO_SHADOWBAN"||
+            row.procurement_class==="INVITE_CAMPAIGN"
               ?row.procurement_class
               :null,
           orderResponse:order
@@ -231,7 +238,7 @@ function catalogBasePriceJpy(
 async function selectCandidate(
   env:Env,
   quantityLimit:number,
-  targetClass:ProcurementClass
+  targetClass:ProcurementTarget
 ){
   const settings=await loadXSettings(env);
   const trustedApprovedIds=[...new Set([
@@ -275,18 +282,10 @@ async function selectCandidate(
         :null;
 
     if(targetClass==="TOP_SEARCH"){
-      // Product 4521 is intentionally excluded from TOP inventory even when
-      // HStora advertises TOP capability; its quality is only trusted for the
-      // No-Shadowban class.
       if(forceNoShadowban) continue;
-      // Fail closed: price is never enough to make a product a TOP_SEARCH
-      // candidate. Explicit positive TOP evidence is mandatory.
       if(!hasTop) continue;
       if(baseJpy===null||baseJpy>settings.max_unit_price_jpy) continue;
-    }else{
-      // Product 4521 is a deliberate class exception: TOP wording is ignored
-      // for inventory classification, but explicit No-Shadowban evidence is
-      // still mandatory. Other TOP listings need dual-capability evidence.
+    }else if(targetClass==="NO_SHADOWBAN"){
       if(hasTop&&!dualCapability&&!forceNoShadowban) continue;
       if(!hasNoShadow) continue;
       if(
@@ -296,6 +295,16 @@ async function selectCandidate(
       ){
         continue;
       }
+    }else{
+      const topEligible=
+        !forceNoShadowban&&hasTop&&
+        baseJpy!==null&&baseJpy<=settings.max_unit_price_jpy;
+      const noShadowEligible=
+        hasNoShadow&&
+        (!hasTop||dualCapability||forceNoShadowban)&&
+        baseUsd!==null&&Number.isFinite(baseUsd)&&
+        baseUsd<=settings.max_no_shadowban_unit_price_usd;
+      if(!topEligible&&!noShadowEligible) continue;
     }
 
     let full:HstoraProduct;
@@ -330,7 +339,7 @@ async function selectCandidate(
       Math.max(1,trialCap),
       Math.max(0,Number(full.stock_available??0))
     );
-    if(fullDualCapability&&!fullForceNoShadowban){
+    if(targetClass!=="INVITE_CAMPAIGN"&&fullDualCapability&&!fullForceNoShadowban){
       plannedQuantity=evenSplitPurchaseQuantity(plannedQuantity);
     }
     if(plannedQuantity<=0) continue;
@@ -410,19 +419,25 @@ async function selectCandidate(
     });
 
     const supportsTarget=
-      q.procurement_class===targetClass||
-      (
-        targetClass==="NO_SHADOWBAN"&&
-        q.procurement_class==="TOP_SEARCH"&&
-        hasDualTopNoShadowbanEvidence(q.search_visibility)
-      );
+      targetClass==="INVITE_CAMPAIGN"
+        ?Boolean(q.procurement_class)
+        :q.procurement_class===targetClass||
+          (
+            targetClass==="NO_SHADOWBAN"&&
+            q.procurement_class==="TOP_SEARCH"&&
+            hasDualTopNoShadowbanEvidence(q.search_visibility)
+          );
     if(q.qualified&&supportsTarget){
       candidates.push({product:full,q,plannedQuantity,priorPurchases});
     }
   }
 
   candidates.sort((a,b)=>{
-    if(targetClass==="NO_SHADOWBAN"){
+    if(targetClass==="INVITE_CAMPAIGN"){
+      const aPreferred=isPreferredTopHstoraSource(a.product.id)||isPreferredNoShadowbanHstoraSource(a.product.id);
+      const bPreferred=isPreferredTopHstoraSource(b.product.id)||isPreferredNoShadowbanHstoraSource(b.product.id);
+      if(aPreferred!==bPreferred) return aPreferred?-1:1;
+    }else if(targetClass==="NO_SHADOWBAN"){
       const aPreferredNoShadow=isPreferredNoShadowbanHstoraSource(a.product.id);
       const bPreferredNoShadow=isPreferredNoShadowbanHstoraSource(b.product.id);
       if(aPreferredNoShadow!==bPreferredNoShadow){
@@ -470,7 +485,12 @@ async function selectCandidate(
       maxUnitPrice:
         targetClass==="TOP_SEARCH"
           ?{currency:"JPY",value:settings.max_unit_price_jpy}
-          :{currency:"USD",value:settings.max_no_shadowban_unit_price_usd},
+          :targetClass==="NO_SHADOWBAN"
+            ?{currency:"USD",value:settings.max_no_shadowban_unit_price_usd}
+            :{
+              topSearch:{currency:"JPY",value:settings.max_unit_price_jpy},
+              noShadowban:{currency:"USD",value:settings.max_no_shadowban_unit_price_usd}
+            },
       strategy:settings.procurement_strategy,
       cheapest:candidates.slice(0,10).map(candidate=>({
         productId:candidate.product.id,
@@ -1422,18 +1442,23 @@ export async function runXProcurement(env:Env):Promise<XRunResult>{
     return {action:"HSTORA_BALANCE_ERROR",dryRun:settings.dry_run};
   }
 
-  const [inventory,topInventory,noShadowInventory]=await Promise.all([
+  const campaignSettings=await getInviteCampaignSettings(env);
+  const [inventory,topInventory,noShadowInventory,campaignInventory]=await Promise.all([
     readyInventoryCount(env),
     readyInventoryCountByClass(env,"TOP_SEARCH"),
-    readyInventoryCountByClass(env,"NO_SHADOWBAN")
+    readyInventoryCountByClass(env,"NO_SHADOWBAN"),
+    inviteCampaignStockCount(env)
   ]);
 
-  let targetClass:ProcurementClass|null=null;
+  let targetClass:ProcurementTarget|null=null;
   let classInventory=0;
   let classTarget=0;
 
-  // TOP_SEARCH gets priority when both independent product stocks are low.
-  if(topInventory<=settings.reorder_point){
+  if(campaignSettings.enabled&&campaignInventory<campaignSettings.target_stock){
+    targetClass="INVITE_CAMPAIGN";
+    classInventory=campaignInventory;
+    classTarget=campaignSettings.target_stock;
+  }else if(topInventory<=settings.reorder_point){
     targetClass="TOP_SEARCH";
     classInventory=topInventory;
     classTarget=settings.target_stock;
@@ -1446,7 +1471,12 @@ export async function runXProcurement(env:Env):Promise<XRunResult>{
       action:"INVENTORY_OK",
       dryRun:settings.dry_run,
       inventory,
-      details:{topSearch:topInventory,noShadowban:noShadowInventory}
+      details:{
+        topSearch:topInventory,
+        noShadowban:noShadowInventory,
+        inviteCampaign:campaignInventory,
+        inviteCampaignTarget:campaignSettings.target_stock
+      }
     };
   }
 
@@ -1481,9 +1511,11 @@ export async function runXProcurement(env:Env):Promise<XRunResult>{
     targetClass
   );
   const refreshedReorder=
-    targetClass==="TOP_SEARCH"
-      ?settings.reorder_point
-      :settings.no_shadowban_reorder_point;
+    targetClass==="INVITE_CAMPAIGN"
+      ?Math.max(0,campaignSettings.target_stock-1)
+      :targetClass==="TOP_SEARCH"
+        ?settings.reorder_point
+        :settings.no_shadowban_reorder_point;
   if(refreshedClassInventory>refreshedReorder){
     return {
       action:"INVENTORY_RECLASSIFIED_OK",
@@ -1519,9 +1551,18 @@ export async function runXProcurement(env:Env):Promise<XRunResult>{
         maxUnitPrice:
           targetClass==="TOP_SEARCH"
             ?{currency:"JPY",value:settings.max_unit_price_jpy}
-            :{currency:"USD",value:settings.max_no_shadowban_unit_price_usd},
+            :targetClass==="NO_SHADOWBAN"
+              ?{currency:"USD",value:settings.max_no_shadowban_unit_price_usd}
+              :{
+                topSearch:{currency:"JPY",value:settings.max_unit_price_jpy},
+                noShadowban:{currency:"USD",value:settings.max_no_shadowban_unit_price_usd}
+              },
         searchVisibilityRequirement:
-          targetClass==="TOP_SEARCH"?"TOP Search / TOP+Latest":"No Shadowban without TOP Search",
+          targetClass==="TOP_SEARCH"
+            ?"TOP Search / TOP+Latest"
+            :targetClass==="NO_SHADOWBAN"
+              ?"No Shadowban without TOP Search"
+              :"TOP Search / TOP+Latest または No Shadowban",
         note:settings.seller_quality_mode==="strict_api"
           ?"HStora v1 APIにはseller rating/reviews/sales/dispute rateがないためstrict_apiでは自動購入しません。"
           :"80円以下のX TOP-search条件に一致する商品が見つかりませんでした。"
@@ -1543,7 +1584,7 @@ export async function runXProcurement(env:Env):Promise<XRunResult>{
     Math.max(1,trialCap),
     Math.max(0,Number(fresh.stock_available??0))
   );
-  if(splitAcrossClasses){
+  if(targetClass!=="INVITE_CAMPAIGN"&&splitAcrossClasses){
     quantity=evenSplitPurchaseQuantity(quantity);
   }
   if(quantity<=0){
@@ -1587,12 +1628,14 @@ export async function runXProcurement(env:Env):Promise<XRunResult>{
       }
       :policyQualification;
   const supportsTarget=
-    q.procurement_class===targetClass||
-    (
-      targetClass==="NO_SHADOWBAN"&&
-      q.procurement_class==="TOP_SEARCH"&&
-      hasDualTopNoShadowbanEvidence(q.search_visibility)
-    );
+    targetClass==="INVITE_CAMPAIGN"
+      ?Boolean(q.procurement_class)
+      :q.procurement_class===targetClass||
+        (
+          targetClass==="NO_SHADOWBAN"&&
+          q.procurement_class==="TOP_SEARCH"&&
+          hasDualTopNoShadowbanEvidence(q.search_visibility)
+        );
   if(!q.qualified||!supportsTarget){
     await setCircuitBreaker(
       env,
@@ -1609,7 +1652,7 @@ export async function runXProcurement(env:Env):Promise<XRunResult>{
     };
   }
 
-  if(
+  const storedProcurementClass=\n    targetClass==="INVITE_CAMPAIGN"\n      ?"INVITE_CAMPAIGN" as const\n      :q.procurement_class;\n  const storedSplitAcrossClasses=targetClass!=="INVITE_CAMPAIGN"&&splitAcrossClasses;\n\n  if(
     !settings.dry_run&&
     settings.require_bulk_confirmation&&
     quantity>=settings.bulk_confirmation_threshold&&
@@ -1666,7 +1709,7 @@ export async function runXProcurement(env:Env):Promise<XRunResult>{
       message:"Qualified HStora product would be purchased",
       details:{
         productId:fresh.id,quantity,unitPriceJpy:q.unit_price_jpy,totalSource,
-        procurementClass:q.procurement_class,
+        procurementClass:storedProcurementClass,
         searchVisibility:q.search_visibility,trial:prior===0,dryRun:settings.dry_run
       }
     });
@@ -1690,7 +1733,7 @@ export async function runXProcurement(env:Env):Promise<XRunResult>{
     currency:String(fresh.currency),
     externalOrderId,
     idempotencyKey,
-    procurementClass:q.procurement_class,
+    procurementClass:storedProcurementClass,
     deliverySplitMode:
       splitAcrossClasses
         ?DUAL_TOP_SPLIT_MODE
@@ -1719,7 +1762,7 @@ export async function runXProcurement(env:Env):Promise<XRunResult>{
         supplier:"hstora",
         supplierProductId:String(fresh.id),
         purchasePrice:unitSource,
-        procurementClass:q.procurement_class,
+        procurementClass:storedProcurementClass,
         orderResponse:order
       })
       :null;
@@ -1792,7 +1835,7 @@ export async function runXProcurement(env:Env):Promise<XRunResult>{
           supplier:"hstora",
           supplierProductId:String(fresh.id),
           purchasePrice:unitSource,
-          procurementClass:q.procurement_class,
+          procurementClass:storedProcurementClass,
           orderResponse:order
         })
         :null;
