@@ -1652,7 +1652,14 @@ export async function runXProcurement(env:Env):Promise<XRunResult>{
     };
   }
 
-  const storedProcurementClass=\n    targetClass==="INVITE_CAMPAIGN"\n      ?"INVITE_CAMPAIGN" as const\n      :q.procurement_class;\n  const storedSplitAcrossClasses=targetClass!=="INVITE_CAMPAIGN"&&splitAcrossClasses;\n\n  if(
+  const storedProcurementClass=
+    targetClass==="INVITE_CAMPAIGN"
+      ?"INVITE_CAMPAIGN" as const
+      :q.procurement_class;
+  const storedSplitAcrossClasses=
+    targetClass!=="INVITE_CAMPAIGN"&&splitAcrossClasses;
+
+  if(
     !settings.dry_run&&
     settings.require_bulk_confirmation&&
     quantity>=settings.bulk_confirmation_threshold&&
@@ -1735,7 +1742,7 @@ export async function runXProcurement(env:Env):Promise<XRunResult>{
     idempotencyKey,
     procurementClass:storedProcurementClass,
     deliverySplitMode:
-      splitAcrossClasses
+      storedSplitAcrossClasses
         ?DUAL_TOP_SPLIT_MODE
         :null,
     dryRun:false
