@@ -203,6 +203,62 @@ test("TOP+Latest with No Shadowban is classified only as TOP_SEARCH",()=>{
   assert.equal(q.procurement_class,"TOP_SEARCH");
 });
 
+test("policy override can force a TOP-labelled product into NO_SHADOWBAN",()=>{
+  const q=qualifyHstoraProduct(
+    product({
+      id:4521,
+      name:"Twitter TOP Search account",
+      short_description:"No Shadowban",
+      description:"TOP Search / No Shadowban",
+      price:0.20
+    }),
+    settings(),
+    1,
+    Date.now(),
+    "NO_SHADOWBAN"
+  );
+  assert.equal(q.qualified,true);
+  assert.equal(q.procurement_class,"NO_SHADOWBAN");
+  assert.ok(q.search_visibility.includes("TOP Search"));
+  assert.ok(q.search_visibility.includes("No Shadowban"));
+});
+
+test("forced NO_SHADOWBAN still requires No Shadowban evidence",()=>{
+  const q=qualifyHstoraProduct(
+    product({
+      id:4521,
+      name:"Twitter TOP Search account",
+      short_description:"TOP Search",
+      description:"TOP Search visible",
+      price:0.20
+    }),
+    settings(),
+    1,
+    Date.now(),
+    "NO_SHADOWBAN"
+  );
+  assert.equal(q.qualified,false);
+  assert.ok(q.reasons.includes("NO_SHADOWBAN_EVIDENCE_NOT_CONFIRMED"));
+});
+
+test("forced NO_SHADOWBAN still enforces the USD price ceiling",()=>{
+  const q=qualifyHstoraProduct(
+    product({
+      id:4521,
+      name:"Twitter TOP Search account",
+      short_description:"No Shadowban",
+      description:"TOP Search / No Shadowban",
+      price:0.61
+    }),
+    settings(),
+    1,
+    Date.now(),
+    "NO_SHADOWBAN"
+  );
+  assert.equal(q.qualified,false);
+  assert.ok(q.reasons.includes("NO_SHADOWBAN_UNIT_PRICE_ABOVE_USD_LIMIT"));
+});
+
 test("No Shadowban without TOP wording is a separate NO_SHADOWBAN product",()=>{
   const q=qualifyHstoraProduct(
     product({
