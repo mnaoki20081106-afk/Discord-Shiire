@@ -78,6 +78,21 @@ export async function ensureInviteCampaignGateway(env:Env):Promise<void>{
   }
 }
 
+export async function stopInviteCampaignGateway(env:Env):Promise<void>{
+  if(!env.INVITE_GATEWAY) return;
+  const id=env.INVITE_GATEWAY.idFromName("invite-campaign");
+  const response=await env.INVITE_GATEWAY.get(id).fetch(
+    "https://invite-gateway.internal/stop",
+    {method:"POST"}
+  );
+  if(!response.ok){
+    throw new Error(
+      "INVITE_GATEWAY_STOP_FAILED:"+response.status+":"+
+      (await response.text().catch(()=>"")).slice(0,300)
+    );
+  }
+}
+
 export class InviteGateway{
   private socket:WebSocket|null=null;
   private plannedClose=false;
@@ -396,7 +411,7 @@ export class InviteGateway{
     if(payload.t==="GUILD_MEMBER_ADD"){
       await handleInviteCampaignMemberJoin(
         this.env,
-        payload.d as never
+        payload.d as import("./invite-campaign").InviteCampaignMemberEvent
       );
     }
   }
