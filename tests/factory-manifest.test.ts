@@ -8,6 +8,7 @@ const manifest=JSON.parse(
   setup:{
     fields:Array<{key:string;type:string;required?:boolean;pattern?:string}>;
     discord?:{
+      intents?:Array<{id:string;required?:boolean}>;
       permissions?:Array<{id:string;required?:boolean}>;
       checks?:Array<{id:string;required?:boolean}>;
     };
@@ -62,4 +63,21 @@ test("Factory includes Manage Roles for vending buyer-role fulfillment",()=>{
   );
   assert.ok(roleOrder);
   assert.equal(roleOrder.required,true);
+});
+
+
+test("Factory exposes invite campaign Discord requirements",()=>{
+  const intent=manifest.setup.discord?.intents?.find(
+    item=>item.id==="server-members-intent"
+  );
+  assert.ok(intent);
+  assert.equal(intent.required,true);
+
+  for(const id of ["manage-guild","create-instant-invite"]){
+    const permission=manifest.setup.discord?.permissions?.find(
+      item=>item.id===id
+    );
+    assert.ok(permission,id);
+    assert.equal(permission.required,true,id);
+  }
 });
