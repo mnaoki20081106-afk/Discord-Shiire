@@ -235,13 +235,6 @@
           "required": true,
           "description": "招待キャンペーンでGuild Invitesの利用回数を取得し、誰の招待かを照合するために必要です。",
           "discord_permission": "MANAGE_GUILD"
-        },
-        {
-          "id": "create-instant-invite",
-          "label": "招待を作成",
-          "required": true,
-          "description": "/invite-link からユーザー専用の招待キャンペーンURLを発行するために必要です。",
-          "discord_permission": "CREATE_INSTANT_INVITE"
         }
       ],
       "checks": [
@@ -266,7 +259,8 @@
         "初期状態は funding_mode=manual_hstora / Dry Run=true / Binance自動購入OFF / 自動仕入れOFFです。",
         "在庫通知でロールをpingする場合は、通知対象ロールをDiscord側でメンション可能にしてください。BOTへMention Everyone権限を広く付ける構成にはしていません。",
         "BINANCE_AUTO_FUNDING_ENABLEDは通常OFFです。ONにしない限り、Binanceの実LTC購入はコード側で拒否されます。",
-        "デプロイ後、管理APIのPOST /api/discord/registerを1回実行して /invite-link をDiscordへ登録してください。"
+        "招待キャンペーン参加者は、Discord標準の「招待を作成」を使います。参加者ロールには招待URLを発行させたいチャンネルで「招待を作成」権限を付与してください。BOT自身にCREATE_INSTANT_INVITE権限は不要です。",
+        "旧版で /invite-link を登録済みの場合、デプロイ後に管理API POST /api/discord/register を1回実行すると旧コマンドが削除され、管理者向けコマンドだけに同期されます。"
       ]
     }
   }
