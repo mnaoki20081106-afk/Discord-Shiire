@@ -23,7 +23,10 @@ import {
   saveInviteCampaignSettings
 } from "./invite-campaign-db";
 import { seedInviteCampaignSnapshot } from "./invite-campaign";
-import { retryInviteCampaignReward } from "./invite-campaign-rewards";
+import {
+  reconcileInviteCampaignRewards,
+  retryInviteCampaignReward
+} from "./invite-campaign-rewards";
 import {
   ensureInviteCampaignGateway,
   stopInviteCampaignGateway
@@ -132,6 +135,7 @@ export async function handleXAdminApi(
         try{
           await ensureInviteCampaignGateway(env);
           await seedInviteCampaignSnapshot(env,settings.guild_id);
+          await reconcileInviteCampaignRewards(env);
         }catch(error){
           await saveInviteCampaignSettings(env,{enabled:false});
           await stopInviteCampaignGateway(env).catch(()=>undefined);
