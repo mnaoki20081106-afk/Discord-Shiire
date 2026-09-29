@@ -86,6 +86,41 @@ test("X TOP-search product under 80 JPY qualifies in trial-only discovery",()=>{
   assert.equal(q.seller_quality,"trial_only");
 });
 
+test("HStora TOP Latest naming qualifies as TOP_SEARCH",()=>{
+  const q=qualifyHstoraProduct(
+    product({
+      id:4841,
+      name:"Twitter No Shadowban Top Latest 2FA Token",
+      slug:"4841-twitter-no-shadowban-top-latest-2fa-token",
+      short_description:"No Shadowban",
+      description:"Premium X account.",
+      price:0.29
+    }),
+    settings(),
+    1
+  );
+  assert.equal(q.qualified,true);
+  assert.equal(q.procurement_class,"TOP_SEARCH");
+  assert.ok(q.search_visibility.includes("TOP+Latest"));
+  assert.ok(q.search_visibility.includes("No Shadowban"));
+});
+
+test("negated TOP Latest naming does not qualify as TOP_SEARCH",()=>{
+  const q=qualifyHstoraProduct(
+    product({
+      name:"Twitter No Shadowban",
+      slug:"twitter-no-shadowban",
+      short_description:"No TOP Latest",
+      description:"TOP Latest unavailable. No Shadowban.",
+      price:0.29
+    }),
+    settings(),
+    1
+  );
+  assert.equal(q.procurement_class,"NO_SHADOWBAN");
+  assert.equal(q.search_visibility.includes("TOP+Latest"),false);
+});
+
 test("latest-only X product is rejected because TOP search is required",()=>{
   const q=qualifyHstoraProduct(
     product({
