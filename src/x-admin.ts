@@ -744,7 +744,8 @@ async function load(){
     }).join("");
     main.innerHTML=
       '<section class="card"><strong>招待キャンペーン設定</strong>'+
-      '<p class="hint">ユーザーは /invite-link で専用招待リンクを発行できます。有効招待が設定人数に達するたび、キャンペーン専用在庫からXアカウントを1個DMで自動配布します。</p>'+
+      '<p class="hint">ユーザーはDiscord標準の「招待を作成」から普段どおり招待URLを発行します。BOTが招待URLごとの作成者と使用回数を照合し、有効招待が設定人数に達するたびキャンペーン専用在庫からXアカウントを1個DMで自動配布します。ユーザー向けSlash Commandは不要です。</p>'+
+      '<p class="hint">ユーザー側には招待を作るチャンネルの「招待を作成」権限が必要です。1回限定リンク・参加直後に削除されたリンク・同時刻に複数リンクの使用回数が変化した場合はDiscord API上で帰属を確定できないことがあります。</p>'+
       '<div class="formrow"><label style="display:flex;align-items:center;gap:8px"><input id="inviteEnabled" type="checkbox" style="flex:0" '+(s.enabled?'checked':'')+'>キャンペーンを有効化</label></div>'+
       '<datalist id="inviteGuildOptions">'+guildOptions+'</datalist>'+
       '<div class="formrow"><input id="inviteGuildId" list="inviteGuildOptions" placeholder="対象サーバーID" value="'+esc(s.guild_id||"")+'"></div>'+
@@ -757,6 +758,7 @@ async function load(){
       '<div class="metric"><small>不足数</small><strong>'+esc(data.stock?.deficit??0)+'</strong></div>'+
       '<div class="metric"><small>未解決の報酬</small><strong>'+esc(data.unresolvedRewards??0)+'</strong></div>'+
       '<div class="metric"><small>Gateway</small><strong>'+(data.runtime?.gateway_ready_at?'接続済み':'未接続')+'</strong></div>'+
+      '<div class="metric"><small>招待方式</small><strong>Discord標準URL</strong></div>'+
       '</div>'+
       (data.runtime?.last_error?'<section class="card bad"><strong>Gateway / キャンペーンエラー</strong><pre>'+esc(data.runtime.last_error)+'</pre></section>':'')+
       '<section class="card"><strong>招待実績</strong><div class="grid" style="margin-top:10px">'+(progress||'<div class="hint">まだ招待実績はありません。</div>')+'</div></section>'+
