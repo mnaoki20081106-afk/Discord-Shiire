@@ -428,6 +428,9 @@ async function selectCandidate(
       if(aPreferredNoShadow!==bPreferredNoShadow){
         return aPreferredNoShadow?-1:1;
       }
+      const aPreferredTop=isPreferredTopHstoraSource(a.product.id);
+      const bPreferredTop=isPreferredTopHstoraSource(b.product.id);
+      if(aPreferredTop!==bPreferredTop) return aPreferredTop?-1:1;
     }else{
       const aPreferred=isPreferredTopHstoraSource(a.product.id);
       const bPreferred=isPreferredTopHstoraSource(b.product.id);
