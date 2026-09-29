@@ -1935,11 +1935,12 @@ export async function notifyShiireVendingStockArrival(
   if(added<=0) return;
   const machines=await machinesForSupplierProduct(env,supplierProductId);
   for(const machine of machines){
-    const machineClass=
-      machine.procurement_class==="TOP_SEARCH"||
-      machine.procurement_class==="NO_SHADOWBAN"
-        ?machine.procurement_class
-        :null;
+    const machineClass:"TOP_SEARCH"|"NO_SHADOWBAN"|null=
+      machine.procurement_class==="TOP_SEARCH"
+        ?"TOP_SEARCH"
+        :machine.procurement_class==="NO_SHADOWBAN"
+          ?"NO_SHADOWBAN"
+          :null;
     const addedForMachine=
       machineClass
         ?Math.max(0,Number(addedByClass?.[machineClass]??added))
