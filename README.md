@@ -647,7 +647,7 @@ NO_SHADOWBAN
 
 When both classes are below their reorder points, TOP_SEARCH is replenished first.
 
-Within each class, qualified HStora listings are sorted cheapest-first. TOP_SEARCH is sorted by effective JPY unit price and NO_SHADOWBAN is sorted by effective USD unit price. The price tier is recalculated using the quantity that will actually be ordered, including first-product trial limits.
+Within each class, source priority is applied first and effective price second. Products 4841/5132 form the preferred source group; candidates inside that group are sorted by effective unit price. If the preferred group has no usable candidate, verified fallback candidates are sorted cheapest-first. TOP_SEARCH uses effective JPY unit price and NO_SHADOWBAN uses effective USD unit price. The price tier is recalculated using the quantity that will actually be ordered, including first-product trial limits.
 
 Existing purchased accounts are backfilled into the new procurement classes when their HStora product is re-evaluated. The engine recounts class inventory after this backfill before placing a new order, preventing a migration-time extra batch.
 
