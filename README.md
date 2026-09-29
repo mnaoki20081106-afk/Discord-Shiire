@@ -174,6 +174,10 @@ GET  /api/products/:id/status
 POST /api/products/:id/run
 POST /api/run-all
 POST /api/discord/register
+GET  /api/x/invite-campaign
+POST /api/x/invite-campaign/settings
+POST /api/x/invite-campaign/seed
+POST /api/x/invite-campaign/rewards/:id/retry
 ```
 
 すべて `Authorization: Bearer <ADMIN_TOKEN>` が必要です。
@@ -182,10 +186,12 @@ POST /api/discord/register
 
 `POST /api/discord/register` を一度実行すると:
 
+- `/invite-link` — 招待キャンペーン用の本人専用リンクを発行
 - `/shiire-status` — 商品ごとのMain Bot在庫と最終ジョブ
 - `/shiire-run product_id:<id>` — 指定商品の補充判定を即時実行
 
-どちらも Discord の「サーバー管理」または Administrator 権限を持つユーザーだけが利用できます。
+`/invite-link` はキャンペーン対象サーバーの一般メンバーが利用できます。
+`/shiire-status` と `/shiire-run` は Discord の「サーバー管理」または Administrator 権限を持つユーザーだけが利用できます。
 
 ## Cloudflare
 
@@ -237,6 +243,7 @@ Funding
 Binance
 LTC Wallet
 HStora
+招待キャンペーン
 Inventory
 Orders
 Logs
@@ -652,6 +659,42 @@ Within each class, source priority is applied first and effective price second. 
 Existing purchased accounts are backfilled into the new procurement classes when their HStora product is re-evaluated. The engine recounts class inventory after this backfill before placing a new order, preventing a migration-time extra batch.
 
 
+## Invite campaign
+
+Discord-Shiire can maintain a dedicated third inventory pool, `INVITE_CAMPAIGN`, for invite rewards.
+
+Default policy:
+
+```text
+invites_per_reward = 5
+invite_campaign_target_stock = 20
+```
+
+Both values are editable from **Xアカウント仕入れ管理 > 招待キャンペーン**. When the campaign is enabled, the 1-minute procurement loop gives the campaign pool priority whenever its available stock is below the configured target. Campaign stock is sourced only from products that already pass the existing TOP_SEARCH or NO_SHADOWBAN qualification and price guards. It is then stored as `INVITE_CAMPAIGN`, so it is isolated from ordinary vending inventory and stock notifications.
+
+Campaign flow:
+
+1. A member runs `/invite-link` in the configured guild.
+2. Discord-Shiire creates a unique unlimited invite and records the owner.
+3. `GUILD_MEMBER_ADD` is received through the Discord Gateway.
+4. The bot compares current Guild Invite uses with the stored snapshot.
+5. Valid invites increment the owner's campaign progress and send a DM with valid invites, excluded invites, remaining invites until the next reward, and the next reward.
+6. Every configured threshold creates exactly one reward record and reserves one `INVITE_CAMPAIGN` account.
+7. The encrypted credentials are decrypted only for delivery and sent by DM.
+8. As soon as a reward reserves stock, the next procurement run sees the deficit and replenishes the campaign pool.
+
+Rejoining with the same Discord account and self-invites are excluded. Bots are ignored. Reward rows are unique per guild / inviter / reward ordinal, and campaign stock reservation uses a conditional state transition to prevent the same account from being claimed twice.
+
+For the most reliable attribution, members should use `/invite-link`. Native Discord invites are also tracked when the inviter and use-count delta can be resolved; deleted/single-use invites or multiple simultaneous invite changes can be inherently ambiguous because Discord's member-add event does not include the invite code.
+
+Discord setup required for this feature:
+
+- enable **Server Members Intent** for the Discord-Shiire application in Discord Developer Portal
+- give the bot **Manage Server** permission so it can read the guild invite list
+- give the bot **Create Instant Invite** in channels where `/invite-link` is used
+- run `POST /api/discord/register` once after deployment so the new slash command is registered
+
+
 ## Production deployment checklist
 
 現在、このリポジトリの GitHub Actions は CI（typecheck / test）のみで、Cloudflare Worker の本番デプロイは自動ではありません。
@@ -663,9 +706,10 @@ Existing purchased accounts are backfilled into the new procurement classes when
 3. Discord-Shiire Worker に `XACCOUNT_BOT_BASE_URL=<Xaccount-Botの実URL>` を設定する。
 4. 両Workerに同一の32文字以上の `SHIIRE_BRIDGE_SECRET` を Secret として設定する。
 5. Factoryフォームから Discord-Shiire Worker に `DISCORD_APPLICATION_ID`, `DISCORD_PUBLIC_KEY`, `DISCORD_BOT_TOKEN`, `HSTORA_API_KEY`, `HSTORA_API_SECRET` を設定する。将来Binance自動補充を使う場合だけ `BINANCE_API_KEY` / `BINANCE_API_SECRET` を追加し、正規の利用条件とAPI設定を満たした後に `BINANCE_AUTO_FUNDING_ENABLED=true` を設定する。`ADMIN_TOKEN` と `CREDENTIALS_ENCRYPTION_KEY` はFactoryが自動生成する。従来型の汎用仕入れも使う場合だけ `MAIN_BOT_BASE_URL` を追加する。
-6. Discord Developer Portal の Interactions Endpoint URL を `https://<Discord-Shiire Worker>/interactions` に設定する。
-7. HStora Webhook を使う場合だけ、Webhook URLを `https://<Discord-Shiire Worker>/webhooks/hstora` に設定し、同じ署名Secretを `HSTORA_WEBHOOK_SECRET` として保存する。
-8. Xaccount-Bot の GitHub Repository Variable `VITE_API_BASE_URL` を実際の Xaccount-Bot Worker origin に設定する。
+6. Discord Developer Portal の Interactions Endpoint URL を `https://<Discord-Shiire Worker>/interactions` に設定する。招待キャンペーンを使う場合は同じApplicationで **Server Members Intent** をONにし、Botに **Manage Server** と対象チャンネルの **Create Instant Invite** を許可する。
+7. デプロイ後に管理API `POST /api/discord/register` を1回実行し、`/invite-link` を含むSlash Commandを登録する。
+8. HStora Webhook を使う場合だけ、Webhook URLを `https://<Discord-Shiire Worker>/webhooks/hstora` に設定し、同じ署名Secretを `HSTORA_WEBHOOK_SECRET` として保存する。
+9. Xaccount-Bot の GitHub Repository Variable `VITE_API_BASE_URL` を実際の Xaccount-Bot Worker origin に設定する。
 
 なお、現在の標準フローでは HStora Main Wallet へのLTC入金だけが手動境界です。入金反映後は1分Cronで残高増加を検知し、仕入れ・在庫保存・自販機納品へ自動復帰します。Binance出金APIの安全チェック実装は残していますが、HStoraの入金先を公式APIから取得できないため、自動仕入れエンジンから出金関数を呼びません。専用LTC Walletも未接続です。
 
