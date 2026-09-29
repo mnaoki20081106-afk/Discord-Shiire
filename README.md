@@ -596,12 +596,25 @@ Requirements:
 
 - the listing must be an X/Twitter account product
 - it must explicitly state `No Shadowban` / `No Shadow Ban`
-- it must **not** contain TOP Search / TOP+Latest evidence
+- ordinary listings remain exclusive to this class only when they do **not** contain TOP Search / TOP+Latest evidence
 - the effective HStora USD unit price must be at or below `max_no_shadowban_unit_price_usd`
 - default ceiling: `0.60 USD / account`
 - the configurable ceiling is restricted to `0.50 - 0.60 USD`
 
-If a listing contains both TOP Search and No Shadowban wording, it belongs to **TOP_SEARCH only** and is not double-counted.
+### Preferred dual-capability source: HStora product 4841
+
+HStora product `4841` is treated as the preferred source when its live API data still explicitly confirms both TOP-search and No-Shadowban evidence and it remains inside the configured safety limits.
+
+For this product only:
+
+- it may replenish either inventory class
+- new purchase quantities are forced to an even number
+- delivered credentials are stored **50% as `TOP_SEARCH` and 50% as `NO_SHADOWBAN`**
+- delayed/retried HStora delivery reconciliation continues from the already-stored class counts so the final split does not drift
+- class-backed vending products receive only the stock count actually added to their class
+- if product 4841 becomes unavailable, loses required listing evidence, exceeds the configured price ceiling, or otherwise fails qualification, the engine falls back to the normal candidate scan rather than bypassing the safeguards
+
+Other HStora listings that contain both TOP Search and No Shadowban wording remain classified as `TOP_SEARCH` only unless a separate explicit policy is added.
 
 Each class has independent inventory controls:
 

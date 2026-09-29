@@ -1929,11 +1929,24 @@ export async function handleShiireMainBridge(
 export async function notifyShiireVendingStockArrival(
   env:Env,
   supplierProductId:string,
-  added:number
+  added:number,
+  addedByClass?:Partial<Record<"TOP_SEARCH"|"NO_SHADOWBAN",number>>
 ){
   if(added<=0) return;
   const machines=await machinesForSupplierProduct(env,supplierProductId);
   for(const machine of machines){
+    const machineClass:"TOP_SEARCH"|"NO_SHADOWBAN"|null=
+      machine.procurement_class==="TOP_SEARCH"
+        ?"TOP_SEARCH"
+        :machine.procurement_class==="NO_SHADOWBAN"
+          ?"NO_SHADOWBAN"
+          :null;
+    const addedForMachine=
+      machineClass
+        ?Math.max(0,Number(addedByClass?.[machineClass]??added))
+        :added;
+    if(addedForMachine<=0) continue;
+
     const notification=await getShiireStockNotification(env,machine.id);
     if(!notification?.enabled) continue;
     try{
@@ -1945,7 +1958,7 @@ export async function notifyShiireVendingStockArrival(
           color:5763719,
           description:"**"+machine.product_name+"** の在庫が追加されました。",
           fields:[
-            {name:"追加数",value:String(added)+"個",inline:true},
+            {name:"追加数",value:String(addedForMachine)+"個",inline:true},
             {name:"自販機",value:String(machine.name),inline:true}
           ]
         }]

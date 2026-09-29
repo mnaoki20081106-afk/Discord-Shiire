@@ -738,26 +738,20 @@ export async function saveShiirePanel(
 
 export async function machinesForSupplierProduct(env:Env,supplierProductId:string){
   await ensureShiireVendingSchema(env);
-  const source=await env.DB.prepare(
-    "SELECT procurement_class FROM supplier_products "+
-    "WHERE supplier='hstora' AND supplier_product_id=?"
-  ).bind(supplierProductId).first<{procurement_class:string|null}>();
-  const procurementClass=
-    source?.procurement_class==="TOP_SEARCH"||
-    source?.procurement_class==="NO_SHADOWBAN"
-      ?source.procurement_class
-      :null;
 
   return (await env.DB.prepare(
-    "SELECT p.id AS product_id,p.name AS product_name,m.* "+
+    "SELECT p.id AS product_id,p.name AS product_name,p.procurement_class,m.* "+
     "FROM shiire_vending_products p "+
     "JOIN shiire_vending_machines m ON m.id=p.vending_machine_id "+
     "WHERE p.active=1 AND m.active=1 AND ("+
-    "p.supplier_product_id=? OR (? IS NOT NULL AND p.procurement_class=?)"+
+    "p.supplier_product_id=? OR p.procurement_class IN ("+
+      "SELECT DISTINCT procurement_class FROM purchased_accounts "+
+      "WHERE supplier_product_id=? "+
+      "AND procurement_class IN ('TOP_SEARCH','NO_SHADOWBAN')"+
+    ")"+
     ")"
   ).bind(
     supplierProductId,
-    procurementClass,
-    procurementClass
+    supplierProductId
   ).all<any>()).results;
 }
