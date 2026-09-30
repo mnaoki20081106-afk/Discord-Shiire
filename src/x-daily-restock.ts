@@ -58,15 +58,11 @@ function notificationPayload(
     noShadowban:number;
   }
 ){
-  const belowSteadyStock=
-    available.noShadowban<state.target_no_shadowban||
-    available.topSearch<state.target_top_search;
-  const warning=state.status==="partial"||belowSteadyStock;
   return {
     allowed_mentions:{parse:[]},
     embeds:[{
       title:"在庫入荷のお知らせ",
-      color:warning?16763981:5763719,
+      color:5763719,
       description:config.notification_message,
       fields:[
         {
@@ -81,14 +77,7 @@ function notificationPayload(
         }
       ],
       footer:{
-        text:
-          "現在の販売可能在庫 / 毎日18:00（JST）入荷"+
-          (belowSteadyStock
-            ?" / 恒常在庫未達: No shadow ban "+
-              available.noShadowban+"/"+state.target_no_shadowban+
-              "・Top Search "+
-              available.topSearch+"/"+state.target_top_search
-            :"")
+        text:"現在の販売可能在庫 / 毎日18:00（JST）入荷"
       },
       timestamp:new Date(state.completed_at||Date.now()).toISOString()
     }]
