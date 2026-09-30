@@ -10,7 +10,12 @@ import {
   ensureXSchema,
   auditX,
   listOpenCircuitBreakers,
-  setCircuitBreaker
+  setCircuitBreaker,
+  getProcurementBudgets,
+  rebalanceProcurementBudgets,
+  pendingPurchaseOrders,
+  setXSetting,
+  circuitState
 } from "./x-db";
 import {
   confirmPendingDirectLtcFunding,
@@ -82,6 +87,11 @@ function publicSettings(settings:XSettings){
     // Pending funding snapshots are runtime-owned state. They are exposed via
     // getFundingPlan(), not as editable Settings JSON.
     if(key.startsWith("pending_paypay_")) continue;
+    if(
+      key==="invite_campaign_budget_percent"||
+      key==="no_shadowban_budget_percent"||
+      key==="top_search_budget_percent"
+    ) continue;
     out[key]=value;
   }
   return out;
@@ -95,6 +105,22 @@ function safePatch(input:Record<string,unknown>):Partial<XSettings>{
     }
   }
   return out as Partial<XSettings>;
+}
+
+function procurementBudgetPercentages(settings:XSettings){
+  return {
+    INVITE_CAMPAIGN:settings.invite_campaign_budget_percent,
+    NO_SHADOWBAN:settings.no_shadowban_budget_percent,
+    TOP_SEARCH:settings.top_search_budget_percent
+  };
+}
+
+async function syncHstoraBudgetBaseline(env:Env,balanceUsd:number){
+  await setXSetting(env,"x_hstora_balance_guard",{
+    hstoraUsd:Math.max(0,balanceUsd),
+    allowedDecreaseUsd:0,
+    updatedAt:Date.now()
+  });
 }
 
 async function settled<T>(fn:()=>Promise<T>){
@@ -180,6 +206,142 @@ export async function handleXAdminApi(
     }catch(error){
       const message=error instanceof Error?error.message:String(error);
       return json({error:message},409);
+    }
+  }
+
+  if(url.pathname==="/api/x/procurement-budget"&&request.method==="GET"){
+    const settings=await loadXSettings(env);
+    return json({
+      percentages:procurementBudgetPercentages(settings),
+      budget:await getProcurementBudgets(env)
+    });
+  }
+
+  if(url.pathname==="/api/x/procurement-budget"&&request.method==="POST"){
+    const raw=await requestJson(request);
+    if(!raw) return json({error:"INVALID_JSON"},400);
+
+    const pending=await pendingPurchaseOrders(env);
+    if(pending.length>0){
+      return json({
+        error:"PENDING_HSTORA_ORDER_EXISTS",
+        message:"処理中のHStora注文があるため、予算の再配分は注文確定後に行ってください。",
+        pendingOrders:pending.length
+      },409);
+    }
+
+    const hstoraBreaker=await circuitState(env,"hstora");
+    if(String(hstoraBreaker?.state??"")==="OPEN"){
+      return json({
+        error:"HSTORA_CIRCUIT_BREAKER_OPEN",
+        message:"HStoraの停止状態を確認・解消してから予算割合を変更してください。"
+      },409);
+    }
+
+    const inviteCampaignPercent=Number(raw.inviteCampaignPercent);
+    const noShadowbanPercent=Number(raw.noShadowbanPercent);
+    const topSearchPercent=Number(raw.topSearchPercent);
+
+    let balance;
+    try{balance=await getHstoraBalance(env);}
+    catch(error){
+      return json({
+        error:"HSTORA_BALANCE_ERROR",
+        message:error instanceof Error?error.message:String(error)
+      },502);
+    }
+    if(String(balance.currency).toUpperCase()!=="USD"){
+      return json({error:"HSTORA_CURRENCY_UNSUPPORTED"},409);
+    }
+
+    try{
+      const settings=await saveXSettings(env,{
+        invite_campaign_budget_percent:inviteCampaignPercent,
+        no_shadowban_budget_percent:noShadowbanPercent,
+        top_search_budget_percent:topSearchPercent
+      });
+      const percentages=procurementBudgetPercentages(settings);
+      const budget=await rebalanceProcurementBudgets(
+        env,
+        Number(balance.balance),
+        percentages
+      );
+      await syncHstoraBudgetBaseline(env,Number(balance.balance));
+      await auditX(env,{
+        kind:"PROCUREMENT_BUDGET_ALLOCATION_CHANGED",
+        message:"Procurement budget percentages changed and current HStora balance was rebalanced.",
+        details:{
+          percentages,
+          currentHstoraBalanceUsd:Number(balance.balance),
+          budget:budget.available
+        }
+      });
+      return json({
+        ok:true,
+        percentages,
+        budget,
+        currentHstoraBalanceUsd:Number(balance.balance)
+      });
+    }catch(error){
+      return json({
+        error:error instanceof Error?error.message:String(error)
+      },400);
+    }
+  }
+
+  if(
+    url.pathname==="/api/x/procurement-budget/rebalance"&&
+    request.method==="POST"
+  ){
+    const pending=await pendingPurchaseOrders(env);
+    if(pending.length>0){
+      return json({
+        error:"PENDING_HSTORA_ORDER_EXISTS",
+        message:"処理中のHStora注文があるため、現在残高での再配分はできません。",
+        pendingOrders:pending.length
+      },409);
+    }
+    const hstoraBreaker=await circuitState(env,"hstora");
+    if(String(hstoraBreaker?.state??"")==="OPEN"){
+      return json({
+        error:"HSTORA_CIRCUIT_BREAKER_OPEN",
+        message:"HStoraの停止状態を確認・解消してから現在残高を再配分してください。"
+      },409);
+    }
+    try{
+      const [settings,balance]=await Promise.all([
+        loadXSettings(env),
+        getHstoraBalance(env)
+      ]);
+      if(String(balance.currency).toUpperCase()!=="USD"){
+        return json({error:"HSTORA_CURRENCY_UNSUPPORTED"},409);
+      }
+      const percentages=procurementBudgetPercentages(settings);
+      const budget=await rebalanceProcurementBudgets(
+        env,
+        Number(balance.balance),
+        percentages
+      );
+      await syncHstoraBudgetBaseline(env,Number(balance.balance));
+      await auditX(env,{
+        kind:"PROCUREMENT_BUDGET_REBALANCED",
+        message:"Procurement budgets were manually rebalanced from current HStora balance.",
+        details:{
+          percentages,
+          currentHstoraBalanceUsd:Number(balance.balance),
+          budget:budget.available
+        }
+      });
+      return json({
+        ok:true,
+        percentages,
+        budget,
+        currentHstoraBalanceUsd:Number(balance.balance)
+      });
+    }catch(error){
+      return json({
+        error:error instanceof Error?error.message:String(error)
+      },502);
     }
   }
 
@@ -427,7 +589,18 @@ export async function handleXAdminApi(
       ok:false as const,
       error:"BINANCE_FUNDING_INACTIVE"
     });
-    const [inventory,today,funding,hstora,market,ltc,jpy,circuitBreakers,recentLogs]=await Promise.all([
+    const [
+      inventory,
+      today,
+      funding,
+      hstora,
+      market,
+      ltc,
+      jpy,
+      circuitBreakers,
+      recentLogs,
+      procurementBudget
+    ]=await Promise.all([
       inventorySummary(env),
       todayPurchaseStats(env,dayStart),
       settled(()=>getFundingPlan(env,now)),
@@ -436,7 +609,8 @@ export async function handleXAdminApi(
       binanceActive?settled(()=>getBinanceBalance(env,"LTC")):inactiveBinance,
       binanceActive?settled(()=>getBinanceBalance(env,"JPY")):inactiveBinance,
       listOpenCircuitBreakers(env),
-      listAuditLogs(env,50)
+      listAuditLogs(env,50),
+      getProcurementBudgets(env)
     ]);
     return json({
       generatedAt:now,
@@ -449,6 +623,10 @@ export async function handleXAdminApi(
         .filter(row=>String(row.level)==="error")
         .slice(0,10),
       inventory,
+      procurementBudget:{
+        ...procurementBudget,
+        percentages:procurementBudgetPercentages(settings)
+      },
       today:{
         ...today,
         approximateJpy:
@@ -605,6 +783,37 @@ async function saveFundingMode(){
  await load();
 }
 async function cancelPendingFunding(){await api("/api/x/funding/pending/cancel",{method:"POST",body:"{}"});await load()}
+async function saveProcurementBudget(){
+ const inviteCampaignPercent=Number(document.querySelector("#budgetInvite")?.value);
+ const noShadowbanPercent=Number(document.querySelector("#budgetNoShadow")?.value);
+ const topSearchPercent=Number(document.querySelector("#budgetTop")?.value);
+ if(
+  !Number.isInteger(inviteCampaignPercent)||
+  !Number.isInteger(noShadowbanPercent)||
+  !Number.isInteger(topSearchPercent)||
+  inviteCampaignPercent<0||noShadowbanPercent<0||topSearchPercent<0||
+  inviteCampaignPercent>100||noShadowbanPercent>100||topSearchPercent>100
+ ){
+  throw new Error("割合は0〜100の整数で入力してください。");
+ }
+ if(inviteCampaignPercent+noShadowbanPercent+topSearchPercent!==100){
+  throw new Error("3項目の合計を100%にしてください。");
+ }
+ await api("/api/x/procurement-budget",{
+  method:"POST",
+  body:JSON.stringify({
+   inviteCampaignPercent,
+   noShadowbanPercent,
+   topSearchPercent
+  })
+ });
+ await load();
+}
+async function rebalanceProcurementBudget(){
+ if(!window.confirm("現在のHStora残高を基準に3つの仕入れ予算を作り直します。未確認の注文がないことを確認してください。")) return;
+ await api("/api/x/procurement-budget/rebalance",{method:"POST",body:"{}"});
+ await load();
+}
 async function approveBulk(){await api("/api/x/bulk-approval",{method:"POST",body:JSON.stringify({minutes:10})});await load()}
 async function resetEmergency(){await api("/api/x/emergency-stop/reset",{method:"POST",body:"{}"});await load()}
 async function saveInviteCampaign(){
@@ -688,6 +897,9 @@ async function load(){
     const s=data.settings||{};
     const manual=s.funding_mode==="manual_hstora";
     const unlocked=Boolean(data.safety?.binanceAutoFundingServerEnabled);
+    const procurementBudget=data.procurementBudget||{};
+    const budgetPercentages=procurementBudget.percentages||{};
+    const budgetAvailable=procurementBudget.available||{};
     const modeCard=
       '<section class="card"><strong>LTC補充方法</strong>'+
       '<p class="hint">通常はHStora Main WalletへLTCを手動補充します。残高反映後はBOTが在庫判定→HStora購入→自販機納品まで自動再開します。Binanceモードはサーバー側ロックを解除した場合だけ選択できます。</p>'+
@@ -696,6 +908,19 @@ async function load(){
       '<option value="binance_auto" '+(!manual?'selected':'')+' '+(unlocked?'':'disabled')+'>Binance自動LTC購入'+(unlocked?'':'（ロック中）')+'</option>'+
       '</select><button id="saveFundingMode">切り替え</button></div>'+
       '<p class="status '+(unlocked?'good':'warn')+'">Binanceサーバーロック: '+(unlocked?'解除済み':'有効')+'</p></section>';
+    const budgetCard=
+      '<section class="card"><strong>仕入れ資金の配分</strong>'+
+      '<p class="hint">HStoraへ補充された資金を、招待用 / No shadow ban / Top Search の3枠へ分けます。0%のカテゴリは在庫が不足していても自動仕入れをスキップします。割合変更時は現在のHStora残高を新しい比率で再配分します。</p>'+
+      '<div class="grid">'+
+      '<div class="metric"><small>招待用 予算残</small><strong>'+esc(Number(budgetAvailable.INVITE_CAMPAIGN??0).toFixed(4))+' USD</strong></div>'+
+      '<div class="metric"><small>No shadow ban 予算残</small><strong>'+esc(Number(budgetAvailable.NO_SHADOWBAN??0).toFixed(4))+' USD</strong></div>'+
+      '<div class="metric"><small>Top Search 予算残</small><strong>'+esc(Number(budgetAvailable.TOP_SEARCH??0).toFixed(4))+' USD</strong></div>'+
+      '<div class="metric"><small>配分状態</small><strong>'+(procurementBudget.initialized?'有効':'初期化待ち')+'</strong></div>'+
+      '</div>'+
+      '<div class="formrow"><input id="budgetInvite" type="number" min="0" max="100" step="1" value="'+esc(budgetPercentages.INVITE_CAMPAIGN??0)+'" placeholder="招待用 %"><input id="budgetNoShadow" type="number" min="0" max="100" step="1" value="'+esc(budgetPercentages.NO_SHADOWBAN??50)+'" placeholder="No shadow ban %"><input id="budgetTop" type="number" min="0" max="100" step="1" value="'+esc(budgetPercentages.TOP_SEARCH??50)+'" placeholder="Top Search %"></div>'+
+      '<div class="hint">左から 招待用 / No shadow ban / Top Search。3項目の合計は必ず100%。</div>'+
+      '<div class="formrow"><button id="saveProcurementBudget">割合を保存して現在残高へ適用</button><button id="rebalanceProcurementBudget">現在残高で再配分</button></div>'+
+      '</section>';
     const manualCard=
       '<section class="card"><strong>現在の運用: LTC手動補充</strong>'+
       '<p class="hint">HStoraの Wallet → Add Funds からLTCで補充してください。BOTはHStora残高を1分Cronで確認し、必要残高が入れば人手を挟まず仕入れ処理へ戻ります。</p>'+
@@ -711,12 +936,14 @@ async function load(){
       '<section class="card"><strong>USD/JPY（手動観測）</strong>'+
       '<p class="hint">HStoraのUSD建て商品をJPY上限と比較するための換算値です。</p>'+
       '<div class="formrow"><input id="usdJpy" inputmode="decimal" type="number" min="0" step="0.001" value="'+esc(s.usd_jpy_rate??0)+'"><button id="saveFx">換算値を保存</button></div></section>';
-    main.innerHTML=metrics(data)+modeCard+(manual?manualCard:binanceCards)+fxCard+
+    main.innerHTML=metrics(data)+modeCard+budgetCard+(manual?manualCard:binanceCards)+fxCard+
       (!manual&&data.funding?.data?.pendingManualFunding
         ?'<section class="card"><strong>PayPay手動操作待ち</strong><p class="hint">最大予約額: '+esc(data.funding.data.pendingManualFunding.amountJpy)+'円。残高増加を確認後に再開します。</p><button id="cancelPending" class="danger">この要求を取消</button></section>'
         :'')+
       card("Funding detail",data.funding);
     document.querySelector("#saveFundingMode").onclick=()=>saveFundingMode().catch(e=>alert(e.message));
+    document.querySelector("#saveProcurementBudget").onclick=()=>saveProcurementBudget().catch(e=>alert(e.message));
+    document.querySelector("#rebalanceProcurementBudget").onclick=()=>rebalanceProcurementBudget().catch(e=>alert(e.message));
     const cancel=document.querySelector("#cancelPending"); if(cancel) cancel.onclick=()=>cancelPendingFunding().catch(e=>alert(e.message));
     const runLtcFunding=document.querySelector("#runLtcFundingNow"); if(runLtcFunding) runLtcFunding.onclick=()=>runLtcNow().catch(e=>alert(e.message));
     const savePayPay=document.querySelector("#savePayPay"); if(savePayPay) savePayPay.onclick=()=>observePayPay().catch(e=>alert(e.message));

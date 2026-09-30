@@ -251,6 +251,37 @@ Settings
 
 All `/api/x/*` endpoints require the existing `ADMIN_TOKEN`.
 
+### Procurement budget allocation
+
+The X procurement balance can be split into three strict funding buckets from
+the Funding tab in `/x-admin`:
+
+- Invite campaign
+- No Shadowban
+- Top Search
+
+The three percentages must total 100%. The small-capital default is:
+
+```text
+Invite campaign: 0%
+No Shadowban:   50%
+Top Search:     50%
+```
+
+When the official HStora balance API detects a new wallet credit, only the
+increase is distributed into the three buckets. A category with 0% allocation
+is skipped even if its stock target is below the configured level, so it cannot
+block funded categories from restocking.
+
+Live purchases atomically reserve their category budget before the HStora
+order is submitted. The order quantity is reduced when necessary to stay
+inside the category's remaining budget. Products that are intentionally stored
+50/50 as Top Search and No Shadowban consume both of those budget buckets
+50/50; if either side has no usable budget, that dual-class product is skipped
+instead of borrowing from the other category. Changing the percentages
+rebalances the current HStora wallet balance, and is blocked while an HStora
+order is still pending or the HStora circuit breaker is open.
+
 ### Safety defaults
 
 The defaults are intentionally non-live:
