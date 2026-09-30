@@ -314,6 +314,9 @@ export async function handleInviteCampaignMemberJoin(
     await markInviteCampaignEvent(env);
   }catch(error){
     await recordInviteCampaignRuntimeError(env,error);
+    // Do not leave an unconsumed delta behind after a failed join transaction:
+    // a later unrelated member must never inherit the failed event's invite.
+    await seedInviteCampaignSnapshot(env,event.guild_id).catch(()=>undefined);
     throw error;
   }
 
