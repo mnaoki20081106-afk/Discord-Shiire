@@ -10,8 +10,8 @@ import {
   getProcurementBudgets,
   initializeProcurementBudgetsIfNeeded,
   creditProcurementBudgets,
-  reserveProcurementBudget,
-  releaseProcurementBudget,
+  reserveProcurementBudgetCharges,
+  releaseProcurementBudgetCharges,
   pendingPurchaseOrders,
   purchasedAccountCountForOrder,
   readyInventoryCount,
@@ -89,6 +89,62 @@ export type XRunResult={
 };
 
 type ProcurementTarget=ProcurementClass|"INVITE_CAMPAIGN";
+
+type ProcurementBudgetAvailability={
+  INVITE_CAMPAIGN:number;
+  NO_SHADOWBAN:number;
+  TOP_SEARCH:number;
+};
+
+function procurementBudgetCharges(
+  targetClass:ProcurementTarget,
+  splitAcrossClasses:boolean,
+  totalUsd:number
+):ProcurementBudgetAvailability{
+  const charges:ProcurementBudgetAvailability={
+    INVITE_CAMPAIGN:0,
+    NO_SHADOWBAN:0,
+    TOP_SEARCH:0
+  };
+  if(
+    splitAcrossClasses&&
+    targetClass!=="INVITE_CAMPAIGN"
+  ){
+    const half=Math.max(0,totalUsd)/2;
+    charges.TOP_SEARCH=half;
+    charges.NO_SHADOWBAN=half;
+  }else{
+    charges[targetClass]=Math.max(0,totalUsd);
+  }
+  return charges;
+}
+
+function maxAffordableQuantityForBudget(
+  targetClass:ProcurementTarget,
+  splitAcrossClasses:boolean,
+  unitPriceUsd:number,
+  maxQuantity:number,
+  available:ProcurementBudgetAvailability
+){
+  if(!Number.isFinite(unitPriceUsd)||unitPriceUsd<=0) return 0;
+  const safeMax=Math.max(0,Math.floor(maxQuantity));
+  if(splitAcrossClasses&&targetClass!=="INVITE_CAMPAIGN"){
+    const perClassBudget=Math.min(
+      Math.max(0,available.TOP_SEARCH),
+      Math.max(0,available.NO_SHADOWBAN)
+    );
+    const pairs=Math.floor(
+      (perClassBudget+0.00000001)/unitPriceUsd
+    );
+    return Math.min(safeMax,pairs*2);
+  }
+  return Math.min(
+    safeMax,
+    Math.floor(
+      (Math.max(0,available[targetClass])+0.00000001)/unitPriceUsd
+    )
+  );
+}
 
 function procurementBudgetPercentages(
   settings:Awaited<ReturnType<typeof loadXSettings>>
