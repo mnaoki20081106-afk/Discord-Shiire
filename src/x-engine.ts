@@ -310,7 +310,8 @@ function catalogBasePriceJpy(
 async function selectCandidate(
   env:Env,
   quantityLimit:number,
-  targetClass:ProcurementTarget
+  targetClass:ProcurementTarget,
+  budgetAvailable?:ProcurementBudgetAvailability
 ){
   const settings=await loadXSettings(env);
   const trustedApprovedIds=[...new Set([
@@ -576,7 +577,59 @@ async function selectCandidate(
     }
   });
 
-  return candidates[0]??null;
+  if(!budgetAvailable) return candidates[0]??null;
+
+  for(const candidate of candidates){
+    const forceNoShadowban=
+      procurementClassOverrideForHstoraProduct(candidate.product.id)==="NO_SHADOWBAN";
+    const splitAcrossClasses=
+      targetClass!=="INVITE_CAMPAIGN"&&
+      !forceNoShadowban&&
+      hasDualTopNoShadowbanEvidence(candidate.q.search_visibility);
+    const step=splitAcrossClasses?2:1;
+    const classOverride=
+      procurementClassOverrideForHstoraProduct(candidate.product.id)??undefined;
+
+    for(
+      let affordableQuantity=candidate.plannedQuantity;
+      affordableQuantity>=step;
+      affordableQuantity-=step
+    ){
+      const budgetQualification=qualifyHstoraProduct(
+        candidate.product,
+        qualificationSettings,
+        affordableQuantity,
+        Date.now(),
+        classOverride
+      );
+      const supportsTarget=
+        targetClass==="INVITE_CAMPAIGN"
+          ?Boolean(budgetQualification.procurement_class)
+          :budgetQualification.procurement_class===targetClass||
+            (
+              targetClass==="NO_SHADOWBAN"&&
+              budgetQualification.procurement_class==="TOP_SEARCH"&&
+              hasDualTopNoShadowbanEvidence(
+                budgetQualification.search_visibility
+              )
+            );
+      if(!budgetQualification.qualified||!supportsTarget) continue;
+
+      const unitPriceUsd=Number(budgetQualification.unit_price_source);
+      const maxAffordable=maxAffordableQuantityForBudget(
+        targetClass,
+        splitAcrossClasses,
+        unitPriceUsd,
+        affordableQuantity,
+        budgetAvailable
+      );
+      if(maxAffordable>=affordableQuantity){
+        return candidate;
+      }
+    }
+  }
+
+  return null;
 }
 
 async function fundingWindowRemaining(env:Env,limit:number,since:number){
