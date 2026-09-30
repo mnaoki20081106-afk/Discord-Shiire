@@ -1600,16 +1600,23 @@ export async function runXProcurement(env:Env):Promise<XRunResult>{
     const previewUnitUsd=Number(
       possible.q.unit_price_source??possible.product.price??0
     );
+    const previewRequiresEvenBatch=
+      option.targetClass!=="INVITE_CAMPAIGN"&&
+      procurementClassOverrideForHstoraProduct(possible.product.id)!=="NO_SHADOWBAN"&&
+      hasDualTopNoShadowbanEvidence(possible.q.search_visibility);
+    const previewMinimumUnits=previewRequiresEvenBatch?2:1;
     if(
       !Number.isFinite(previewUnitUsd)||
       previewUnitUsd<=0||
-      option.budgetUsd+0.00000001<previewUnitUsd
+      option.budgetUsd+0.00000001<
+        previewUnitUsd*previewMinimumUnits
     ){
       skippedTargets.push({
         targetClass:option.targetClass,
-        reason:"BUDGET_BELOW_SINGLE_UNIT",
+        reason:"BUDGET_BELOW_MINIMUM_PURCHASE",
         budgetUsd:option.budgetUsd,
-        previewUnitUsd
+        previewUnitUsd,
+        previewMinimumUnits
       });
       continue;
     }
