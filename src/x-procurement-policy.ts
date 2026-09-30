@@ -29,6 +29,17 @@ export function hasDualTopNoShadowbanEvidence(labels:readonly string[]):boolean{
   return hasTop&&labels.includes("No Shadowban");
 }
 
+export function isTopSearchFallbackEligible(
+  productId:unknown,
+  labels:readonly string[]
+):boolean{
+  // The two explicitly trusted TOP products are allowed even if HStora's
+  // catalog labels change wording. Every other fallback must prove both
+  // TOP-search visibility and No Shadowban capability.
+  if(isPreferredTopHstoraSource(productId)) return true;
+  return hasDualTopNoShadowbanEvidence(labels);
+}
+
 export function evenSplitPurchaseQuantity(value:number):number{
   const quantity=Math.max(0,Math.floor(Number(value)||0));
   if(quantity<2) return 0;
