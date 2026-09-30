@@ -927,6 +927,30 @@ export async function readyInventoryCount(env:Env):Promise<number>{
   return Math.max(0,Number(row?.quantity??0));
 }
 
+export async function purchasedAccountsByClassSince(
+  env:Env,
+  since:number
+):Promise<{TOP_SEARCH:number;NO_SHADOWBAN:number}>{
+  await ensureXSchema(env);
+  const rows=(await env.DB.prepare(
+    "SELECT procurement_class,COUNT(*) AS quantity FROM purchased_accounts "+
+    "WHERE created_at>=? AND procurement_class IN ('TOP_SEARCH','NO_SHADOWBAN') "+
+    "GROUP BY procurement_class"
+  ).bind(Math.max(0,Math.floor(since))).all<{
+    procurement_class:string;
+    quantity:number;
+  }>()).results;
+  const out={TOP_SEARCH:0,NO_SHADOWBAN:0};
+  for(const row of rows){
+    if(row.procurement_class==="TOP_SEARCH"){
+      out.TOP_SEARCH=Math.max(0,Number(row.quantity??0));
+    }else if(row.procurement_class==="NO_SHADOWBAN"){
+      out.NO_SHADOWBAN=Math.max(0,Number(row.quantity??0));
+    }
+  }
+  return out;
+}
+
 export async function successfulPurchaseCountForProduct(
   env:Env,
   supplierProductId:string
