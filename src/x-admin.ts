@@ -1103,7 +1103,7 @@ async function load(){
       '<div class="formrow"><input id="dailyNoShadowTarget" type="number" min="0" max="10000" step="1" value="'+esc(cfg.no_shadowban_target_stock??50)+'" placeholder="No shadow ban 恒常在庫"><input id="dailyTopTarget" type="number" min="0" max="10000" step="1" value="'+esc(cfg.top_search_target_stock??50)+'" placeholder="Top Search 恒常在庫"></div>'+
       '<div class="hint">左: No shadow ban / 右: Top Search。18:00時点の在庫との差分だけを入荷します。</div>'+
       '<div class="formrow"><input id="dailyNotifyChannel" value="'+esc(cfg.notification_channel_id||"")+'" placeholder="通知先DiscordチャンネルID"></div>'+
-      '<p class="hint">入荷処理が完了したら、このチャンネルへまとめて通知します。</p>'+
+      '<p class="hint">18:00の処理でNo shadow ban / Top Searchの在庫が実際に1個以上追加された場合だけ、このチャンネルへまとめて通知します。追加0個の日は通知しません。</p>'+
       '<textarea id="dailyNotifyMessage" style="min-height:120px;font:inherit">'+esc(cfg.notification_message||"")+'</textarea>'+
       '<p class="hint">この文言の下に、通知送信時点で実際に販売可能な在庫数として「No shadow ban 〇個」「Top Search □個」を自動表示します。恒常在庫目標・未達・資金不足などの内部情報は外向け通知には表示しません。</p>'+
       '<div class="formrow"><button id="saveDailyRestock">設定を保存</button><button id="installDailyRestockPanel">通知パネルを設置 / 更新</button><button id="runDailyRestockNow">今すぐ差分入荷</button></div>'+
@@ -1119,7 +1119,7 @@ async function load(){
           '<div class="metric"><small>No shadow ban 入荷数</small><strong>'+esc(state.added_no_shadowban??0)+'個</strong></div>'+
           '<div class="metric"><small>Top Search 入荷数</small><strong>'+esc(state.added_top_search??0)+'個</strong></div>'+
           '<div class="metric"><small>最終状態</small><strong>'+esc(state.last_action||state.status||"-")+'</strong></div>'+
-          '<div class="metric"><small>通知</small><strong>'+(state.notified_at?'送信済み':'未送信')+'</strong></div>'+
+          '<div class="metric"><small>通知</small><strong>'+(state.notification_skipped_reason==="NO_STOCK_ADDED"?'追加なし・通知なし':state.notification_skipped_reason==="NO_NOTIFICATION_CHANNEL"?'通知先なし':state.notified_at?'送信済み':'未送信')+'</strong></div>'+
           '</div>'+(state.error?'<pre class="bad">'+esc(state.error)+'</pre>':'')+'</section>'
         :'');
     document.querySelector("#saveDailyRestock").onclick=()=>saveDailyRestock().catch(e=>alert(e.message));

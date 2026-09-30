@@ -11,3 +11,14 @@ export function isDailyRestockScheduleMinute(scheduledTime:number){
   const d=new Date(scheduledTime+9*60*60*1000);
   return d.getUTCHours()===18&&d.getUTCMinutes()===0;
 }
+
+
+export function shouldNotifyDailyRestock(input:{
+  addedTopSearch:number;
+  addedNoShadowban:number;
+}){
+  return (
+    Math.max(0,Number(input.addedTopSearch)||0)+
+    Math.max(0,Number(input.addedNoShadowban)||0)
+  )>0;
+}

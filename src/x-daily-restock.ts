@@ -12,7 +12,10 @@ import {
   type XRunResult
 } from "./x-engine";
 import { loadXSettings } from "./x-settings";
-import { isDailyRestockScheduleMinute } from "./x-daily-restock-policy";
+import {
+  isDailyRestockScheduleMinute,
+  shouldNotifyDailyRestock
+} from "./x-daily-restock-policy";
 import {
   jstDateKey,
   loadDailyRestockConfig,
@@ -121,6 +124,30 @@ async function publishDailyRestockSummary(
   config:DailyRestockConfig
 ){
   await refreshArrivalCounts(env,state);
+  const addedAny=shouldNotifyDailyRestock({
+    addedTopSearch:state.added_top_search,
+    addedNoShadowban:state.added_no_shadowban
+  });
+
+  if(!addedAny){
+    if(state.notified_at<=0){
+      state.notified_at=Date.now();
+      state.notification_skipped_reason="NO_STOCK_ADDED";
+      await saveDailyRestockState(env,state);
+      await auditX(env,{
+        kind:"DAILY_RESTOCK_NOTIFICATION_SKIPPED",
+        message:"Daily restock notification was skipped because no sellable stock was added.",
+        details:{
+          dateKey:state.date_key,
+          status:state.status,
+          addedNoShadowban:state.added_no_shadowban,
+          addedTopSearch:state.added_top_search
+        }
+      });
+    }
+    return state;
+  }
+
   const available=await actualAvailableStocks(env);
   const payload=notificationPayload(config,state,available);
 
@@ -155,6 +182,7 @@ async function publishDailyRestockSummary(
       details:{dateKey:state.date_key,status:state.status}
     });
     state.notified_at=Date.now();
+    state.notification_skipped_reason="NO_NOTIFICATION_CHANNEL";
     await saveDailyRestockState(env,state);
     return state;
   }
@@ -165,6 +193,7 @@ async function publishDailyRestockSummary(
     {method:"POST",body:JSON.stringify(payload)}
   );
   state.notified_at=Date.now();
+  state.notification_skipped_reason="";
   await saveDailyRestockState(env,state);
   await auditX(env,{
     kind:"DAILY_RESTOCK_NOTIFICATION_SENT",
@@ -352,6 +381,7 @@ export async function installDailyRestockPanel(env:Env){
     started_at:0,
     completed_at:Date.now(),
     notified_at:0,
+    notification_skipped_reason:"",
     initial_top_search:dashboard.stock.TOP_SEARCH.current,
     initial_no_shadowban:dashboard.stock.NO_SHADOWBAN.current,
     target_top_search:config.top_search_target_stock,
@@ -568,6 +598,7 @@ export async function startDailyRestock(
     started_at:Date.now(),
     completed_at:0,
     notified_at:0,
+    notification_skipped_reason:"",
     initial_top_search:stocks.top,
     initial_no_shadowban:stocks.noShadow,
     target_top_search:config.top_search_target_stock,

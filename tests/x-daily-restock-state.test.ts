@@ -2,7 +2,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   isDailyRestockScheduleMinute,
-  jstDateKey
+  jstDateKey,
+  shouldNotifyDailyRestock
 } from "../src/x-daily-restock-policy.ts";
 
 test("JST date key crosses UTC day correctly",()=>{
@@ -28,5 +29,21 @@ test("daily restock schedule is exactly 18:00 JST",()=>{
   assert.equal(
     isDailyRestockScheduleMinute(Date.UTC(2026,8,30,9,1,0)),
     false
+  );
+});
+
+
+test("daily restock notifies only when at least one stock class actually gained inventory",()=>{
+  assert.equal(
+    shouldNotifyDailyRestock({addedTopSearch:0,addedNoShadowban:0}),
+    false
+  );
+  assert.equal(
+    shouldNotifyDailyRestock({addedTopSearch:1,addedNoShadowban:0}),
+    true
+  );
+  assert.equal(
+    shouldNotifyDailyRestock({addedTopSearch:0,addedNoShadowban:3}),
+    true
   );
 });
