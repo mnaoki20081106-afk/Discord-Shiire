@@ -3,6 +3,8 @@ import assert from "node:assert/strict";
 import {
   allocateProcurementBudget,
   procurementBudgetTotal,
+  procurementBudgetCharges,
+  maxAffordableQuantityForBudget,
   validateProcurementBudgetPercentages
 } from "../src/x-budget.ts";
 
@@ -64,5 +66,68 @@ test("percentages must be whole values from 0 through 100",()=>{
       TOP_SEARCH:50
     }),
     /PROCUREMENT_BUDGET_PERCENT_INVALID/
+  );
+});
+
+
+test("dual TOP and NoShadow purchase charges both buckets equally",()=>{
+  assert.deepEqual(
+    procurementBudgetCharges("TOP_SEARCH",true,4),
+    {
+      INVITE_CAMPAIGN:0,
+      NO_SHADOWBAN:2,
+      TOP_SEARCH:2
+    }
+  );
+});
+
+test("dual purchase cannot spend when either half-budget is missing",()=>{
+  assert.equal(
+    maxAffordableQuantityForBudget(
+      "TOP_SEARCH",
+      true,
+      0.20,
+      20,
+      {
+        INVITE_CAMPAIGN:0,
+        NO_SHADOWBAN:0,
+        TOP_SEARCH:100
+      }
+    ),
+    0
+  );
+});
+
+test("dual purchase quantity is even and bounded by both buckets",()=>{
+  assert.equal(
+    maxAffordableQuantityForBudget(
+      "NO_SHADOWBAN",
+      true,
+      0.20,
+      9,
+      {
+        INVITE_CAMPAIGN:0,
+        NO_SHADOWBAN:0.61,
+        TOP_SEARCH:1.00
+      }
+    ),
+    6
+  );
+});
+
+test("single-class purchase only consumes its own budget",()=>{
+  assert.equal(
+    maxAffordableQuantityForBudget(
+      "TOP_SEARCH",
+      false,
+      0.20,
+      20,
+      {
+        INVITE_CAMPAIGN:0,
+        NO_SHADOWBAN:0,
+        TOP_SEARCH:1.01
+      }
+    ),
+    5
   );
 });
