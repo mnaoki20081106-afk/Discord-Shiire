@@ -1706,9 +1706,9 @@ export async function runXProcurement(env:Env):Promise<XRunResult>{
     };
   }
 
-  // Recalculate the effective tier price using the quantity that will really
-  // be ordered. This prevents a 20-unit discount from qualifying a 10-unit
-  // trial purchase above the JPY ceiling.
+  // Recalculate the effective tier price whenever the budget reduces the
+  // quantity. A smaller order can lose a volume discount, so affordability
+  // must be checked again until the quantity and tier price are stable.
   const trustedApprovedIds=[...new Set([
     ...PREFERRED_TOP_HSTORA_PRODUCT_IDS,
     ...PREFERRED_NO_SHADOWBAN_HSTORA_PRODUCT_IDS,
@@ -1720,15 +1720,16 @@ export async function runXProcurement(env:Env):Promise<XRunResult>{
       :settings;
   const classOverride=
     procurementClassOverrideForHstoraProduct(fresh.id)??undefined;
-  const policyQualification=qualifyHstoraProduct(
-    fresh,
-    qualificationSettings,
-    quantity,
-    Date.now(),
-    classOverride
-  );
-  const q=
-    classOverride
+
+  const qualifyForQuantity=(orderQuantity:number)=>{
+    const policyQualification=qualifyHstoraProduct(
+      fresh,
+      qualificationSettings,
+      orderQuantity,
+      Date.now(),
+      classOverride
+    );
+    return classOverride
       ?{
         ...policyQualification,
         evidence:[
@@ -1737,6 +1738,40 @@ export async function runXProcurement(env:Env):Promise<XRunResult>{
         ]
       }
       :policyQualification;
+  };
+
+  let q=qualifyForQuantity(quantity);
+  while(quantity>0){
+    const budgetUnitSource=Number(q.unit_price_source);
+    if(!Number.isFinite(budgetUnitSource)||budgetUnitSource<=0) break;
+
+    const affordableUnits=Math.floor(
+      (classBudgetUsd+0.00000001)/budgetUnitSource
+    );
+    let nextQuantity=Math.min(quantity,Math.max(0,affordableUnits));
+    if(targetClass!=="INVITE_CAMPAIGN"&&splitAcrossClasses){
+      nextQuantity=evenSplitPurchaseQuantity(nextQuantity);
+    }
+    if(nextQuantity===quantity) break;
+
+    quantity=nextQuantity;
+    if(quantity<=0){
+      return {
+        action:"PROCUREMENT_BUDGET_EXHAUSTED",
+        dryRun:settings.dry_run,
+        inventory,
+        productId:Number(fresh.id),
+        details:{
+          targetClass,
+          availableBudgetUsd:classBudgetUsd,
+          unitPriceUsd:budgetUnitSource,
+          procurementBudget:budgetSnapshot
+        }
+      };
+    }
+    q=qualifyForQuantity(quantity);
+  }
+
   const supportsTarget=
     targetClass==="INVITE_CAMPAIGN"
       ?Boolean(q.procurement_class)
