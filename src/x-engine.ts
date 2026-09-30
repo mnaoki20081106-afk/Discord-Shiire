@@ -1879,31 +1879,71 @@ export async function runXProcurement(env:Env):Promise<XRunResult>{
       requested:quantity,
       productId:Number(fresh.id),
       unitPriceJpy:q.unit_price_jpy,
-      details:{qualification:q,totalSource,currency:fresh.currency,trial:prior===0}
+      details:{
+        qualification:q,
+        totalSource,
+        currency:fresh.currency,
+        trial:prior===0,
+        targetClass,
+        availableBudgetUsd:classBudgetUsd
+      }
     };
   }
 
-  const recordId=await createPurchaseOrderRecord(env,{
-    supplier:"hstora",
-    supplierProductId:String(fresh.id),
-    quantity,
-    unitPrice:unitSource,
-    totalAmount:totalSource,
-    currency:String(fresh.currency),
-    externalOrderId,
-    idempotencyKey,
-    procurementClass:storedProcurementClass,
-    deliverySplitMode:
-      storedSplitAcrossClasses
-        ?DUAL_TOP_SPLIT_MODE
-        :null,
-    dryRun:false
-  });
+  const budgetReserved=await reserveProcurementBudget(
+    env,
+    targetClass,
+    totalSource
+  );
+  if(!budgetReserved){
+    return {
+      action:"PROCUREMENT_BUDGET_CHANGED",
+      dryRun:false,
+      inventory,
+      requested:quantity,
+      productId:Number(fresh.id),
+      details:{
+        targetClass,
+        requiredUsd:totalSource,
+        procurementBudget:await getProcurementBudgets(env)
+      }
+    };
+  }
+
+  let recordId:string;
+  try{
+    recordId=await createPurchaseOrderRecord(env,{
+      supplier:"hstora",
+      supplierProductId:String(fresh.id),
+      quantity,
+      unitPrice:unitSource,
+      totalAmount:totalSource,
+      currency:String(fresh.currency),
+      externalOrderId,
+      idempotencyKey,
+      procurementClass:storedProcurementClass,
+      deliverySplitMode:
+        storedSplitAcrossClasses
+          ?DUAL_TOP_SPLIT_MODE
+          :null,
+      dryRun:false
+    });
+  }catch(error){
+    await releaseProcurementBudget(env,targetClass,totalSource);
+    throw error;
+  }
 
   await notifyDiscord(env,{
     title:"仕入れ開始",
     message:"HStoraでXアカウント仕入れを開始します。",
-    details:{productId:fresh.id,quantity,unitPriceJpy:q.unit_price_jpy,trial:prior===0}
+    details:{
+      productId:fresh.id,
+      quantity,
+      unitPriceJpy:q.unit_price_jpy,
+      trial:prior===0,
+      budgetClass:targetClass,
+      budgetReservedUsd:totalSource
+    }
   }).catch(()=>undefined);
 
   try{
