@@ -6,6 +6,7 @@ import {
   PREFERRED_TOP_HSTORA_PRODUCT_IDS,
   evenSplitPurchaseQuantity,
   hasDualTopNoShadowbanEvidence,
+  isTopSearchFallbackEligible,
   isPreferredNoShadowbanHstoraSource,
   isPreferredTopHstoraSource,
   procurementClassOverrideForHstoraProduct,
@@ -76,4 +77,31 @@ test("odd legacy batches differ by at most one account",()=>{
   );
   assert.equal(classes.filter(value=>value==="TOP_SEARCH").length,3);
   assert.equal(classes.filter(value=>value==="NO_SHADOWBAN").length,2);
+});
+
+
+test("preferred TOP products bypass generic fallback labeling",()=>{
+  assert.equal(
+    isTopSearchFallbackEligible(4841,["TOP Search"]),
+    true
+  );
+  assert.equal(
+    isTopSearchFallbackEligible(5132,["TOP+Latest"]),
+    true
+  );
+});
+
+test("generic TOP fallback must also prove No Shadowban",()=>{
+  assert.equal(
+    isTopSearchFallbackEligible(9999,["TOP Search"]),
+    false
+  );
+  assert.equal(
+    isTopSearchFallbackEligible(9999,["TOP Search","No Shadowban"]),
+    true
+  );
+  assert.equal(
+    isTopSearchFallbackEligible(9999,["TOP+Latest","No Shadowban"]),
+    true
+  );
 });
