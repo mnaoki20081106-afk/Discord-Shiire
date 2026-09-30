@@ -1282,6 +1282,264 @@ export async function handleShiireMainBridge(
     return responseJson({logs,breakers,fundingEvents,cryptoTransactions});
   }
 
+  if(suffix==="/procurement-budget"&&request.method==="GET"){
+    const settings=await loadXSettings(env);
+    return responseJson({
+      percentages:procurementBudgetPercentages(settings),
+      budget:await getProcurementBudgets(env)
+    });
+  }
+
+  if(suffix==="/procurement-budget"&&request.method==="POST"){
+    const input=await parseBridgeJson(rawBody);
+    const pending=await pendingPurchaseOrders(env);
+    if(pending.length>0){
+      throw new ShiireVendingError(409,"PENDING_HSTORA_ORDER_EXISTS");
+    }
+    const hstoraBreaker=await circuitState(env,"hstora");
+    if(String(hstoraBreaker?.state??"")==="OPEN"){
+      throw new ShiireVendingError(409,"HSTORA_CIRCUIT_BREAKER_OPEN");
+    }
+    const inviteCampaignPercent=Number(input.inviteCampaignPercent);
+    const noShadowbanPercent=Number(input.noShadowbanPercent);
+    const topSearchPercent=Number(input.topSearchPercent);
+    const balance=await getHstoraBalance(env);
+    if(String(balance.currency).toUpperCase()!=="USD"){
+      throw new ShiireVendingError(409,"HSTORA_CURRENCY_UNSUPPORTED");
+    }
+    try{
+      const settings=await saveXSettings(env,{
+        invite_campaign_budget_percent:inviteCampaignPercent,
+        no_shadowban_budget_percent:noShadowbanPercent,
+        top_search_budget_percent:topSearchPercent
+      });
+      const percentages=procurementBudgetPercentages(settings);
+      const budget=await rebalanceProcurementBudgets(
+        env,
+        Number(balance.balance),
+        percentages
+      );
+      await syncHstoraBudgetBaseline(env,Number(balance.balance));
+      await auditX(env,{
+        kind:"PROCUREMENT_BUDGET_ALLOCATION_CHANGED",
+        message:"Procurement budget percentages changed from the authenticated main dashboard.",
+        details:{
+          percentages,
+          currentHstoraBalanceUsd:Number(balance.balance),
+          budget:budget.available
+        }
+      });
+      return responseJson({
+        ok:true,
+        percentages,
+        budget,
+        currentHstoraBalanceUsd:Number(balance.balance)
+      });
+    }catch(error){
+      if(error instanceof ShiireVendingError) throw error;
+      throw new ShiireVendingError(
+        400,
+        error instanceof Error?error.message:"PROCUREMENT_BUDGET_INVALID"
+      );
+    }
+  }
+
+  if(suffix==="/procurement-budget/rebalance"&&request.method==="POST"){
+    const pending=await pendingPurchaseOrders(env);
+    if(pending.length>0){
+      throw new ShiireVendingError(409,"PENDING_HSTORA_ORDER_EXISTS");
+    }
+    const hstoraBreaker=await circuitState(env,"hstora");
+    if(String(hstoraBreaker?.state??"")==="OPEN"){
+      throw new ShiireVendingError(409,"HSTORA_CIRCUIT_BREAKER_OPEN");
+    }
+    const [settings,balance]=await Promise.all([
+      loadXSettings(env),
+      getHstoraBalance(env)
+    ]);
+    if(String(balance.currency).toUpperCase()!=="USD"){
+      throw new ShiireVendingError(409,"HSTORA_CURRENCY_UNSUPPORTED");
+    }
+    const percentages=procurementBudgetPercentages(settings);
+    const budget=await rebalanceProcurementBudgets(
+      env,
+      Number(balance.balance),
+      percentages
+    );
+    await syncHstoraBudgetBaseline(env,Number(balance.balance));
+    await auditX(env,{
+      kind:"PROCUREMENT_BUDGET_REBALANCED",
+      message:"Procurement budgets were manually rebalanced from the authenticated main dashboard.",
+      details:{
+        percentages,
+        currentHstoraBalanceUsd:Number(balance.balance),
+        budget:budget.available
+      }
+    });
+    return responseJson({
+      ok:true,
+      percentages,
+      budget,
+      currentHstoraBalanceUsd:Number(balance.balance)
+    });
+  }
+
+  if(suffix==="/daily-restock"&&request.method==="GET"){
+    return responseJson(await getDailyRestockDashboard(env));
+  }
+
+  if(suffix==="/daily-restock/settings"&&request.method==="POST"){
+    const input=await parseBridgeJson(rawBody);
+    if(input.notificationChannelId!==undefined){
+      const channelId=String(input.notificationChannelId??"").trim();
+      if(channelId) await requireChannelInGuild(env,guildId,channelId);
+    }
+    try{
+      return responseJson({
+        ok:true,
+        ...await updateDailyRestockConfig(env,{
+          enabled:input.enabled,
+          topSearchTargetStock:input.topSearchTargetStock,
+          noShadowbanTargetStock:input.noShadowbanTargetStock,
+          notificationChannelId:input.notificationChannelId,
+          notificationMessage:input.notificationMessage
+        })
+      });
+    }catch(error){
+      throw new ShiireVendingError(
+        400,
+        error instanceof Error?error.message:"DAILY_RESTOCK_SETTINGS_INVALID"
+      );
+    }
+  }
+
+  if(suffix==="/daily-restock/panel"&&request.method==="POST"){
+    const dashboard=await getDailyRestockDashboard(env);
+    const channelId=String(dashboard.config.notification_channel_id??"").trim();
+    if(!channelId) throw new ShiireVendingError(409,"NOTIFICATION_CHANNEL_REQUIRED");
+    await requireChannelInGuild(env,guildId,channelId);
+    try{
+      return responseJson({ok:true,...await installDailyRestockPanel(env)});
+    }catch(error){
+      throw new ShiireVendingError(
+        409,
+        error instanceof Error?error.message:"DAILY_RESTOCK_PANEL_FAILED"
+      );
+    }
+  }
+
+  if(suffix==="/daily-restock/run"&&request.method==="POST"){
+    try{
+      return responseJson(await startDailyRestock(env,Date.now(),true));
+    }catch(error){
+      throw new ShiireVendingError(
+        409,
+        error instanceof Error?error.message:"DAILY_RESTOCK_RUN_FAILED"
+      );
+    }
+  }
+
+  if(suffix==="/invite-campaign"&&request.method==="GET"){
+    const dashboard=await getInviteCampaignDashboard(env);
+    return responseJson({
+      ...dashboard,
+      currentGuildId:guildId,
+      currentGuildSelected:dashboard.settings.guild_id===guildId
+    });
+  }
+
+  if(suffix==="/invite-campaign/settings"&&request.method==="POST"){
+    const input=await parseBridgeJson(rawBody);
+    try{
+      const settings=await saveInviteCampaignSettings(env,{
+        enabled:input.enabled,
+        guildId,
+        invitesPerReward:input.invitesPerReward,
+        targetStock:input.targetStock
+      });
+      if(settings.enabled){
+        try{
+          await ensureInviteCampaignGateway(env);
+          await seedInviteCampaignSnapshot(env,guildId);
+          await reconcileInviteCampaignRewards(env);
+        }catch(error){
+          await saveInviteCampaignSettings(env,{enabled:false,guildId});
+          await stopInviteCampaignGateway(env).catch(()=>undefined);
+          throw new ShiireVendingError(
+            409,
+            "INVITE_CAMPAIGN_START_FAILED:"+
+            (error instanceof Error?error.message:String(error))
+          );
+        }
+      }else{
+        await stopInviteCampaignGateway(env);
+      }
+      return responseJson({
+        ok:true,
+        ...await getInviteCampaignDashboard(env),
+        currentGuildId:guildId,
+        currentGuildSelected:true
+      });
+    }catch(error){
+      if(error instanceof ShiireVendingError) throw error;
+      throw new ShiireVendingError(
+        400,
+        error instanceof Error?error.message:"INVITE_CAMPAIGN_SETTINGS_INVALID"
+      );
+    }
+  }
+
+  if(suffix==="/invite-campaign/seed"&&request.method==="POST"){
+    const settings=await getInviteCampaignDashboard(env);
+    if(settings.settings.guild_id!==guildId){
+      throw new ShiireVendingError(409,"INVITE_CAMPAIGN_DIFFERENT_GUILD");
+    }
+    try{
+      const result=await seedInviteCampaignSnapshot(env,guildId);
+      return responseJson({
+        ok:true,
+        result,
+        ...await getInviteCampaignDashboard(env),
+        currentGuildId:guildId,
+        currentGuildSelected:true
+      });
+    }catch(error){
+      throw new ShiireVendingError(
+        409,
+        error instanceof Error?error.message:"INVITE_CAMPAIGN_SEED_FAILED"
+      );
+    }
+  }
+
+  const inviteRewardRetry=suffix.match(
+    /^\/invite-campaign\/rewards\/([^/]+)\/retry$/
+  );
+  if(inviteRewardRetry&&request.method==="POST"){
+    const dashboard=await getInviteCampaignDashboard(env);
+    if(dashboard.settings.guild_id!==guildId){
+      throw new ShiireVendingError(409,"INVITE_CAMPAIGN_DIFFERENT_GUILD");
+    }
+    const rewardId=decodeURIComponent(inviteRewardRetry[1]!);
+    if(!(dashboard.rewards as Array<{id:string}>).some(row=>row.id===rewardId)){
+      throw new ShiireVendingError(404,"INVITE_REWARD_NOT_FOUND_IN_GUILD");
+    }
+    try{
+      const result=await retryInviteCampaignReward(env,rewardId);
+      return responseJson({
+        ok:true,
+        result,
+        ...await getInviteCampaignDashboard(env),
+        currentGuildId:guildId,
+        currentGuildSelected:true
+      });
+    }catch(error){
+      throw new ShiireVendingError(
+        409,
+        error instanceof Error?error.message:"INVITE_REWARD_RETRY_FAILED"
+      );
+    }
+  }
+
   if(suffix==="/funding/mode"&&request.method==="POST"){
     const input=await parseBridgeJson(rawBody);
     const mode=String(input.mode??"");
