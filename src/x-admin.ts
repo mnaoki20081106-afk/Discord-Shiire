@@ -194,6 +194,125 @@ export async function handleXAdminApi(
     }
   }
 
+  if(url.pathname==="/api/x/procurement-budget"&&request.method==="GET"){
+    const settings=await loadXSettings(env);
+    return json({
+      percentages:procurementBudgetPercentages(settings),
+      budget:await getProcurementBudgets(env)
+    });
+  }
+
+  if(url.pathname==="/api/x/procurement-budget"&&request.method==="POST"){
+    const raw=await requestJson(request);
+    if(!raw) return json({error:"INVALID_JSON"},400);
+
+    const pending=await pendingPurchaseOrders(env);
+    if(pending.length>0){
+      return json({
+        error:"PENDING_HSTORA_ORDER_EXISTS",
+        message:"処理中のHStora注文があるため、予算の再配分は注文確定後に行ってください。",
+        pendingOrders:pending.length
+      },409);
+    }
+
+    const inviteCampaignPercent=Number(raw.inviteCampaignPercent);
+    const noShadowbanPercent=Number(raw.noShadowbanPercent);
+    const topSearchPercent=Number(raw.topSearchPercent);
+
+    let balance;
+    try{balance=await getHstoraBalance(env);}
+    catch(error){
+      return json({
+        error:"HSTORA_BALANCE_ERROR",
+        message:error instanceof Error?error.message:String(error)
+      },502);
+    }
+    if(String(balance.currency).toUpperCase()!=="USD"){
+      return json({error:"HSTORA_CURRENCY_UNSUPPORTED"},409);
+    }
+
+    try{
+      const settings=await saveXSettings(env,{
+        invite_campaign_budget_percent:inviteCampaignPercent,
+        no_shadowban_budget_percent:noShadowbanPercent,
+        top_search_budget_percent:topSearchPercent
+      });
+      const percentages=procurementBudgetPercentages(settings);
+      const budget=await rebalanceProcurementBudgets(
+        env,
+        Number(balance.balance),
+        percentages
+      );
+      await auditX(env,{
+        kind:"PROCUREMENT_BUDGET_ALLOCATION_CHANGED",
+        message:"Procurement budget percentages changed and current HStora balance was rebalanced.",
+        details:{
+          percentages,
+          currentHstoraBalanceUsd:Number(balance.balance),
+          budget:budget.available
+        }
+      });
+      return json({
+        ok:true,
+        percentages,
+        budget,
+        currentHstoraBalanceUsd:Number(balance.balance)
+      });
+    }catch(error){
+      return json({
+        error:error instanceof Error?error.message:String(error)
+      },400);
+    }
+  }
+
+  if(
+    url.pathname==="/api/x/procurement-budget/rebalance"&&
+    request.method==="POST"
+  ){
+    const pending=await pendingPurchaseOrders(env);
+    if(pending.length>0){
+      return json({
+        error:"PENDING_HSTORA_ORDER_EXISTS",
+        message:"処理中のHStora注文があるため、現在残高での再配分はできません。",
+        pendingOrders:pending.length
+      },409);
+    }
+    try{
+      const [settings,balance]=await Promise.all([
+        loadXSettings(env),
+        getHstoraBalance(env)
+      ]);
+      if(String(balance.currency).toUpperCase()!=="USD"){
+        return json({error:"HSTORA_CURRENCY_UNSUPPORTED"},409);
+      }
+      const percentages=procurementBudgetPercentages(settings);
+      const budget=await rebalanceProcurementBudgets(
+        env,
+        Number(balance.balance),
+        percentages
+      );
+      await auditX(env,{
+        kind:"PROCUREMENT_BUDGET_REBALANCED",
+        message:"Procurement budgets were manually rebalanced from current HStora balance.",
+        details:{
+          percentages,
+          currentHstoraBalanceUsd:Number(balance.balance),
+          budget:budget.available
+        }
+      });
+      return json({
+        ok:true,
+        percentages,
+        budget,
+        currentHstoraBalanceUsd:Number(balance.balance)
+      });
+    }catch(error){
+      return json({
+        error:error instanceof Error?error.message:String(error)
+      },502);
+    }
+  }
+
   if(url.pathname==="/api/x/settings"){
     if(request.method==="GET"){
       return json({settings:publicSettings(await loadXSettings(env))});
