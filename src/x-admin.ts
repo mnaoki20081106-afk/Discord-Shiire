@@ -48,6 +48,12 @@ import {
   listHstoraCatalog,
   getHstoraProduct
 } from "./providers/hstora";
+import {
+  getDailyRestockDashboard,
+  installDailyRestockPanel,
+  startDailyRestock,
+  updateDailyRestockConfig
+} from "./x-daily-restock";
 
 function json(data:unknown,status=200){
   return new Response(JSON.stringify(data),{
@@ -206,6 +212,51 @@ export async function handleXAdminApi(
     }catch(error){
       const message=error instanceof Error?error.message:String(error);
       return json({error:message},409);
+    }
+  }
+
+  if(url.pathname==="/api/x/daily-restock"&&request.method==="GET"){
+    return json(await getDailyRestockDashboard(env));
+  }
+
+  if(url.pathname==="/api/x/daily-restock/settings"&&request.method==="POST"){
+    const raw=await requestJson(request);
+    if(!raw) return json({error:"INVALID_JSON"},400);
+    try{
+      return json({
+        ok:true,
+        ...await updateDailyRestockConfig(env,{
+          enabled:raw.enabled,
+          topSearchTargetStock:raw.topSearchTargetStock,
+          noShadowbanTargetStock:raw.noShadowbanTargetStock,
+          notificationChannelId:raw.notificationChannelId,
+          notificationMessage:raw.notificationMessage
+        })
+      });
+    }catch(error){
+      return json({
+        error:error instanceof Error?error.message:String(error)
+      },400);
+    }
+  }
+
+  if(url.pathname==="/api/x/daily-restock/panel"&&request.method==="POST"){
+    try{
+      return json({ok:true,...await installDailyRestockPanel(env)});
+    }catch(error){
+      return json({
+        error:error instanceof Error?error.message:String(error)
+      },409);
+    }
+  }
+
+  if(url.pathname==="/api/x/daily-restock/run"&&request.method==="POST"){
+    try{
+      return json(await startDailyRestock(env,Date.now(),true));
+    }catch(error){
+      return json({
+        error:error instanceof Error?error.message:String(error)
+      },409);
     }
   }
 
@@ -754,7 +805,7 @@ pre{white-space:pre-wrap;word-break:break-word;font-size:12px;color:#cbd2df;max-
 <nav id="nav"></nav>
 <main id="main"><div class="card">ADMIN_TOKENを入力して接続してください。</div></main>
 <script>
-const tabs=["Dashboard","Funding","Binance","LTC Wallet","HStora","招待キャンペーン","Inventory","Orders","Logs","Settings"];
+const tabs=["Dashboard","Funding","Binance","LTC Wallet","HStora","招待キャンペーン","18:00入荷","Inventory","Orders","Logs","Settings"];
 let current="Dashboard";
 const token=document.querySelector("#token");
 token.value=sessionStorage.getItem("shiireAdminToken")||"";
@@ -835,6 +886,44 @@ async function retryInviteReward(id){
  await api("/api/x/invite-campaign/rewards/"+encodeURIComponent(id)+"/retry",{
   method:"POST",body:"{}"
  });
+ await load();
+}
+async function saveDailyRestock(){
+ const enabled=Boolean(document.querySelector("#dailyRestockEnabled")?.checked);
+ const topSearchTargetStock=Number(document.querySelector("#dailyTopTarget")?.value);
+ const noShadowbanTargetStock=Number(document.querySelector("#dailyNoShadowTarget")?.value);
+ const notificationChannelId=String(document.querySelector("#dailyNotifyChannel")?.value||"").trim();
+ const notificationMessage=String(document.querySelector("#dailyNotifyMessage")?.value||"").trim();
+ if(!Number.isInteger(topSearchTargetStock)||topSearchTargetStock<0||topSearchTargetStock>10000){
+  throw new Error("Top Searchの恒常在庫は0〜10000の整数で入力してください。");
+ }
+ if(!Number.isInteger(noShadowbanTargetStock)||noShadowbanTargetStock<0||noShadowbanTargetStock>10000){
+  throw new Error("No shadow banの恒常在庫は0〜10000の整数で入力してください。");
+ }
+ if(notificationChannelId&&!/^\\d{15,22}$/.test(notificationChannelId)){
+  throw new Error("通知チャンネルIDが不正です。");
+ }
+ if(!notificationMessage) throw new Error("通知文言を入力してください。");
+ await api("/api/x/daily-restock/settings",{
+  method:"POST",
+  body:JSON.stringify({
+   enabled,
+   topSearchTargetStock,
+   noShadowbanTargetStock,
+   notificationChannelId,
+   notificationMessage
+  })
+ });
+ await load();
+}
+async function installDailyRestockPanelNow(){
+ await api("/api/x/daily-restock/panel",{method:"POST",body:"{}"});
+ await load();
+}
+async function runDailyRestockNow(){
+ if(!window.confirm("18:00を待たず、現在在庫と恒常在庫の差分を今すぐ仕入れますか？")) return;
+ const d=await api("/api/x/daily-restock/run",{method:"POST",body:"{}"});
+ alert(JSON.stringify(d,null,2));
  await load();
 }
 function metrics(data){
@@ -997,6 +1086,45 @@ async function load(){
     document.querySelectorAll("[data-retry-reward]").forEach(el=>{
       el.onclick=()=>retryInviteReward(el.getAttribute("data-retry-reward")).catch(e=>alert(e.message));
     });
+  }
+  else if(current==="18:00入荷"){
+    data=await api("/api/x/daily-restock");
+    const cfg=data.config||{};
+    const state=data.state||{};
+    const top=data.stock?.TOP_SEARCH||{};
+    const noShadow=data.stock?.NO_SHADOWBAN||{};
+    const stateText=state.status
+      ?esc(state.status)+" / "+esc(state.date_key||"-")
+      :"未実行";
+    main.innerHTML=
+      '<section class="card"><strong>毎日18:00 在庫入荷</strong>'+
+      '<p class="hint">毎日18:00（日本時間）に、現在在庫と恒常在庫の差分だけをHStoraから仕入れます。仕入れ資金の配分とHStora商品優先順位は既存設定をそのまま使用します。HStoraが処理中の場合は1分Cronで納品完了まで追跡し、全体が終わってから集計通知を1回だけ送ります。</p>'+
+      '<div class="formrow"><label style="display:flex;align-items:center;gap:8px"><input id="dailyRestockEnabled" type="checkbox" style="flex:0" '+(cfg.enabled?'checked':'')+'>18:00自動入荷を有効化</label></div>'+
+      '<div class="formrow"><input id="dailyNoShadowTarget" type="number" min="0" max="10000" step="1" value="'+esc(cfg.no_shadowban_target_stock??50)+'" placeholder="No shadow ban 恒常在庫"><input id="dailyTopTarget" type="number" min="0" max="10000" step="1" value="'+esc(cfg.top_search_target_stock??50)+'" placeholder="Top Search 恒常在庫"></div>'+
+      '<div class="hint">左: No shadow ban / 右: Top Search。18:00時点の在庫との差分だけを入荷します。</div>'+
+      '<div class="formrow"><input id="dailyNotifyChannel" value="'+esc(cfg.notification_channel_id||"")+'" placeholder="通知先DiscordチャンネルID"></div>'+
+      '<p class="hint">入荷処理が完了したら、このチャンネルへまとめて通知します。</p>'+
+      '<textarea id="dailyNotifyMessage" style="min-height:120px;font:inherit">'+esc(cfg.notification_message||"")+'</textarea>'+
+      '<p class="hint">この文言の下に「No shadow ban 〇個」「Top Search □個」を自動表示します。</p>'+
+      '<div class="formrow"><button id="saveDailyRestock">設定を保存</button><button id="installDailyRestockPanel">通知パネルを設置 / 更新</button><button id="runDailyRestockNow">今すぐ差分入荷</button></div>'+
+      '</section>'+
+      '<div class="grid">'+
+      '<div class="metric"><small>No shadow ban</small><strong>'+esc(noShadow.current??0)+' / '+esc(noShadow.target??0)+'</strong><div class="hint">不足 '+esc(noShadow.deficit??0)+'個</div></div>'+
+      '<div class="metric"><small>Top Search</small><strong>'+esc(top.current??0)+' / '+esc(top.target??0)+'</strong><div class="hint">不足 '+esc(top.deficit??0)+'個</div></div>'+
+      '<div class="metric"><small>次回入荷</small><strong>18:00 JST</strong></div>'+
+      '<div class="metric"><small>前回ジョブ</small><strong>'+stateText+'</strong></div>'+
+      '</div>'+
+      (state.started_at
+        ?'<section class="card"><strong>前回 / 実行中の入荷結果</strong><div class="grid" style="margin-top:10px">'+
+          '<div class="metric"><small>No shadow ban 入荷数</small><strong>'+esc(state.added_no_shadowban??0)+'個</strong></div>'+
+          '<div class="metric"><small>Top Search 入荷数</small><strong>'+esc(state.added_top_search??0)+'個</strong></div>'+
+          '<div class="metric"><small>最終状態</small><strong>'+esc(state.last_action||state.status||"-")+'</strong></div>'+
+          '<div class="metric"><small>通知</small><strong>'+(state.notified_at?'送信済み':'未送信')+'</strong></div>'+
+          '</div>'+(state.error?'<pre class="bad">'+esc(state.error)+'</pre>':'')+'</section>'
+        :'');
+    document.querySelector("#saveDailyRestock").onclick=()=>saveDailyRestock().catch(e=>alert(e.message));
+    document.querySelector("#installDailyRestockPanel").onclick=()=>installDailyRestockPanelNow().catch(e=>alert(e.message));
+    document.querySelector("#runDailyRestockNow").onclick=()=>runDailyRestockNow().catch(e=>alert(e.message));
   }
   else if(current==="Inventory"){data=await api("/api/x/inventory");main.innerHTML=card(current,data)}
   else if(current==="Orders"){data=await api("/api/x/orders");main.innerHTML=card(current,data)}
