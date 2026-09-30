@@ -19,6 +19,7 @@ import {
   listHstoraCatalog
 } from "./providers/hstora";
 import { DisabledHotWalletProvider } from "./providers/manual";
+import { runLtcAutoPurchase, runXProcurement } from "./x-engine";
 import { SHIIRE_DISCORD_BOT_PERMISSIONS, deliveryNonce, paymentMethodEnabled, paymentPrice } from "./shiire-vending-policy";
 import {
   inventorySummary,
@@ -1538,6 +1539,14 @@ export async function handleShiireMainBridge(
         error instanceof Error?error.message:"INVITE_REWARD_RETRY_FAILED"
       );
     }
+  }
+
+  if(suffix==="/run"&&request.method==="POST"){
+    return responseJson(await runXProcurement(env));
+  }
+
+  if(suffix==="/funding/auto-purchase/run"&&request.method==="POST"){
+    return responseJson(await runLtcAutoPurchase(env));
   }
 
   if(suffix==="/funding/mode"&&request.method==="POST"){
