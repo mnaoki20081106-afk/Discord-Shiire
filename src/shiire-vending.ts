@@ -33,9 +33,33 @@ import {
   recentFundingEvents,
   recentCryptoTransactions,
   auditX,
-  setCircuitBreaker
+  setCircuitBreaker,
+  getProcurementBudgets,
+  rebalanceProcurementBudgets,
+  pendingPurchaseOrders,
+  circuitState,
+  setXSetting
 } from "./x-db";
 import { receiveMainPayment, getMainPaymentStatus } from "./main-bot";
+import {
+  getInviteCampaignDashboard,
+  saveInviteCampaignSettings
+} from "./invite-campaign-db";
+import { seedInviteCampaignSnapshot } from "./invite-campaign";
+import {
+  reconcileInviteCampaignRewards,
+  retryInviteCampaignReward
+} from "./invite-campaign-rewards";
+import {
+  ensureInviteCampaignGateway,
+  stopInviteCampaignGateway
+} from "./invite-gateway";
+import {
+  getDailyRestockDashboard,
+  installDailyRestockPanel,
+  startDailyRestock,
+  updateDailyRestockConfig
+} from "./x-daily-restock";
 import {
   ensureShiireVendingSchema,
   listShiireMachines,
@@ -128,6 +152,23 @@ function safeProcurementSettings(settings:Awaited<ReturnType<typeof loadXSetting
     no_shadowban_target_stock:settings.no_shadowban_target_stock,
     trial_purchase_count:settings.trial_purchase_count,
     max_batch_purchase:settings.max_batch_purchase,
+    invite_campaign_budget_percent:settings.invite_campaign_budget_percent,
+    no_shadowban_budget_percent:settings.no_shadowban_budget_percent,
+    top_search_budget_percent:settings.top_search_budget_percent,
+    min_seller_rating:settings.min_seller_rating,
+    min_product_reviews:settings.min_product_reviews,
+    min_sales_count:settings.min_sales_count,
+    max_dispute_rate:settings.max_dispute_rate,
+    minimum_stock:settings.minimum_stock,
+    seller_quality_mode:settings.seller_quality_mode,
+    approved_hstora_product_ids:settings.approved_hstora_product_ids,
+    max_paypay_balance_age_ms:settings.max_paypay_balance_age_ms,
+    max_fx_age_ms:settings.max_fx_age_ms,
+    max_fx_jump_percent:settings.max_fx_jump_percent,
+    max_price_jump_percent:settings.max_price_jump_percent,
+    max_ltc_price_jump_percent:settings.max_ltc_price_jump_percent,
+    require_bulk_confirmation:settings.require_bulk_confirmation,
+    bulk_confirmation_threshold:settings.bulk_confirmation_threshold,
     observed_paypay_balance_jpy:settings.observed_paypay_balance_jpy,
     observed_paypay_balance_at:settings.observed_paypay_balance_at,
     pending_paypay_funding_jpy:settings.pending_paypay_funding_jpy,
@@ -135,6 +176,24 @@ function safeProcurementSettings(settings:Awaited<ReturnType<typeof loadXSetting
     usd_jpy_rate_updated_at:settings.usd_jpy_rate_updated_at,
     bulk_approval_until:settings.bulk_approval_until
   };
+}
+
+function procurementBudgetPercentages(
+  settings:Awaited<ReturnType<typeof loadXSettings>>
+){
+  return {
+    INVITE_CAMPAIGN:settings.invite_campaign_budget_percent,
+    NO_SHADOWBAN:settings.no_shadowban_budget_percent,
+    TOP_SEARCH:settings.top_search_budget_percent
+  };
+}
+
+async function syncHstoraBudgetBaseline(env:Env,balanceUsd:number){
+  await setXSetting(env,"x_hstora_balance_guard",{
+    hstoraUsd:Math.max(0,balanceUsd),
+    allowedDecreaseUsd:0,
+    updatedAt:Date.now()
+  });
 }
 
 async function operationsOverview(env:Env){
