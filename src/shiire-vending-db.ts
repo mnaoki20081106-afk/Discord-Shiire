@@ -2,7 +2,7 @@ import type { Env } from "./types";
 import { randomId } from "./crypto";
 import { encryptSensitive, decryptSensitive, type EncryptedSecret } from "./x-crypto";
 import { ensureXSchema } from "./x-db";
-import { canReleaseReservedOrder, paymentPrice, shouldExpireUnpaidOrder } from "./shiire-vending-policy";
+import { paymentPrice } from "./shiire-vending-policy";
 
 export type ShiireVendingMachine={
   id:string;
@@ -453,25 +453,20 @@ async function reserveAccounts(
   const reserved:string[]=[];
   try{
     for(const row of rows){
-      const updated=await env.DB.prepare(
-        "UPDATE purchased_accounts SET status='VENDING_RESERVED' WHERE id=? AND status='READY_FOR_DELIVERY'"
-      ).bind(row.id).run();
-      if(Number(updated.meta.changes??0)!==1) throw new Error("STOCK_RACE");
-      await env.DB.prepare(
-        "INSERT INTO shiire_vending_reservations(account_id,order_id,product_id,reserved_at) VALUES (?,?,?,?)"
-      ).bind(row.id,orderId,product.id,Date.now()).run();
+      const results=await env.DB.batch([
+        env.DB.prepare(
+          "UPDATE purchased_accounts SET status='VENDING_RESERVED' WHERE id=? AND status='READY_FOR_DELIVERY' AND EXISTS (SELECT 1 FROM shiire_vending_orders WHERE id=? AND status='reserving')"
+        ).bind(row.id,orderId),
+        env.DB.prepare(
+          "INSERT INTO shiire_vending_reservations(account_id,order_id,product_id,reserved_at) SELECT ?,?,?,? WHERE changes()=1"
+        ).bind(row.id,orderId,product.id,Date.now())
+      ]);
+      if(Number(results[0]?.meta.changes??0)!==1) throw new Error("STOCK_RACE");
       reserved.push(row.id);
     }
     return reserved;
   }catch(error){
-    for(const accountId of reserved){
-      await env.DB.prepare(
-        "UPDATE purchased_accounts SET status='READY_FOR_DELIVERY' WHERE id=? AND status='VENDING_RESERVED'"
-      ).bind(accountId).run().catch(()=>undefined);
-      await env.DB.prepare(
-        "DELETE FROM shiire_vending_reservations WHERE account_id=? AND order_id=?"
-      ).bind(accountId,orderId).run().catch(()=>undefined);
-    }
+    await releaseShiireOrder(env,orderId);
     throw error;
   }
 }
@@ -513,9 +508,10 @@ export async function reserveShiireOrder(
     throw error;
   }
 
-  await env.DB.prepare(
-    "UPDATE shiire_vending_orders SET status=?,updated_at=? WHERE id=?"
+  const finalized=await env.DB.prepare(
+    "UPDATE shiire_vending_orders SET status=?,updated_at=? WHERE id=? AND status='reserving'"
   ).bind(total===0?"paid":"awaiting_payment",Date.now(),orderId).run();
+  if(Number(finalized.meta.changes??0)!==1) throw new Error("ORDER_RESERVATION_EXPIRED");
   return getShiireOrder(env,orderId);
 }
 
@@ -656,50 +652,35 @@ export async function finishShiireDelivery(env:Env,order:ShiireVendingOrder){
 }
 
 export async function releaseShiireOrder(env:Env,orderId:string){
-  const order=await getShiireOrder(env,orderId);
-  if(!order||!canReleaseReservedOrder(order.status)) return 0;
-  const rows=(await env.DB.prepare(
-    "SELECT account_id FROM shiire_vending_reservations WHERE order_id=?"
-  ).bind(orderId).all<{account_id:string}>()).results;
-  if(!rows.length) return 0;
-
+  const releasable="SELECT id FROM shiire_vending_orders WHERE id=? AND status IN ('awaiting_payment','reserving','failed')";
   const results=await env.DB.batch([
-    ...rows.map(row=>env.DB.prepare(
-      "UPDATE purchased_accounts SET status='READY_FOR_DELIVERY' WHERE id=? AND status='VENDING_RESERVED'"
-    ).bind(row.account_id)),
     env.DB.prepare(
-      "DELETE FROM shiire_vending_reservations WHERE order_id=?"
+      "UPDATE purchased_accounts SET status='READY_FOR_DELIVERY' WHERE status='VENDING_RESERVED' AND id IN (SELECT account_id FROM shiire_vending_reservations WHERE order_id IN ("+releasable+"))"
+    ).bind(orderId),
+    env.DB.prepare(
+      "DELETE FROM shiire_vending_reservations WHERE order_id IN ("+releasable+")"
     ).bind(orderId)
   ]);
-  let released=0;
-  for(let i=0;i<rows.length;i++){
-    if(Number(results[i]?.meta?.changes??0)===1) released++;
-  }
-  return released;
+  return Number(results[0]?.meta.changes??0);
 }
 
 export async function cleanShiireVendingExpired(env:Env){
   await ensureShiireVendingSchema(env);
   const now=Date.now();
-  const expiredCandidates=(await env.DB.prepare(
-    "SELECT id,status,reserved_until FROM shiire_vending_orders WHERE reserved_until IS NOT NULL AND reserved_until<? ORDER BY reserved_until ASC LIMIT 50"
-  ).bind(now).all<{id:string;status:string;reserved_until:number|null}>()).results;
-  for(const row of expiredCandidates){
-    if(!shouldExpireUnpaidOrder(row.status,row.reserved_until,now)) continue;
-    await releaseShiireOrder(env,row.id);
-    await env.DB.prepare(
-      "UPDATE shiire_vending_orders SET status='expired',updated_at=? WHERE id=? AND status='awaiting_payment'"
-    ).bind(now,row.id).run();
-  }
+  await env.DB.batch([
+    env.DB.prepare("UPDATE shiire_vending_orders SET status='expired',updated_at=? WHERE id IN (SELECT id FROM shiire_vending_orders WHERE status='awaiting_payment' AND reserved_until IS NOT NULL AND reserved_until<? ORDER BY reserved_until ASC LIMIT 50) AND status='awaiting_payment'").bind(now,now),
+    env.DB.prepare("UPDATE purchased_accounts SET status='READY_FOR_DELIVERY' WHERE status='VENDING_RESERVED' AND id IN (SELECT r.account_id FROM shiire_vending_reservations r JOIN shiire_vending_orders o ON o.id=r.order_id WHERE o.status='expired')"),
+    env.DB.prepare("DELETE FROM shiire_vending_reservations WHERE order_id IN (SELECT id FROM shiire_vending_orders WHERE status='expired')")
+  ]);
 
   const abandoned=(await env.DB.prepare(
     "SELECT id FROM shiire_vending_orders WHERE status IN ('reserving','failed') AND updated_at<? ORDER BY updated_at ASC LIMIT 50"
   ).bind(now-5*60_000).all<{id:string}>()).results;
   for(const row of abandoned){
-    await releaseShiireOrder(env,row.id);
-    await env.DB.prepare(
-      "UPDATE shiire_vending_orders SET status='failed',updated_at=? WHERE id=? AND status IN ('reserving','failed')"
-    ).bind(now,row.id).run();
+    const failed=await env.DB.prepare(
+      "UPDATE shiire_vending_orders SET status='failed',updated_at=? WHERE id=? AND status IN ('reserving','failed') AND updated_at<?"
+    ).bind(now,row.id,now-5*60_000).run();
+    if(Number(failed.meta.changes??0)===1) await releaseShiireOrder(env,row.id);
   }
 
   // Never auto-reset a stale delivering order to paid. A Discord DM may already

@@ -1,3 +1,4 @@
+import { withFinancialRunLock, type AssertFinancialLease } from "./x-run-lock";
 import type { Env } from "./types";
 import { randomId } from "./crypto";
 import {
@@ -157,7 +158,7 @@ export async function reconcilePendingXOrders(env:Env){
         });
       }else if(status){
         await updatePurchaseOrderRecord(env,String(row.id),{
-          status,
+          status:["COMPLETED","DELIVERED"].includes(status)?"PROCESSING":status,
           supplierOrderId:String(order.id),
           response:order
         });
@@ -609,6 +610,7 @@ async function allowExpectedHstoraDecrease(env:Env,amountUsd:number){
 
 async function submitLtcMarketPurchase(
   env:Env,
+  assertLease:AssertFinancialLease,
   input:{
     settings:Awaited<ReturnType<typeof loadXSettings>>;
     desiredJpy:number;
@@ -650,6 +652,11 @@ async function submitLtcMarketPurchase(
     };
   }
 
+  await assertLease();
+  const pendingFunding=await env.DB.prepare(
+    "SELECT id FROM funding_events WHERE provider='binance_japan' AND kind='LTC_PURCHASE' AND status NOT IN ('FILLED','FAILED','REJECTED','CANCELED','CANCELLED','EXPIRED','EXPIRED_IN_MATCH') LIMIT 1"
+  ).first();
+  if(pendingFunding) return {action:"LTC_ORDER_RECONCILIATION_REQUIRED",dryRun:false};
   const clientOrderId=("shiirex_"+randomId()).slice(0,36);
   await recordFundingEvent(env,{
     provider:"binance_japan",
@@ -815,6 +822,10 @@ async function submitLtcMarketPurchase(
 }
 
 export async function runLtcAutoPurchase(env:Env):Promise<XRunResult>{
+  return withFinancialRunLock(env,lease=>runLtcAutoPurchaseLocked(env,lease));
+}
+
+async function runLtcAutoPurchaseLocked(env:Env,assertLease:AssertFinancialLease):Promise<XRunResult>{
   const settings=await loadXSettings(env);
 
   if(settings.emergency_stop){
@@ -956,7 +967,7 @@ export async function runLtcAutoPurchase(env:Env):Promise<XRunResult>{
     };
   }
 
-  return submitLtcMarketPurchase(env,{
+  return submitLtcMarketPurchase(env,assertLease,{
     settings,
     desiredJpy:desired,
     ltcJpy:market.priceJpy,
@@ -967,6 +978,7 @@ export async function runLtcAutoPurchase(env:Env):Promise<XRunResult>{
 
 async function handleHstoraFundingNeed(
   env:Env,
+  assertLease:AssertFinancialLease,
   neededUsd:number
 ):Promise<XRunResult>{
   let settings=await loadXSettings(env);
@@ -1390,7 +1402,7 @@ async function handleHstoraFundingNeed(
     };
   }
 
-  return submitLtcMarketPurchase(env,{
+  return submitLtcMarketPurchase(env,assertLease,{
     settings,
     desiredJpy:desired,
     ltcJpy,
@@ -1400,6 +1412,10 @@ async function handleHstoraFundingNeed(
 }
 
 export async function runXProcurement(env:Env):Promise<XRunResult>{
+  return withFinancialRunLock(env,lease=>runXProcurementLocked(env,lease));
+}
+
+async function runXProcurementLocked(env:Env,assertLease:AssertFinancialLease):Promise<XRunResult>{
   const settings=await loadXSettings(env);
   if(settings.emergency_stop) return {action:"EMERGENCY_STOP",dryRun:settings.dry_run};
 
@@ -1427,6 +1443,18 @@ export async function runXProcurement(env:Env):Promise<XRunResult>{
   }
 
   await reconcilePendingXOrders(env);
+  // Reconciliation may open a breaker. Never order again in that same run.
+  const afterReconcile=await Promise.all(breakerKeys.map(key=>circuitState(env,key)));
+  if(afterReconcile.some(value=>String(value?.state??"")==="OPEN")){
+    return {action:"CIRCUIT_BREAKER_OPEN",dryRun:settings.dry_run};
+  }
+  if((await pendingPurchaseOrders(env)).length){
+    return {action:"HSTORA_PENDING_ORDER",dryRun:settings.dry_run};
+  }
+
+  if(!settings.dry_run&&!settings.auto_procurement_enabled){
+    return {action:"AUTO_PROCUREMENT_DISABLED",dryRun:false};
+  }
 
   try{
     const observedHstora=await getHstoraBalance(env);
@@ -1704,7 +1732,7 @@ export async function runXProcurement(env:Env):Promise<XRunResult>{
   }
 
   if(supplierBalance.balance<totalSource){
-    return handleHstoraFundingNeed(env,totalSource-supplierBalance.balance);
+    return handleHstoraFundingNeed(env,assertLease,totalSource-supplierBalance.balance);
   }
 
   const externalOrderId=("shiire-x-"+randomId()).slice(0,64);
@@ -1731,6 +1759,7 @@ export async function runXProcurement(env:Env):Promise<XRunResult>{
     };
   }
 
+  await assertLease();
   const recordId=await createPurchaseOrderRecord(env,{
     supplier:"hstora",
     supplierProductId:String(fresh.id),
@@ -1809,7 +1838,7 @@ export async function runXProcurement(env:Env):Promise<XRunResult>{
       };
     }
     await updatePurchaseOrderRecord(env,recordId,{
-      status:order.delivery?.available?(status||"DELIVERED"):(status||"PROCESSING"),
+      status:order.delivery?.available?(status||"DELIVERED"):(["COMPLETED","DELIVERED"].includes(status)?"PROCESSING":status||"PROCESSING"),
       supplierOrderId:String(order.id),
       response:order
     });
@@ -1882,7 +1911,7 @@ export async function runXProcurement(env:Env):Promise<XRunResult>{
         };
       }
       await updatePurchaseOrderRecord(env,recordId,{
-        status,
+        status:!order.delivery?.available&&["COMPLETED","DELIVERED"].includes(status)?"PROCESSING":status,
         supplierOrderId:String(order.id),
         response:order
       });
@@ -1897,7 +1926,7 @@ export async function runXProcurement(env:Env):Promise<XRunResult>{
     }catch{}
     if(!recovered){
       const code=error instanceof Error?error.message.slice(0,120):"HSTORA_PURCHASE_FAILED";
-      await updatePurchaseOrderRecord(env,recordId,{status:"FAILED",errorCode:code});
+      await updatePurchaseOrderRecord(env,recordId,{status:"UNKNOWN",errorCode:code});
       await setCircuitBreaker(env,"hstora","OPEN",code);
       await notifyDiscord(env,{
         title:"Circuit Breaker: HStora購入",

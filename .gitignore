@@ -1,0 +1,6 @@
+node_modules/
+.wrangler/
+.test-worker/
+*.log
+.env
+.env.*

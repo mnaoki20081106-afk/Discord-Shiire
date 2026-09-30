@@ -705,6 +705,9 @@ async function processPaymentLink(
     idempotencyKey:await paymentIdempotencyKey(order,link)
   });
   if(result.status==="completed"||result.ok){
+    if(!result.ok||result.status!=="completed"||!Number.isSafeInteger(result.amount)||result.amount<order.total_amount){
+      throw new Error("PAYMENT_COMPLETION_AMOUNT_MISMATCH");
+    }
     await markShiirePaid(env,order.id);
     const paid=await getShiireOrder(env,order.id);
     if(!paid) throw new Error("PAID_ORDER_NOT_FOUND");
