@@ -557,7 +557,18 @@ export async function handleXAdminApi(
       ok:false as const,
       error:"BINANCE_FUNDING_INACTIVE"
     });
-    const [inventory,today,funding,hstora,market,ltc,jpy,circuitBreakers,recentLogs]=await Promise.all([
+    const [
+      inventory,
+      today,
+      funding,
+      hstora,
+      market,
+      ltc,
+      jpy,
+      circuitBreakers,
+      recentLogs,
+      procurementBudget
+    ]=await Promise.all([
       inventorySummary(env),
       todayPurchaseStats(env,dayStart),
       settled(()=>getFundingPlan(env,now)),
@@ -566,7 +577,8 @@ export async function handleXAdminApi(
       binanceActive?settled(()=>getBinanceBalance(env,"LTC")):inactiveBinance,
       binanceActive?settled(()=>getBinanceBalance(env,"JPY")):inactiveBinance,
       listOpenCircuitBreakers(env),
-      listAuditLogs(env,50)
+      listAuditLogs(env,50),
+      getProcurementBudgets(env)
     ]);
     return json({
       generatedAt:now,
@@ -579,6 +591,10 @@ export async function handleXAdminApi(
         .filter(row=>String(row.level)==="error")
         .slice(0,10),
       inventory,
+      procurementBudget:{
+        ...procurementBudget,
+        percentages:procurementBudgetPercentages(settings)
+      },
       today:{
         ...today,
         approximateJpy:
