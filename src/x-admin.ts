@@ -10,7 +10,10 @@ import {
   ensureXSchema,
   auditX,
   listOpenCircuitBreakers,
-  setCircuitBreaker
+  setCircuitBreaker,
+  getProcurementBudgets,
+  rebalanceProcurementBudgets,
+  pendingPurchaseOrders
 } from "./x-db";
 import {
   confirmPendingDirectLtcFunding,
@@ -95,6 +98,14 @@ function safePatch(input:Record<string,unknown>):Partial<XSettings>{
     }
   }
   return out as Partial<XSettings>;
+}
+
+function procurementBudgetPercentages(settings:XSettings){
+  return {
+    INVITE_CAMPAIGN:settings.invite_campaign_budget_percent,
+    NO_SHADOWBAN:settings.no_shadowban_budget_percent,
+    TOP_SEARCH:settings.top_search_budget_percent
+  };
 }
 
 async function settled<T>(fn:()=>Promise<T>){
