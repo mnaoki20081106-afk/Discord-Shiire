@@ -275,9 +275,12 @@ block funded categories from restocking.
 
 Live purchases atomically reserve their category budget before the HStora
 order is submitted. The order quantity is reduced when necessary to stay
-inside the category's remaining budget. Changing the percentages rebalances
-the current HStora wallet balance, and is blocked while an HStora order is
-still pending.
+inside the category's remaining budget. Products that are intentionally stored
+50/50 as Top Search and No Shadowban consume both of those budget buckets
+50/50; if either side has no usable budget, that dual-class product is skipped
+instead of borrowing from the other category. Changing the percentages
+rebalances the current HStora wallet balance, and is blocked while an HStora
+order is still pending or the HStora circuit breaker is open.
 
 ### Safety defaults
 
