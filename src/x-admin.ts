@@ -977,7 +977,7 @@ async function load(){
       ?'<button id="runLtcNow">LTC自動購入判定</button>'
       :'';
     main.innerHTML=metrics(data)+
-      '<section class="card"><strong>手動実行</strong><p class="hint">Dry Run中は実購入POSTを行いません。手動LTC補充モードではHStora残高反映後に仕入れ処理が自動再開します。</p><div class="formrow">'+binanceButton+'<button id="runNow">仕入れ判定を実行</button></div></section>'+
+      '<section class="card"><strong>手動実行</strong><p class="hint">Dry Run中は実購入POSTを行いません。HStoraへのLTC入金反映は1分ごとに検知して仕入れ予算へ反映します。通常のNo shadow ban / Top Search在庫は毎日18:00（JST）に恒常在庫との差分を入荷します。</p><div class="formrow">'+binanceButton+'<button id="runNow">仕入れ判定を実行</button></div></section>'+
       card(current,data);
     const runLtc=document.querySelector("#runLtcNow"); if(runLtc) runLtc.onclick=()=>runLtcNow().catch(e=>alert(e.message));
     document.querySelector("#runNow").onclick=()=>runNow().catch(e=>alert(e.message));
@@ -991,7 +991,7 @@ async function load(){
     const budgetAvailable=procurementBudget.available||{};
     const modeCard=
       '<section class="card"><strong>LTC補充方法</strong>'+
-      '<p class="hint">通常はHStora Main WalletへLTCを手動補充します。残高反映後はBOTが在庫判定→HStora購入→自販機納品まで自動再開します。Binanceモードはサーバー側ロックを解除した場合だけ選択できます。</p>'+
+      '<p class="hint">通常はHStora Main WalletへLTCを手動補充します。残高反映は1分Cronで検知してカテゴリ別の仕入れ予算へ反映します。No shadow ban / Top Searchの通常在庫は毎日18:00（JST）に差分入荷し、招待キャンペーン在庫は従来どおり随時補充します。Binanceモードはサーバー側ロックを解除した場合だけ選択できます。</p>'+
       '<div class="formrow"><select id="fundingMode" style="flex:1;border:1px solid #353b49;border-radius:10px;padding:10px;background:#151922;color:#fff">'+
       '<option value="manual_hstora" '+(manual?'selected':'')+'>HStoraへLTC手動補充</option>'+
       '<option value="binance_auto" '+(!manual?'selected':'')+' '+(unlocked?'':'disabled')+'>Binance自動LTC購入'+(unlocked?'':'（ロック中）')+'</option>'+
@@ -1012,7 +1012,7 @@ async function load(){
       '</section>';
     const manualCard=
       '<section class="card"><strong>現在の運用: LTC手動補充</strong>'+
-      '<p class="hint">HStoraの Wallet → Add Funds からLTCで補充してください。BOTはHStora残高を1分Cronで確認し、必要残高が入れば人手を挟まず仕入れ処理へ戻ります。</p>'+
+      '<p class="hint">HStoraの Wallet → Add Funds からLTCで補充してください。BOTはHStora残高を1分Cronで確認し、増加分を設定済みの仕入れ割合へ自動配分します。通常在庫の実仕入れは毎日18:00（JST）に行い、現在在庫と恒常在庫の差分だけを補充します。</p>'+
       '<div class="grid"><div class="metric"><small>HStora Main Wallet</small><strong>'+esc(data.balances?.hstora?.data?.balance??"-")+' USD</strong></div><div class="metric"><small>自動仕入れ</small><strong>'+(data.safety?.autoProcurementEnabled?'ON':'OFF')+'</strong></div></div></section>';
     const binanceCards=
       '<section class="card"><strong>Binance自動LTC購入</strong>'+
