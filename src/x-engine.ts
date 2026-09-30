@@ -2098,13 +2098,26 @@ export async function runXProcurement(env:Env):Promise<XRunResult>{
     }catch{}
     if(!recovered){
       const code=error instanceof Error?error.message.slice(0,120):"HSTORA_PURCHASE_FAILED";
+      const definitiveRejection=
+        error instanceof HstoraApiError&&!error.retryable;
+      if(definitiveRejection){
+        await releaseProcurementBudget(env,targetClass,totalSource);
+      }
       await updatePurchaseOrderRecord(env,recordId,{status:"FAILED",errorCode:code});
       await setCircuitBreaker(env,"hstora","OPEN",code);
       await notifyDiscord(env,{
         title:"Circuit Breaker: HStora購入",
-        message:"注文結果をlookupでも確認できなかったため停止しました。手動確認が必要です。",
+        message:definitiveRejection
+          ?"HStoraが注文を確定拒否したため、予約していたカテゴリ予算を戻して停止しました。"
+          :"注文結果をlookupでも確認できなかったため停止しました。予算は二重使用防止のため予約状態を維持します。",
         level:"error",
-        details:{externalOrderId,code}
+        details:{
+          externalOrderId,
+          code,
+          budgetClass:targetClass,
+          budgetReservedUsd:totalSource,
+          budgetReleased:definitiveRejection
+        }
       }).catch(()=>undefined);
     }
     return {action:"HSTORA_PURCHASE_FAILED",dryRun:false,inventory,productId:Number(fresh.id)};
