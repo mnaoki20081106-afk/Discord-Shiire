@@ -13,7 +13,8 @@ import {
   setCircuitBreaker,
   getProcurementBudgets,
   rebalanceProcurementBudgets,
-  pendingPurchaseOrders
+  pendingPurchaseOrders,
+  setXSetting
 } from "./x-db";
 import {
   confirmPendingDirectLtcFunding,
@@ -111,6 +112,14 @@ function procurementBudgetPercentages(settings:XSettings){
     NO_SHADOWBAN:settings.no_shadowban_budget_percent,
     TOP_SEARCH:settings.top_search_budget_percent
   };
+}
+
+async function syncHstoraBudgetBaseline(env:Env,balanceUsd:number){
+  await setXSetting(env,"x_hstora_balance_guard",{
+    hstoraUsd:Math.max(0,balanceUsd),
+    allowedDecreaseUsd:0,
+    updatedAt:Date.now()
+  });
 }
 
 async function settled<T>(fn:()=>Promise<T>){
@@ -248,6 +257,7 @@ export async function handleXAdminApi(
         Number(balance.balance),
         percentages
       );
+      await syncHstoraBudgetBaseline(env,Number(balance.balance));
       await auditX(env,{
         kind:"PROCUREMENT_BUDGET_ALLOCATION_CHANGED",
         message:"Procurement budget percentages changed and current HStora balance was rebalanced.",
@@ -296,6 +306,7 @@ export async function handleXAdminApi(
         Number(balance.balance),
         percentages
       );
+      await syncHstoraBudgetBaseline(env,Number(balance.balance));
       await auditX(env,{
         kind:"PROCUREMENT_BUDGET_REBALANCED",
         message:"Procurement budgets were manually rebalanced from current HStora balance.",
