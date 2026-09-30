@@ -85,6 +85,11 @@ function publicSettings(settings:XSettings){
     // Pending funding snapshots are runtime-owned state. They are exposed via
     // getFundingPlan(), not as editable Settings JSON.
     if(key.startsWith("pending_paypay_")) continue;
+    if(
+      key==="invite_campaign_budget_percent"||
+      key==="no_shadowban_budget_percent"||
+      key==="top_search_budget_percent"
+    ) continue;
     out[key]=value;
   }
   return out;
