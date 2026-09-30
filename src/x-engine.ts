@@ -7,6 +7,11 @@ import {
   fundingSpendSince,
   getSupplierProductRecord,
   getXSetting,
+  getProcurementBudgets,
+  initializeProcurementBudgetsIfNeeded,
+  creditProcurementBudgets,
+  reserveProcurementBudget,
+  releaseProcurementBudget,
   pendingPurchaseOrders,
   purchasedAccountCountForOrder,
   readyInventoryCount,
@@ -42,6 +47,7 @@ import {
   createHstoraOrder,
   lookupHstoraOrder,
   getHstoraProduct,
+  HstoraApiError,
   type HstoraProduct,
   type HstoraCatalogItem
 } from "./providers/hstora";
@@ -83,6 +89,16 @@ export type XRunResult={
 };
 
 type ProcurementTarget=ProcurementClass|"INVITE_CAMPAIGN";
+
+function procurementBudgetPercentages(
+  settings:Awaited<ReturnType<typeof loadXSettings>>
+){
+  return {
+    INVITE_CAMPAIGN:settings.invite_campaign_budget_percent,
+    NO_SHADOWBAN:settings.no_shadowban_budget_percent,
+    TOP_SEARCH:settings.top_search_budget_percent
+  };
+}
 
 function jstPeriodStarts(now=Date.now()){
   const JST=9*60*60*1000;
@@ -539,22 +555,49 @@ async function checkLtcPriceGuard(env:Env,current:number,maxJumpPercent:number){
 }
 
 type BalanceGuard={hstoraUsd:number;allowedDecreaseUsd:number;updatedAt:number};
-async function checkHstoraBalanceGuard(env:Env,current:number){
+async function checkHstoraBalanceGuard(
+  env:Env,
+  current:number,
+  settings:Awaited<ReturnType<typeof loadXSettings>>
+){
+  const percentages=procurementBudgetPercentages(settings);
+  const budgetBefore=await initializeProcurementBudgetsIfNeeded(
+    env,
+    current,
+    percentages
+  );
   const previous=await getXSetting<BalanceGuard>(env,"x_hstora_balance_guard");
   let remainingAllowed=0;
   if(previous&&Number.isFinite(previous.hstoraUsd)){
     const allowed=Math.max(0,Number(previous.allowedDecreaseUsd??0));
     const delta=current-previous.hstoraUsd;
     if(delta>0.01){
+      const budgetAfter=await creditProcurementBudgets(
+        env,
+        delta,
+        percentages
+      );
       await auditX(env,{
         kind:"HSTORA_BALANCE_INCREASE",
         message:"HStora wallet balance increased.",
-        details:{previous:previous.hstoraUsd,current,increaseUsd:delta}
+        details:{
+          previous:previous.hstoraUsd,
+          current,
+          increaseUsd:delta,
+          budgetBefore:budgetBefore.available,
+          budgetAfter:budgetAfter.available,
+          percentages
+        }
       });
       await notifyDiscord(env,{
         title:"HStora入金完了",
-        message:"HStora Main Wallet残高の増加を公式Balance APIで確認しました。",
-        details:{increaseUsd:delta,currentBalanceUsd:current}
+        message:"HStora Main Wallet残高の増加を確認し、設定割合で仕入れ予算へ自動配分しました。",
+        details:{
+          increaseUsd:delta,
+          currentBalanceUsd:current,
+          budget:budgetAfter.available,
+          percentages
+        }
       }).catch(()=>undefined);
       await setXSetting(env,"x_manual_hstora_topup_notice",{
         neededUsd:0,
@@ -1432,7 +1475,7 @@ export async function runXProcurement(env:Env):Promise<XRunResult>{
     const observedHstora=await getHstoraBalance(env);
     if(
       String(observedHstora.currency).toUpperCase()==="USD"&&
-      !await checkHstoraBalanceGuard(env,Number(observedHstora.balance))
+      !await checkHstoraBalanceGuard(env,Number(observedHstora.balance),settings)
     ){
       return {action:"UNEXPECTED_BALANCE_CIRCUIT_BREAKER",dryRun:settings.dry_run};
     }
@@ -1690,7 +1733,7 @@ export async function runXProcurement(env:Env):Promise<XRunResult>{
 
   if(
     String(supplierBalance.currency).toUpperCase()==="USD"&&
-    !await checkHstoraBalanceGuard(env,Number(supplierBalance.balance))
+    !await checkHstoraBalanceGuard(env,Number(supplierBalance.balance),settings)
   ){
     return {action:"UNEXPECTED_BALANCE_CIRCUIT_BREAKER",dryRun:settings.dry_run,inventory};
   }
