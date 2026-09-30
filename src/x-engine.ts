@@ -68,6 +68,7 @@ import {
   PREFERRED_TOP_HSTORA_PRODUCT_IDS,
   evenSplitPurchaseQuantity,
   hasDualTopNoShadowbanEvidence,
+  isTopSearchFallbackEligible,
   isPreferredNoShadowbanHstoraSource,
   isPreferredTopHstoraSource,
   procurementClassOverrideForHstoraProduct
@@ -306,6 +307,7 @@ async function selectCandidate(
     if(targetClass==="TOP_SEARCH"){
       if(forceNoShadowban) continue;
       if(!hasTop) continue;
+      if(!isTopSearchFallbackEligible(product.id,visibility.labels)) continue;
       if(baseJpy===null||baseJpy>settings.max_unit_price_jpy) continue;
     }else if(targetClass==="NO_SHADOWBAN"){
       if(hasTop&&!dualCapability&&!forceNoShadowban) continue;
