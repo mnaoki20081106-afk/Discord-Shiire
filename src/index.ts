@@ -16,7 +16,10 @@ import { runAllProducts, runProduct } from "./engine";
 import { handleXAdminApi, xAdminPage } from "./x-admin";
 import { runLtcAutoPurchase, runXProcurement } from "./x-engine";
 import { loadXSettings } from "./x-settings";
-import { retryInviteCampaignRewards } from "./invite-campaign-rewards";
+import {
+  reconcileInviteCampaignRewards,
+  retryInviteCampaignRewards
+} from "./invite-campaign-rewards";
 import { ensureInviteCampaignGateway, InviteGateway } from "./invite-gateway";
 import { isBinanceAutoFundingServerEnabled } from "./x-funding-mode";
 import { handleHstoraWebhook } from "./x-webhooks";
@@ -486,9 +489,10 @@ export default {
       }
 
       try{
+        await reconcileInviteCampaignRewards(env);
         await retryInviteCampaignRewards(env);
       }catch(error){
-        console.error("scheduled invite reward retry failed",error);
+        console.error("scheduled invite reward reconciliation failed",error);
       }
 
       try{
