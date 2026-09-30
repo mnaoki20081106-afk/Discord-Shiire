@@ -1,5 +1,7 @@
 import type { Env } from "./types";
 import { getXSetting, setXSetting } from "./x-db";
+import { jstDateKey } from "./x-daily-restock-policy";
+export { jstDateKey } from "./x-daily-restock-policy";
 
 export const DAILY_RESTOCK_CONFIG_KEY="x_daily_restock_config";
 export const DAILY_RESTOCK_STATE_KEY="x_daily_restock_state";
@@ -141,11 +143,3 @@ export async function isDailyRestockBatchActive(env:Env){
   return state?.status==="running";
 }
 
-export function jstDateKey(now=Date.now()){
-  const d=new Date(now+9*60*60*1000);
-  return [
-    d.getUTCFullYear(),
-    String(d.getUTCMonth()+1).padStart(2,"0"),
-    String(d.getUTCDate()).padStart(2,"0")
-  ].join("-");
-}
