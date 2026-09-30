@@ -50,3 +50,69 @@ export function inviteUsesDelta(
   const after=Math.max(0,Math.floor(Number(currentUses)||0));
   return Math.max(0,after-before);
 }
+
+export type InviteAttributionCandidate={
+  code:string;
+  ownerUserId:string|null;
+  pendingUses:number;
+  lastSeenAt:number;
+};
+
+export type InviteAttributionDecision=
+  |{kind:"none"}
+  |{kind:"resolved";code:string}
+  |{kind:"ambiguous";codes:string[]};
+
+export function decideInviteAttribution(
+  input:InviteAttributionCandidate[]
+):InviteAttributionDecision{
+  const candidates=input
+    .filter(item=>Number(item.pendingUses)>0)
+    .map(item=>({
+      ...item,
+      pendingUses:Math.max(0,Math.floor(Number(item.pendingUses)||0)),
+      lastSeenAt:Number(item.lastSeenAt)||0
+    }))
+    .sort((a,b)=>
+      b.pendingUses-a.pendingUses||
+      b.lastSeenAt-a.lastSeenAt||
+      a.code.localeCompare(b.code)
+    );
+
+  if(candidates.length===0) return {kind:"none"};
+  if(candidates.length===1){
+    return {kind:"resolved",code:candidates[0]!.code};
+  }
+
+  const owners=new Set(candidates.map(item=>item.ownerUserId));
+  const soleOwner=owners.size===1?[...owners][0]:null;
+  if(soleOwner){
+    return {kind:"resolved",code:candidates[0]!.code};
+  }
+
+  return {
+    kind:"ambiguous",
+    codes:candidates.map(item=>item.code)
+  };
+}
+
+export type RewardRecoveryStatus=
+  |"WAITING_STOCK"
+  |"DELIVERY_UNCERTAIN"
+  |null;
+
+export function staleRewardRecoveryStatus(
+  status:string,
+  updatedAt:number,
+  now:number,
+  staleAfterMs=5*60*1000
+):RewardRecoveryStatus{
+  if(!Number.isFinite(updatedAt)||now-updatedAt<staleAfterMs) return null;
+  if(status==="CLAIMING"||status==="RESERVED") return "WAITING_STOCK";
+  if(status==="SENDING") return "DELIVERY_UNCERTAIN";
+  return null;
+}
+
+export function rewardStatusCanBeClaimed(status:string):boolean{
+  return status==="WAITING_STOCK"||status==="DM_FAILED"||status==="ERROR";
+}
