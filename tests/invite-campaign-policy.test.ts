@@ -5,6 +5,7 @@ import {
   earnedRewardCount,
   effectiveEarnedRewardCount,
   inviteUsesDelta,
+  nextPendingInviteUses,
   remainingUntilNextReward,
   rewardStatusCanBeClaimed,
   staleRewardRecoveryStatus
@@ -85,4 +86,26 @@ test("only retry-safe reward states can be claimed",()=>{
   for(const status of ["CLAIMING","RESERVED","SENDING","DELIVERY_UNCERTAIN","DELIVERED"]){
     assert.equal(rewardStatusCanBeClaimed(status),false,status);
   }
+});
+
+test("baseline invite snapshots never carry stale pending uses",()=>{
+  assert.equal(
+    nextPendingInviteUses({uses:3,pendingUses:2},5,"baseline"),
+    0
+  );
+  assert.equal(
+    nextPendingInviteUses(null,5,"baseline"),
+    0
+  );
+});
+
+test("join invite snapshots accumulate only new use deltas",()=>{
+  assert.equal(
+    nextPendingInviteUses({uses:3,pendingUses:2},5,"join"),
+    4
+  );
+  assert.equal(
+    nextPendingInviteUses(null,3,"join"),
+    3
+  );
 });
