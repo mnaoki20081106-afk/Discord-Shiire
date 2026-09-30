@@ -6,6 +6,7 @@ import {
   PREFERRED_TOP_HSTORA_PRODUCT_IDS,
   evenSplitPurchaseQuantity,
   hasDualTopNoShadowbanEvidence,
+  hstoraProcurementPriorityTier,
   isTopSearchFallbackEligible,
   isPreferredNoShadowbanHstoraSource,
   isPreferredTopHstoraSource,
@@ -104,4 +105,19 @@ test("generic TOP fallback must also prove No Shadowban",()=>{
     isTopSearchFallbackEligible(9999,["TOP+Latest","No Shadowban"]),
     true
   );
+});
+
+
+test("No Shadowban priority is 4521, then 4841/5132, then generic",()=>{
+  assert.equal(hstoraProcurementPriorityTier(4521,"NO_SHADOWBAN"),0);
+  assert.equal(hstoraProcurementPriorityTier(4841,"NO_SHADOWBAN"),1);
+  assert.equal(hstoraProcurementPriorityTier(5132,"NO_SHADOWBAN"),1);
+  assert.equal(hstoraProcurementPriorityTier(9999,"NO_SHADOWBAN"),2);
+});
+
+test("Top Search priority is 4841/5132, then generic dual fallback",()=>{
+  assert.equal(hstoraProcurementPriorityTier(4841,"TOP_SEARCH"),0);
+  assert.equal(hstoraProcurementPriorityTier(5132,"TOP_SEARCH"),0);
+  assert.equal(hstoraProcurementPriorityTier(9999,"TOP_SEARCH"),1);
+  assert.equal(hstoraProcurementPriorityTier(4521,"TOP_SEARCH"),1);
 });
