@@ -2,6 +2,13 @@ import type { Env } from "./types";
 import { hmacHex, randomId } from "./crypto";
 import { encryptSensitive } from "./x-crypto";
 import { DUAL_TOP_SPLIT_MODE } from "./x-procurement-policy";
+import {
+  allocateProcurementBudget,
+  procurementBudgetTotal,
+  validateProcurementBudgetPercentages,
+  type ProcurementBudgetClass,
+  type ProcurementBudgetPercentages
+} from "./x-budget";
 
 let schemaReady=false;
 
@@ -104,6 +111,12 @@ const SCHEMA=[
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
 )`,
+`CREATE TABLE IF NOT EXISTS procurement_budgets (
+  procurement_class TEXT PRIMARY KEY,
+  available_usd REAL NOT NULL DEFAULT 0,
+  initialized INTEGER NOT NULL DEFAULT 0,
+  updated_at INTEGER NOT NULL
+)`,
 `CREATE TABLE IF NOT EXISTS settings (
   key TEXT PRIMARY KEY,
   value_json TEXT NOT NULL,
@@ -177,6 +190,152 @@ export async function setXSetting(env:Env,key:string,value:unknown){
     "INSERT INTO settings(key,value_json,updated_at) VALUES(?,?,?) "+
     "ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json,updated_at=excluded.updated_at"
   ).bind(key,JSON.stringify(value),now).run();
+}
+
+
+const PROCUREMENT_BUDGET_CLASSES:readonly ProcurementBudgetClass[]=[
+  "INVITE_CAMPAIGN",
+  "NO_SHADOWBAN",
+  "TOP_SEARCH"
+];
+
+async function ensureProcurementBudgetRows(env:Env){
+  await ensureXSchema(env);
+  const now=Date.now();
+  await env.DB.batch(
+    PROCUREMENT_BUDGET_CLASSES.map(procurementClass=>
+      env.DB.prepare(
+        "INSERT OR IGNORE INTO procurement_budgets("+
+        "procurement_class,available_usd,initialized,updated_at"+
+        ") VALUES(?,?,0,?)"
+      ).bind(procurementClass,0,now)
+    )
+  );
+}
+
+export async function getProcurementBudgets(env:Env){
+  await ensureProcurementBudgetRows(env);
+  const rows=(await env.DB.prepare(
+    "SELECT procurement_class,available_usd,initialized,updated_at "+
+    "FROM procurement_budgets"
+  ).all<{
+    procurement_class:string;
+    available_usd:number;
+    initialized:number;
+    updated_at:number;
+  }>()).results;
+
+  const available={
+    INVITE_CAMPAIGN:0,
+    NO_SHADOWBAN:0,
+    TOP_SEARCH:0
+  };
+  let initialized=true;
+  let updatedAt=0;
+  for(const procurementClass of PROCUREMENT_BUDGET_CLASSES){
+    const row=rows.find(item=>item.procurement_class===procurementClass);
+    if(!row||Number(row.initialized)!==1) initialized=false;
+    available[procurementClass]=Math.max(0,Number(row?.available_usd??0));
+    updatedAt=Math.max(updatedAt,Number(row?.updated_at??0));
+  }
+  return {
+    initialized,
+    available,
+    totalAvailableUsd:procurementBudgetTotal(available),
+    updatedAt
+  };
+}
+
+export async function rebalanceProcurementBudgets(
+  env:Env,
+  currentHstoraBalanceUsd:number,
+  percentages:ProcurementBudgetPercentages
+){
+  validateProcurementBudgetPercentages(percentages);
+  await ensureProcurementBudgetRows(env);
+  const allocation=allocateProcurementBudget(
+    Math.max(0,currentHstoraBalanceUsd),
+    percentages
+  );
+  const now=Date.now();
+  await env.DB.batch(
+    PROCUREMENT_BUDGET_CLASSES.map(procurementClass=>
+      env.DB.prepare(
+        "UPDATE procurement_budgets SET available_usd=?,initialized=1,updated_at=? "+
+        "WHERE procurement_class=?"
+      ).bind(allocation[procurementClass],now,procurementClass)
+    )
+  );
+  return getProcurementBudgets(env);
+}
+
+export async function initializeProcurementBudgetsIfNeeded(
+  env:Env,
+  currentHstoraBalanceUsd:number,
+  percentages:ProcurementBudgetPercentages
+){
+  const current=await getProcurementBudgets(env);
+  if(current.initialized) return current;
+  return rebalanceProcurementBudgets(
+    env,
+    currentHstoraBalanceUsd,
+    percentages
+  );
+}
+
+export async function creditProcurementBudgets(
+  env:Env,
+  amountUsd:number,
+  percentages:ProcurementBudgetPercentages
+){
+  validateProcurementBudgetPercentages(percentages);
+  const current=await getProcurementBudgets(env);
+  if(!current.initialized){
+    throw new Error("PROCUREMENT_BUDGET_NOT_INITIALIZED");
+  }
+  const allocation=allocateProcurementBudget(
+    Math.max(0,amountUsd),
+    percentages
+  );
+  const now=Date.now();
+  await env.DB.batch(
+    PROCUREMENT_BUDGET_CLASSES.map(procurementClass=>
+      env.DB.prepare(
+        "UPDATE procurement_budgets SET available_usd=available_usd+?,"+
+        "updated_at=? WHERE procurement_class=?"
+      ).bind(allocation[procurementClass],now,procurementClass)
+    )
+  );
+  return getProcurementBudgets(env);
+}
+
+export async function reserveProcurementBudget(
+  env:Env,
+  procurementClass:ProcurementBudgetClass,
+  amountUsd:number
+):Promise<boolean>{
+  if(!Number.isFinite(amountUsd)||amountUsd<=0) return false;
+  await ensureProcurementBudgetRows(env);
+  const result=await env.DB.prepare(
+    "UPDATE procurement_budgets "+
+    "SET available_usd=MAX(0,available_usd-?),updated_at=? "+
+    "WHERE procurement_class=? AND initialized=1 "+
+    "AND available_usd+0.00000001>=?"
+  ).bind(amountUsd,Date.now(),procurementClass,amountUsd).run();
+  return Number(result.meta?.changes??0)>0;
+}
+
+export async function releaseProcurementBudget(
+  env:Env,
+  procurementClass:ProcurementBudgetClass,
+  amountUsd:number
+){
+  if(!Number.isFinite(amountUsd)||amountUsd<=0) return;
+  await ensureProcurementBudgetRows(env);
+  await env.DB.prepare(
+    "UPDATE procurement_budgets SET available_usd=available_usd+?,updated_at=? "+
+    "WHERE procurement_class=? AND initialized=1"
+  ).bind(amountUsd,Date.now(),procurementClass).run();
 }
 
 const SECRET_KEY_RE=/(secret|password|credential|token|2fa|api.?key|private.?key|authorization)/i;
