@@ -1,7 +1,7 @@
 import type { Env } from "./types";
 import {
   decideInviteAttribution,
-  inviteUsesDelta
+  nextPendingInviteUses
 } from "./invite-campaign-policy";
 import {
   ensureInviteCampaignSchema,
@@ -72,19 +72,18 @@ async function refreshInviteSnapshot(
     .map(invite=>{
       const previous=previousByCode.get(invite.code);
       const uses=Math.max(0,Math.floor(Number(invite.uses??0)));
-      const delta=mode==="join"
-        ?previous
-          ?inviteUsesDelta(previous.uses,uses)
-          :uses
-        :0;
+      const pending=nextPendingInviteUses(
+        previous
+          ?{uses:previous.uses,pendingUses:previous.pending_uses}
+          :null,
+        uses,
+        mode
+      );
       const managed=previous?.owner_source==="managed";
       const ownerUserId=managed
         ?previous?.owner_user_id??null
         :(String(invite.inviter?.id??"")||previous?.owner_user_id||null);
       const ownerSource=managed?"managed":"discord";
-      const pending=mode==="join"
-        ?Math.max(0,Number(previous?.pending_uses??0))+delta
-        :0;
 
       return env.DB.prepare(
         "INSERT INTO invite_campaign_invites"+
