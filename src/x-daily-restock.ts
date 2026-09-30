@@ -1,6 +1,7 @@
 import type { Env } from "./types";
 import {
   auditX,
+  availableInventoryCountByClass,
   pendingPurchaseOrders,
   purchasedAccountsByClassSince,
   readyInventoryCountByClass
@@ -51,7 +52,11 @@ async function discordJson<T>(
 
 function notificationPayload(
   config:DailyRestockConfig,
-  state:DailyRestockState
+  state:DailyRestockState,
+  available:{
+    topSearch:number;
+    noShadowban:number;
+  }
 ){
   const partial=state.status==="partial";
   return {
@@ -63,23 +68,23 @@ function notificationPayload(
       fields:[
         {
           name:"No shadow ban",
-          value:String(state.added_no_shadowban)+"個",
+          value:String(available.noShadowban)+"個",
           inline:true
         },
         {
           name:"Top Search",
-          value:String(state.added_top_search)+"個",
+          value:String(available.topSearch)+"個",
           inline:true
         }
       ],
       footer:{
         text:
-          "毎日18:00（JST）入荷"+
+          "現在の販売可能在庫 / 毎日18:00（JST）入荷"+
           (partial
-            ?" / 一部未達: 現在 No shadow ban "+
-              state.final_no_shadowban+"/"+state.target_no_shadowban+
+            ?" / 恒常在庫未達: No shadow ban "+
+              available.noShadowban+"/"+state.target_no_shadowban+
               "・Top Search "+
-              state.final_top_search+"/"+state.target_top_search
+              available.topSearch+"/"+state.target_top_search
             :"")
       },
       timestamp:new Date(state.completed_at||Date.now()).toISOString()
@@ -93,6 +98,14 @@ async function currentStocks(env:Env){
     readyInventoryCountByClass(env,"NO_SHADOWBAN")
   ]);
   return {top,noShadow};
+}
+
+async function actualAvailableStocks(env:Env){
+  const [topSearch,noShadowban]=await Promise.all([
+    availableInventoryCountByClass(env,"TOP_SEARCH"),
+    availableInventoryCountByClass(env,"NO_SHADOWBAN")
+  ]);
+  return {topSearch,noShadowban};
 }
 
 async function refreshArrivalCounts(
@@ -116,7 +129,8 @@ async function publishDailyRestockSummary(
   config:DailyRestockConfig
 ){
   await refreshArrivalCounts(env,state);
-  const payload=notificationPayload(config,state);
+  const available=await actualAvailableStocks(env);
+  const payload=notificationPayload(config,state,available);
 
   if(config.panel_channel_id&&config.panel_message_id){
     try{
@@ -170,7 +184,9 @@ async function publishDailyRestockSummary(
       addedNoShadowban:state.added_no_shadowban,
       addedTopSearch:state.added_top_search,
       finalNoShadowban:state.final_no_shadowban,
-      finalTopSearch:state.final_top_search
+      finalTopSearch:state.final_top_search,
+      availableNoShadowban:available.noShadowban,
+      availableTopSearch:available.topSearch
     }
   });
   return state;
@@ -355,7 +371,8 @@ export async function installDailyRestockPanel(env:Env){
     last_action:"PANEL_PREVIEW",
     error:""
   };
-  const payload=notificationPayload(config,preview);
+  const available=await actualAvailableStocks(env);
+  const payload=notificationPayload(config,preview,available);
 
   let messageId="";
   if(
