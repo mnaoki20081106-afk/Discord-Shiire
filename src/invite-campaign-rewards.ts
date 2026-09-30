@@ -3,7 +3,9 @@ import { randomId } from "./crypto";
 import { decryptSensitive, type EncryptedSecret } from "./x-crypto";
 import {
   effectiveEarnedRewardCount,
-  remainingUntilNextReward
+  remainingUntilNextReward,
+  rewardStatusCanBeClaimed,
+  staleRewardRecoveryStatus
 } from "./invite-campaign-policy";
 import {
   ensureInviteCampaignSchema,
@@ -36,7 +38,13 @@ type RewardRow={
   delivered_at:number|null;
 };
 
-async function getProgress(
+type CampaignAccountRow={
+  id:string;
+  credentials_ciphertext:string;
+  status:string;
+};
+
+export async function getInviteCampaignProgress(
   env:Env,
   guildId:string,
   inviterUserId:string
@@ -55,27 +63,6 @@ async function getProgress(
   };
 }
 
-async function incrementProgress(
-  env:Env,
-  guildId:string,
-  inviterUserId:string,
-  kind:"valid"|"excluded"
-):Promise<InviteCampaignProgress>{
-  await ensureInviteCampaignSchema(env);
-  const now=Date.now();
-  const valid=kind==="valid"?1:0;
-  const excluded=kind==="excluded"?1:0;
-  await env.DB.prepare(
-    "INSERT INTO invite_campaign_progress"+
-    "(guild_id,inviter_user_id,valid_invites,excluded_invites,rewards_earned,updated_at) "+
-    "VALUES(?,?,?,?,0,?) ON CONFLICT(guild_id,inviter_user_id) DO UPDATE SET "+
-    "valid_invites=invite_campaign_progress.valid_invites+?,"+
-    "excluded_invites=invite_campaign_progress.excluded_invites+?,"+
-    "updated_at=excluded.updated_at"
-  ).bind(guildId,inviterUserId,valid,excluded,now,valid,excluded).run();
-  return getProgress(env,guildId,inviterUserId);
-}
-
 async function sendProgress(
   env:Env,
   progress:InviteCampaignProgress,
@@ -87,8 +74,15 @@ async function sendProgress(
     progress.valid_invites,
     settings.invites_per_reward
   );
+  const reasonLabels:Record<string,string>={
+    REJOIN_ALREADY_COUNTED:"再参加のため対象外です。",
+    SELF_INVITE:"自分自身の招待のため対象外です。",
+    BOT_ACCOUNT:"Botアカウントの参加のため対象外です。",
+    INVITER_UNRESOLVED:"使用された招待URLを特定できなかったため対象外です。",
+    INVITER_AMBIGUOUS:"複数の招待URLが同時に使用され、招待者を安全に特定できなかったため対象外です。"
+  };
   const reasonText=reason
-    ?String(reason).replaceAll("_"," ").slice(0,120)
+    ?reasonLabels[reason]??String(reason).replaceAll("_"," ").slice(0,120)
     :"";
   await sendInviteCampaignDm(env,progress.inviter_user_id,{
     embeds:[{
@@ -113,24 +107,109 @@ async function sendProgress(
   });
 }
 
-async function claimCampaignAccount(
-  env:Env
-):Promise<{id:string;credentials_ciphertext:string}|null>{
+async function updateReward(
+  env:Env,
+  id:string,
+  status:string,
+  input:{accountId?:string;error?:string|null;deliveredAt?:number}={}
+){
+  await env.DB.prepare(
+    "UPDATE invite_campaign_rewards SET status=?,"+
+    "account_id=COALESCE(?,account_id),error=?,delivered_at=COALESCE(?,delivered_at),"+
+    "updated_at=? WHERE id=?"
+  ).bind(
+    status,
+    input.accountId??null,
+    input.error??null,
+    input.deliveredAt??null,
+    Date.now(),
+    id
+  ).run();
+}
+
+async function loadReward(env:Env,id:string){
   await ensureInviteCampaignSchema(env);
+  return env.DB.prepare(
+    "SELECT * FROM invite_campaign_rewards WHERE id=?"
+  ).bind(id).first<RewardRow>();
+}
+
+async function claimRewardForDelivery(
+  env:Env,
+  reward:RewardRow
+):Promise<RewardRow|null>{
+  if(!rewardStatusCanBeClaimed(reward.status)) return null;
+  const now=Date.now();
+  const result=await env.DB.prepare(
+    "UPDATE invite_campaign_rewards SET status='CLAIMING',error=NULL,updated_at=? "+
+    "WHERE id=? AND status=?"
+  ).bind(now,reward.id,reward.status).run();
+  if(Number(result.meta?.changes??0)!==1) return null;
+  return {...reward,status:"CLAIMING",error:null,updated_at:now};
+}
+
+async function reserveCampaignAccountForReward(
+  env:Env,
+  reward:RewardRow
+):Promise<CampaignAccountRow|null>{
   for(let attempt=0;attempt<8;attempt++){
     const row=await env.DB.prepare(
-      "SELECT id,credentials_ciphertext FROM purchased_accounts "+
+      "SELECT id,credentials_ciphertext,status FROM purchased_accounts "+
       "WHERE procurement_class='INVITE_CAMPAIGN' AND status='READY_FOR_DELIVERY' "+
       "ORDER BY created_at ASC,id ASC LIMIT 1"
-    ).first<{id:string;credentials_ciphertext:string}>();
+    ).first<CampaignAccountRow>();
     if(!row) return null;
+
+    try{
+      const results=await env.DB.batch([
+        env.DB.prepare(
+          "UPDATE purchased_accounts SET status='INVITE_REWARD_RESERVED' "+
+          "WHERE id=? AND status='READY_FOR_DELIVERY'"
+        ).bind(row.id),
+        env.DB.prepare(
+          "UPDATE invite_campaign_rewards SET account_id=?,status='RESERVED',"+
+          "error=NULL,updated_at=? WHERE id=? AND status='CLAIMING' AND account_id IS NULL"
+        ).bind(row.id,Date.now(),reward.id)
+      ]);
+      const accountChanged=Number(results[0]?.meta?.changes??0);
+      const rewardChanged=Number(results[1]?.meta?.changes??0);
+      if(accountChanged===1&&rewardChanged===1){
+        return {...row,status:"INVITE_REWARD_RESERVED"};
+      }
+      if(accountChanged===1&&rewardChanged!==1){
+        await env.DB.prepare(
+          "UPDATE purchased_accounts SET status='READY_FOR_DELIVERY' "+
+          "WHERE id=? AND status='INVITE_REWARD_RESERVED'"
+        ).bind(row.id).run().catch(()=>undefined);
+      }
+    }catch(error){
+      const message=error instanceof Error?error.message:String(error);
+      if(!message.toLowerCase().includes("unique")) throw error;
+    }
+  }
+  return null;
+}
+
+async function loadReservedCampaignAccount(
+  env:Env,
+  accountId:string
+):Promise<CampaignAccountRow|null>{
+  const row=await env.DB.prepare(
+    "SELECT id,credentials_ciphertext,status FROM purchased_accounts "+
+    "WHERE id=? AND procurement_class='INVITE_CAMPAIGN'"
+  ).bind(accountId).first<CampaignAccountRow>();
+  if(!row) return null;
+
+  if(row.status==="READY_FOR_DELIVERY"){
     const result=await env.DB.prepare(
       "UPDATE purchased_accounts SET status='INVITE_REWARD_RESERVED' "+
       "WHERE id=? AND status='READY_FOR_DELIVERY'"
-    ).bind(row.id).run();
-    if(Number(result.meta?.changes??0)>0) return row;
+    ).bind(accountId).run();
+    if(Number(result.meta?.changes??0)!==1) return null;
+    return {...row,status:"INVITE_REWARD_RESERVED"};
   }
-  return null;
+  if(row.status!=="INVITE_REWARD_RESERVED") return null;
+  return row;
 }
 
 function parseCiphertext(raw:string):EncryptedSecret{
@@ -152,66 +231,42 @@ function credentialBlock(value:string){
   return fence+"text\n"+safe+"\n"+fence;
 }
 
-async function loadReward(env:Env,id:string){
-  await ensureInviteCampaignSchema(env);
-  return env.DB.prepare(
-    "SELECT * FROM invite_campaign_rewards WHERE id=?"
-  ).bind(id).first<RewardRow>();
-}
-
-async function updateReward(
-  env:Env,
-  id:string,
-  status:string,
-  input:{accountId?:string;error?:string|null;deliveredAt?:number}={}
-){
-  await env.DB.prepare(
-    "UPDATE invite_campaign_rewards SET status=?,"+
-    "account_id=COALESCE(?,account_id),error=?,delivered_at=COALESCE(?,delivered_at),"+
-    "updated_at=? WHERE id=?"
-  ).bind(
-    status,
-    input.accountId??null,
-    input.error??null,
-    input.deliveredAt??null,
-    Date.now(),
-    id
-  ).run();
-}
-
 async function deliverReward(
   env:Env,
-  reward:RewardRow
+  input:RewardRow
 ):Promise<string>{
+  const reward=await claimRewardForDelivery(env,input);
+  if(!reward){
+    const latest=await loadReward(env,input.id);
+    return latest?.status??"NOT_FOUND";
+  }
+
   let accountId=reward.account_id;
-  let ciphertext:string|null=null;
+  let account:CampaignAccountRow|null=null;
 
   if(accountId){
-    const row=await env.DB.prepare(
-      "SELECT id,credentials_ciphertext FROM purchased_accounts "+
-      "WHERE id=? AND procurement_class='INVITE_CAMPAIGN'"
-    ).bind(accountId).first<{id:string;credentials_ciphertext:string}>();
-    if(!row){
-      await updateReward(env,reward.id,"ERROR",{error:"RESERVED_ACCOUNT_NOT_FOUND"});
+    account=await loadReservedCampaignAccount(env,accountId);
+    if(!account){
+      await updateReward(env,reward.id,"ERROR",{
+        error:"RESERVED_ACCOUNT_NOT_FOUND_OR_INVALID_STATE"
+      });
       return "ERROR";
     }
-    ciphertext=row.credentials_ciphertext;
+    await updateReward(env,reward.id,"RESERVED",{accountId,error:null});
   }else{
-    const row=await claimCampaignAccount(env);
-    if(!row){
+    account=await reserveCampaignAccountForReward(env,reward);
+    if(!account){
       await updateReward(env,reward.id,"WAITING_STOCK",{
         error:"INVITE_CAMPAIGN_STOCK_EMPTY"
       });
       return "WAITING_STOCK";
     }
-    accountId=row.id;
-    ciphertext=row.credentials_ciphertext;
-    await updateReward(env,reward.id,"RESERVED",{accountId,error:null});
+    accountId=account.id;
   }
 
   let credential:string;
   try{
-    credential=await decryptSensitive(env,parseCiphertext(ciphertext));
+    credential=await decryptSensitive(env,parseCiphertext(account.credentials_ciphertext));
   }catch(error){
     await updateReward(env,reward.id,"ERROR",{
       error:(error instanceof Error?error.message:String(error)).slice(0,500)
@@ -240,20 +295,16 @@ async function deliverReward(
     const message=(error instanceof Error?error.message:String(error)).slice(0,500);
     if(error instanceof InviteCampaignDiscordError&&error.status<500){
       const now=Date.now();
-      if(accountId){
-        await env.DB.batch([
-          env.DB.prepare(
-            "UPDATE purchased_accounts SET status='READY_FOR_DELIVERY' "+
-            "WHERE id=? AND status='INVITE_REWARD_RESERVED'"
-          ).bind(accountId),
-          env.DB.prepare(
-            "UPDATE invite_campaign_rewards SET status='DM_FAILED',account_id=NULL,"+
-            "error=?,updated_at=? WHERE id=?"
-          ).bind(message,now,reward.id)
-        ]);
-      }else{
-        await updateReward(env,reward.id,"DM_FAILED",{error:message});
-      }
+      await env.DB.batch([
+        env.DB.prepare(
+          "UPDATE purchased_accounts SET status='READY_FOR_DELIVERY' "+
+          "WHERE id=? AND status='INVITE_REWARD_RESERVED'"
+        ).bind(accountId),
+        env.DB.prepare(
+          "UPDATE invite_campaign_rewards SET status='DM_FAILED',account_id=NULL,"+
+          "error=?,updated_at=? WHERE id=? AND status='SENDING'"
+        ).bind(message,now,reward.id)
+      ]);
       return "DM_FAILED";
     }
     await updateReward(env,reward.id,"DELIVERY_UNCERTAIN",{error:message});
@@ -268,7 +319,7 @@ async function deliverReward(
     ).bind(now,accountId),
     env.DB.prepare(
       "UPDATE invite_campaign_rewards SET status='DELIVERED',error=NULL,"+
-      "delivered_at=?,updated_at=? WHERE id=?"
+      "delivered_at=?,updated_at=? WHERE id=? AND status='SENDING'"
     ).bind(now,now,reward.id)
   ]);
   return "DELIVERED";
@@ -306,17 +357,43 @@ async function ensureRewards(
   for(const reward of pending) await deliverReward(env,reward);
 }
 
-export async function applyInviteCampaignCredit(
+export async function afterInviteCampaignProgressChanged(
   env:Env,
-  guildId:string,
-  inviterUserId:string,
+  progress:InviteCampaignProgress,
   kind:"valid"|"excluded",
   reason?:string
-){
-  const progress=await incrementProgress(env,guildId,inviterUserId,kind);
+):Promise<void>{
   await sendProgress(env,progress,kind,reason).catch(()=>undefined);
   if(kind==="valid") await ensureRewards(env,progress);
-  return progress;
+}
+
+export async function recoverStaleInviteCampaignRewards(env:Env){
+  await ensureInviteCampaignSchema(env);
+  const now=Date.now();
+  const cutoff=now-5*60*1000;
+  const rows=(await env.DB.prepare(
+    "SELECT * FROM invite_campaign_rewards "+
+    "WHERE status IN ('CLAIMING','RESERVED','SENDING') AND updated_at<=? "+
+    "ORDER BY updated_at ASC LIMIT 100"
+  ).bind(cutoff).all<RewardRow>()).results;
+
+  let recovered=0;
+  let uncertain=0;
+  for(const row of rows){
+    const next=staleRewardRecoveryStatus(row.status,row.updated_at,now);
+    if(!next) continue;
+    const error=next==="DELIVERY_UNCERTAIN"
+      ?"WORKER_INTERRUPTED_DURING_DM_SEND"
+      :"WORKER_INTERRUPTED_BEFORE_DM_SEND";
+    const result=await env.DB.prepare(
+      "UPDATE invite_campaign_rewards SET status=?,error=?,updated_at=? "+
+      "WHERE id=? AND status=? AND updated_at=?"
+    ).bind(next,error,now,row.id,row.status,row.updated_at).run();
+    if(Number(result.meta?.changes??0)!==1) continue;
+    if(next==="DELIVERY_UNCERTAIN") uncertain++;
+    else recovered++;
+  }
+  return {scanned:rows.length,recovered,uncertain};
 }
 
 export async function reconcileInviteCampaignRewards(env:Env){
@@ -338,12 +415,15 @@ export async function reconcileInviteCampaignRewards(env:Env){
 
 export async function retryInviteCampaignRewards(env:Env){
   await ensureInviteCampaignSchema(env);
+  await recoverStaleInviteCampaignRewards(env);
   const settings=await getInviteCampaignSettings(env);
-  if(!settings.enabled) return {attempted:0,delivered:0};
+  if(!settings.enabled||!settings.guild_id){
+    return {attempted:0,delivered:0};
+  }
   const rows=(await env.DB.prepare(
     "SELECT * FROM invite_campaign_rewards "+
-    "WHERE status='WAITING_STOCK' ORDER BY created_at ASC LIMIT 20"
-  ).all<RewardRow>()).results;
+    "WHERE guild_id=? AND status='WAITING_STOCK' ORDER BY created_at ASC LIMIT 20"
+  ).bind(settings.guild_id).all<RewardRow>()).results;
   let delivered=0;
   for(const row of rows){
     if(await deliverReward(env,row)==="DELIVERED") delivered++;
@@ -352,11 +432,20 @@ export async function retryInviteCampaignRewards(env:Env){
 }
 
 export async function retryInviteCampaignReward(env:Env,rewardId:string){
+  await recoverStaleInviteCampaignRewards(env);
   const row=await loadReward(env,rewardId);
   if(!row) throw new Error("INVITE_REWARD_NOT_FOUND");
   if(row.status==="DELIVERED") return {status:"DELIVERED"};
-  if(row.status==="DELIVERY_UNCERTAIN"||row.status==="SENDING"){
-    throw new Error("INVITE_REWARD_DELIVERY_UNCERTAIN_MANUAL_REVIEW_REQUIRED");
+  if(
+    row.status==="DELIVERY_UNCERTAIN"||
+    row.status==="SENDING"||
+    row.status==="CLAIMING"||
+    row.status==="RESERVED"
+  ){
+    throw new Error("INVITE_REWARD_DELIVERY_UNCERTAIN_OR_IN_PROGRESS");
+  }
+  if(!rewardStatusCanBeClaimed(row.status)){
+    throw new Error("INVITE_REWARD_NOT_RETRYABLE");
   }
   return {status:await deliverReward(env,row)};
 }
