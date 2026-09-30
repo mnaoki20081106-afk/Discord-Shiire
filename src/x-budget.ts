@@ -72,3 +72,57 @@ export function procurementBudgetTotal(amounts:ProcurementBudgetAmounts){
     Math.max(0,amounts.TOP_SEARCH)
   );
 }
+
+
+export function procurementBudgetCharges(
+  targetClass:ProcurementBudgetClass,
+  splitAcrossClasses:boolean,
+  totalUsd:number
+):ProcurementBudgetAmounts{
+  const safeTotal=
+    Number.isFinite(totalUsd)&&totalUsd>0
+      ?roundUsd(totalUsd)
+      :0;
+  const charges:ProcurementBudgetAmounts={
+    INVITE_CAMPAIGN:0,
+    NO_SHADOWBAN:0,
+    TOP_SEARCH:0
+  };
+  if(splitAcrossClasses&&targetClass!=="INVITE_CAMPAIGN"){
+    const firstHalf=roundUsd(safeTotal/2);
+    const secondHalf=roundUsd(Math.max(0,safeTotal-firstHalf));
+    charges.TOP_SEARCH=firstHalf;
+    charges.NO_SHADOWBAN=secondHalf;
+  }else{
+    charges[targetClass]=safeTotal;
+  }
+  return charges;
+}
+
+export function maxAffordableQuantityForBudget(
+  targetClass:ProcurementBudgetClass,
+  splitAcrossClasses:boolean,
+  unitPriceUsd:number,
+  maxQuantity:number,
+  available:ProcurementBudgetAmounts
+){
+  if(!Number.isFinite(unitPriceUsd)||unitPriceUsd<=0) return 0;
+  const safeMax=Math.max(0,Math.floor(maxQuantity));
+  if(splitAcrossClasses&&targetClass!=="INVITE_CAMPAIGN"){
+    const perClassBudget=Math.min(
+      Math.max(0,available.TOP_SEARCH),
+      Math.max(0,available.NO_SHADOWBAN)
+    );
+    const pairs=Math.floor(
+      (perClassBudget+0.00000001)/unitPriceUsd
+    );
+    const evenMax=safeMax-safeMax%2;
+    return Math.min(evenMax,pairs*2);
+  }
+  return Math.min(
+    safeMax,
+    Math.floor(
+      (Math.max(0,available[targetClass])+0.00000001)/unitPriceUsd
+    )
+  );
+}
