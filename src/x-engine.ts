@@ -1555,12 +1555,13 @@ export async function runXProcurement(env:Env):Promise<XRunResult>{
   let classTarget=0;
   let classBudgetUsd=0;
   let batch=0;
-  let candidate:{
+  type ProcurementCandidate={
     product:HstoraProduct;
     q:ReturnType<typeof qualifyHstoraProduct>;
     plannedQuantity:number;
     priorPurchases:number;
-  }|null=null;
+  };
+  let candidate:ProcurementCandidate|null=null;
   const skippedTargets:Array<Record<string,unknown>>=[];
 
   for(const option of targetOptions){
@@ -1577,7 +1578,7 @@ export async function runXProcurement(env:Env):Promise<XRunResult>{
     const plannedBatch=Math.min(need,settings.max_batch_purchase);
     if(plannedBatch<=0) continue;
 
-    let possible:typeof candidate=null;
+    let possible:ProcurementCandidate|null=null;
     try{
       possible=await selectCandidate(env,plannedBatch,option.targetClass);
     }catch(error){
