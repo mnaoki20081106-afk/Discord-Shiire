@@ -1590,6 +1590,12 @@ export async function handleShiireMainBridge(
         min_purchase_jpy:settings.min_purchase_jpy,
         target_ltc_balance:settings.target_ltc_balance,
         max_ltc_balance:settings.max_ltc_balance,
+        wallet_target_ltc:settings.wallet_target_ltc,
+        wallet_max_ltc:settings.wallet_max_ltc,
+        max_paypay_balance_age_ms:settings.max_paypay_balance_age_ms,
+        max_fx_age_ms:settings.max_fx_age_ms,
+        max_fx_jump_percent:settings.max_fx_jump_percent,
+        max_ltc_price_jump_percent:settings.max_ltc_price_jump_percent,
         observed_paypay_balance_jpy:settings.observed_paypay_balance_jpy,
         observed_paypay_balance_at:settings.observed_paypay_balance_at,
         usd_jpy_rate:settings.usd_jpy_rate,
@@ -1609,7 +1615,15 @@ export async function handleShiireMainBridge(
       ] as const;
       const numberKeys=[
         "target_ltc_balance",
-        "max_ltc_balance"
+        "max_ltc_balance",
+        "wallet_target_ltc",
+        "wallet_max_ltc",
+        "max_fx_jump_percent",
+        "max_ltc_price_jump_percent"
+      ] as const;
+      const extraIntegerKeys=[
+        "max_paypay_balance_age_ms",
+        "max_fx_age_ms"
       ] as const;
       for(const key of integerKeys){
         if(input[key]===undefined) continue;
@@ -1623,6 +1637,14 @@ export async function handleShiireMainBridge(
         if(input[key]===undefined) continue;
         const value=Number(input[key]);
         if(!Number.isFinite(value)||value<0){
+          throw new ShiireVendingError(400,"INVALID_FUNDING_SETTING_"+key.toUpperCase());
+        }
+        patch[key]=value;
+      }
+      for(const key of extraIntegerKeys){
+        if(input[key]===undefined) continue;
+        const value=Number(input[key]);
+        if(!Number.isSafeInteger(value)||value<0){
           throw new ShiireVendingError(400,"INVALID_FUNDING_SETTING_"+key.toUpperCase());
         }
         patch[key]=value;
@@ -1644,7 +1666,13 @@ export async function handleShiireMainBridge(
             monthly_purchase_limit_jpy:settings.monthly_purchase_limit_jpy,
             min_purchase_jpy:settings.min_purchase_jpy,
             target_ltc_balance:settings.target_ltc_balance,
-            max_ltc_balance:settings.max_ltc_balance
+            max_ltc_balance:settings.max_ltc_balance,
+            wallet_target_ltc:settings.wallet_target_ltc,
+            wallet_max_ltc:settings.wallet_max_ltc,
+            max_paypay_balance_age_ms:settings.max_paypay_balance_age_ms,
+            max_fx_age_ms:settings.max_fx_age_ms,
+            max_fx_jump_percent:settings.max_fx_jump_percent,
+            max_ltc_price_jump_percent:settings.max_ltc_price_jump_percent
           }
         });
       }catch(error){
@@ -1898,23 +1926,52 @@ export async function handleShiireMainBridge(
         no_shadowban_target_stock:settings.no_shadowban_target_stock,
         trial_purchase_count:settings.trial_purchase_count,
         max_batch_purchase:settings.max_batch_purchase,
+        min_seller_rating:settings.min_seller_rating,
+        min_product_reviews:settings.min_product_reviews,
+        min_sales_count:settings.min_sales_count,
+        max_dispute_rate:settings.max_dispute_rate,
+        minimum_stock:settings.minimum_stock,
+        seller_quality_mode:settings.seller_quality_mode,
+        approved_hstora_product_ids:settings.approved_hstora_product_ids,
+        max_price_jump_percent:settings.max_price_jump_percent,
+        require_bulk_confirmation:settings.require_bulk_confirmation,
+        bulk_confirmation_threshold:settings.bulk_confirmation_threshold,
+        procurement_strategy:settings.procurement_strategy,
+        search_visibility_requirement:settings.search_visibility_requirement,
         dry_run:settings.dry_run,
         auto_procurement_enabled:settings.auto_procurement_enabled
       });
     }
     if(request.method==="PATCH"){
       const input=await parseBridgeJson(rawBody);
-      const patch:Record<string,number>={};
-      const numberKeys=[
-        "max_unit_price_jpy",
-        "max_no_shadowban_unit_price_usd",
+      const patch:Record<string,unknown>={};
+      const integerKeys=[
         "reorder_point",
         "target_stock",
         "no_shadowban_reorder_point",
         "no_shadowban_target_stock",
         "trial_purchase_count",
-        "max_batch_purchase"
+        "max_batch_purchase",
+        "min_product_reviews",
+        "min_sales_count",
+        "minimum_stock",
+        "bulk_confirmation_threshold"
       ] as const;
+      const numberKeys=[
+        "max_unit_price_jpy",
+        "max_no_shadowban_unit_price_usd",
+        "min_seller_rating",
+        "max_dispute_rate",
+        "max_price_jump_percent"
+      ] as const;
+      for(const key of integerKeys){
+        if(input[key]===undefined) continue;
+        const value=Number(input[key]);
+        if(!Number.isSafeInteger(value)||value<0){
+          throw new ShiireVendingError(400,"INVALID_PROCUREMENT_SETTING_"+key.toUpperCase());
+        }
+        patch[key]=value;
+      }
       for(const key of numberKeys){
         if(input[key]===undefined) continue;
         const value=Number(input[key]);
@@ -1923,8 +1980,36 @@ export async function handleShiireMainBridge(
         }
         patch[key]=value;
       }
+      if(input.require_bulk_confirmation!==undefined){
+        if(typeof input.require_bulk_confirmation!=="boolean"){
+          throw new ShiireVendingError(400,"INVALID_PROCUREMENT_SETTING_REQUIRE_BULK_CONFIRMATION");
+        }
+        patch.require_bulk_confirmation=input.require_bulk_confirmation;
+      }
+      if(input.seller_quality_mode!==undefined){
+        const mode=String(input.seller_quality_mode);
+        if(!["strict_api","manual_product_approval","trial_only"].includes(mode)){
+          throw new ShiireVendingError(400,"INVALID_SELLER_QUALITY_MODE");
+        }
+        patch.seller_quality_mode=mode;
+      }
+      if(input.approved_hstora_product_ids!==undefined){
+        if(!Array.isArray(input.approved_hstora_product_ids)){
+          throw new ShiireVendingError(400,"INVALID_APPROVED_HSTORA_PRODUCT_IDS");
+        }
+        const ids=[...new Set(input.approved_hstora_product_ids.map(Number))];
+        if(ids.some(id=>!Number.isSafeInteger(id)||id<=0)){
+          throw new ShiireVendingError(400,"INVALID_APPROVED_HSTORA_PRODUCT_IDS");
+        }
+        patch.approved_hstora_product_ids=ids;
+      }
       try{
         const settings=await saveXSettings(env,patch);
+        await auditX(env,{
+          kind:"PROCUREMENT_SETTINGS_UPDATED",
+          message:"Procurement settings were updated from the authenticated main dashboard.",
+          details:{keys:Object.keys(patch)}
+        });
         return responseJson({
           ok:true,
           settings:{
@@ -1935,7 +2020,17 @@ export async function handleShiireMainBridge(
             no_shadowban_reorder_point:settings.no_shadowban_reorder_point,
             no_shadowban_target_stock:settings.no_shadowban_target_stock,
             trial_purchase_count:settings.trial_purchase_count,
-            max_batch_purchase:settings.max_batch_purchase
+            max_batch_purchase:settings.max_batch_purchase,
+            min_seller_rating:settings.min_seller_rating,
+            min_product_reviews:settings.min_product_reviews,
+            min_sales_count:settings.min_sales_count,
+            max_dispute_rate:settings.max_dispute_rate,
+            minimum_stock:settings.minimum_stock,
+            seller_quality_mode:settings.seller_quality_mode,
+            approved_hstora_product_ids:settings.approved_hstora_product_ids,
+            max_price_jump_percent:settings.max_price_jump_percent,
+            require_bulk_confirmation:settings.require_bulk_confirmation,
+            bulk_confirmation_threshold:settings.bulk_confirmation_threshold
           }
         });
       }catch(error){
