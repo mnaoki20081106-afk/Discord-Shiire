@@ -75,6 +75,7 @@ import {
   procurementClassOverrideForHstoraProduct
 } from "./x-procurement-policy";
 import { notifyDiscord } from "./x-alerts";
+import { isDailyRestockBatchActive } from "./x-daily-restock-state";
 import { notifyShiireVendingStockArrival } from "./shiire-vending";
 import {
   getInviteCampaignSettings,
@@ -95,7 +96,12 @@ export type XRunResult={
   details?:unknown;
 };
 
-type ProcurementTarget=ProcurementClass|"INVITE_CAMPAIGN";
+export type ProcurementTarget=ProcurementClass|"INVITE_CAMPAIGN";
+
+export type XProcurementRunOptions={
+  targetClasses?:readonly ProcurementTarget[];
+  targetStockOverride?:Partial<Record<ProcurementTarget,number>>;
+};
 
 function procurementBudgetPercentages(
   settings:Awaited<ReturnType<typeof loadXSettings>>
@@ -143,7 +149,7 @@ export async function reconcilePendingXOrders(env:Env){
           orderResponse:order
         });
         const added=stored.inserted;
-        if(added>0){
+        if(added>0&&!(await isDailyRestockBatchActive(env))){
           await notifyShiireVendingStockArrival(
             env,
             String(row.supplier_product_id),
@@ -359,8 +365,12 @@ async function selectCandidate(
     );
     const fullForceNoShadowban=
       procurementClassOverrideForHstoraProduct(full.id)==="NO_SHADOWBAN";
+    const candidateQuantityLimit=
+      targetClass!=="INVITE_CAMPAIGN"&&fullDualCapability&&!fullForceNoShadowban
+        ?Math.min(settings.max_batch_purchase,Math.max(2,quantityLimit*2))
+        :quantityLimit;
     let plannedQuantity=Math.min(
-      quantityLimit,
+      candidateQuantityLimit,
       Math.max(1,trialCap),
       Math.max(0,Number(full.stock_available??0))
     );
@@ -1493,8 +1503,13 @@ async function handleHstoraFundingNeed(
   });
 }
 
-export async function runXProcurement(env:Env):Promise<XRunResult>{
+export async function runXProcurement(
+  env:Env,
+  options:XProcurementRunOptions={}
+):Promise<XRunResult>{
   const settings=await loadXSettings(env);
+  const allowTarget=(target:ProcurementTarget)=>
+    !options.targetClasses||options.targetClasses.includes(target);
   if(settings.emergency_stop) return {action:"EMERGENCY_STOP",dryRun:settings.dry_run};
 
   const breakerKeys=[
@@ -1552,27 +1567,52 @@ export async function runXProcurement(env:Env):Promise<XRunResult>{
     budgetUsd:number;
   }> = [];
 
-  if(campaignSettings.enabled&&campaignInventory<campaignSettings.target_stock){
+  const inviteTarget=
+    options.targetStockOverride?.INVITE_CAMPAIGN??campaignSettings.target_stock;
+  const topTarget=
+    options.targetStockOverride?.TOP_SEARCH??settings.target_stock;
+  const noShadowTarget=
+    options.targetStockOverride?.NO_SHADOWBAN??settings.no_shadowban_target_stock;
+
+  if(
+    allowTarget("INVITE_CAMPAIGN")&&
+    campaignSettings.enabled&&
+    campaignInventory<inviteTarget
+  ){
     targetOptions.push({
       targetClass:"INVITE_CAMPAIGN",
       classInventory:campaignInventory,
-      classTarget:campaignSettings.target_stock,
+      classTarget:inviteTarget,
       budgetUsd:budgetSnapshot.available.INVITE_CAMPAIGN
     });
   }
-  if(topInventory<=settings.reorder_point){
+  if(
+    allowTarget("TOP_SEARCH")&&
+    (
+      options.targetStockOverride?.TOP_SEARCH!==undefined
+        ?topInventory<topTarget
+        :topInventory<=settings.reorder_point
+    )
+  ){
     targetOptions.push({
       targetClass:"TOP_SEARCH",
       classInventory:topInventory,
-      classTarget:settings.target_stock,
+      classTarget:topTarget,
       budgetUsd:budgetSnapshot.available.TOP_SEARCH
     });
   }
-  if(noShadowInventory<=settings.no_shadowban_reorder_point){
+  if(
+    allowTarget("NO_SHADOWBAN")&&
+    (
+      options.targetStockOverride?.NO_SHADOWBAN!==undefined
+        ?noShadowInventory<noShadowTarget
+        :noShadowInventory<=settings.no_shadowban_reorder_point
+    )
+  ){
     targetOptions.push({
       targetClass:"NO_SHADOWBAN",
       classInventory:noShadowInventory,
-      classTarget:settings.no_shadowban_target_stock,
+      classTarget:noShadowTarget,
       budgetUsd:budgetSnapshot.available.NO_SHADOWBAN
     });
   }
@@ -1690,12 +1730,15 @@ export async function runXProcurement(env:Env):Promise<XRunResult>{
     env,
     targetClass
   );
+  const overrideTarget=options.targetStockOverride?.[targetClass];
   const refreshedReorder=
-    targetClass==="INVITE_CAMPAIGN"
-      ?Math.max(0,campaignSettings.target_stock-1)
-      :targetClass==="TOP_SEARCH"
-        ?settings.reorder_point
-        :settings.no_shadowban_reorder_point;
+    overrideTarget!==undefined
+      ?Math.max(0,overrideTarget-1)
+      :targetClass==="INVITE_CAMPAIGN"
+        ?Math.max(0,campaignSettings.target_stock-1)
+        :targetClass==="TOP_SEARCH"
+          ?settings.reorder_point
+          :settings.no_shadowban_reorder_point;
   if(refreshedClassInventory>refreshedReorder){
     return {
       action:"INVENTORY_RECLASSIFIED_OK",
@@ -1727,15 +1770,19 @@ export async function runXProcurement(env:Env):Promise<XRunResult>{
 
   const fresh=await getHstoraProduct(env,Number(candidate.product.id));
   const prior=await successfulPurchaseCountForProduct(env,String(fresh.id));
-  const trialCap=prior===0?settings.trial_purchase_count:batch;
   const freshVisibility=detectSearchVisibility(fresh);
   const freshForceNoShadowban=
     procurementClassOverrideForHstoraProduct(fresh.id)==="NO_SHADOWBAN";
   const splitAcrossClasses=
     !freshForceNoShadowban&&
     hasDualTopNoShadowbanEvidence(freshVisibility.labels);
+  const purchaseBatch=
+    targetClass!=="INVITE_CAMPAIGN"&&splitAcrossClasses
+      ?Math.min(settings.max_batch_purchase,Math.max(2,batch*2))
+      :batch;
+  const trialCap=prior===0?settings.trial_purchase_count:purchaseBatch;
   let quantity=Math.min(
-    batch,
+    purchaseBatch,
     Math.max(1,trialCap),
     Math.max(0,Number(fresh.stock_available??0))
   );
@@ -2015,7 +2062,7 @@ export async function runXProcurement(env:Env):Promise<XRunResult>{
       })
       :null;
     const added=stored?.inserted??0;
-    if(added>0){
+    if(added>0&&!(await isDailyRestockBatchActive(env))){
       await notifyShiireVendingStockArrival(
         env,
         String(fresh.id),
@@ -2088,7 +2135,7 @@ export async function runXProcurement(env:Env):Promise<XRunResult>{
         })
         :null;
       const added=stored?.inserted??0;
-      if(added>0){
+      if(added>0&&!(await isDailyRestockBatchActive(env))){
         await notifyShiireVendingStockArrival(
           env,
           String(fresh.id),
