@@ -136,7 +136,7 @@ function maxAffordableQuantityForBudget(
     const pairs=Math.floor(
       (perClassBudget+0.00000001)/unitPriceUsd
     );
-    return Math.min(safeMax,pairs*2);
+    return Math.min(evenSplitPurchaseQuantity(safeMax),pairs*2);
   }
   return Math.min(
     safeMax,
@@ -1857,13 +1857,13 @@ export async function runXProcurement(env:Env):Promise<XRunResult>{
     const budgetUnitSource=Number(q.unit_price_source);
     if(!Number.isFinite(budgetUnitSource)||budgetUnitSource<=0) break;
 
-    const affordableUnits=Math.floor(
-      (classBudgetUsd+0.00000001)/budgetUnitSource
+    const nextQuantity=maxAffordableQuantityForBudget(
+      targetClass,
+      splitAcrossClasses,
+      budgetUnitSource,
+      quantity,
+      budgetSnapshot.available
     );
-    let nextQuantity=Math.min(quantity,Math.max(0,affordableUnits));
-    if(targetClass!=="INVITE_CAMPAIGN"&&splitAcrossClasses){
-      nextQuantity=evenSplitPurchaseQuantity(nextQuantity);
-    }
     if(nextQuantity===quantity) break;
 
     quantity=nextQuantity;
@@ -1877,6 +1877,9 @@ export async function runXProcurement(env:Env):Promise<XRunResult>{
           targetClass,
           availableBudgetUsd:classBudgetUsd,
           unitPriceUsd:budgetUnitSource,
+          requiredBudgetClasses:splitAcrossClasses
+            ?["TOP_SEARCH","NO_SHADOWBAN"]
+            :[targetClass],
           procurementBudget:budgetSnapshot
         }
       };
