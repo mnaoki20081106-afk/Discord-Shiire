@@ -1689,7 +1689,12 @@ export async function runXProcurement(env:Env):Promise<XRunResult>{
 
     let possible:ProcurementCandidate|null=null;
     try{
-      possible=await selectCandidate(env,plannedBatch,option.targetClass);
+      possible=await selectCandidate(
+        env,
+        plannedBatch,
+        option.targetClass,
+        budgetSnapshot.available
+      );
     }catch(error){
       const message=error instanceof Error?error.message:String(error);
       if(message==="PRODUCT_PRICE_JUMP"){
@@ -1717,30 +1722,6 @@ export async function runXProcurement(env:Env):Promise<XRunResult>{
         targetClass:option.targetClass,
         reason:"NO_QUALIFIED_PRODUCT",
         budgetUsd:option.budgetUsd
-      });
-      continue;
-    }
-
-    const previewUnitUsd=Number(
-      possible.q.unit_price_source??possible.product.price??0
-    );
-    const previewRequiresEvenBatch=
-      option.targetClass!=="INVITE_CAMPAIGN"&&
-      procurementClassOverrideForHstoraProduct(possible.product.id)!=="NO_SHADOWBAN"&&
-      hasDualTopNoShadowbanEvidence(possible.q.search_visibility);
-    const previewMinimumUnits=previewRequiresEvenBatch?2:1;
-    if(
-      !Number.isFinite(previewUnitUsd)||
-      previewUnitUsd<=0||
-      option.budgetUsd+0.00000001<
-        previewUnitUsd*previewMinimumUnits
-    ){
-      skippedTargets.push({
-        targetClass:option.targetClass,
-        reason:"BUDGET_BELOW_MINIMUM_PURCHASE",
-        budgetUsd:option.budgetUsd,
-        previewUnitUsd,
-        previewMinimumUnits
       });
       continue;
     }
