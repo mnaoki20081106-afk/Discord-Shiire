@@ -40,6 +40,24 @@ export function isTopSearchFallbackEligible(
   return hasDualTopNoShadowbanEvidence(labels);
 }
 
+export function hstoraProcurementPriorityTier(
+  productId:unknown,
+  targetClass:ProcurementClass|"INVITE_CAMPAIGN"
+):number{
+  if(targetClass==="NO_SHADOWBAN"){
+    if(isPreferredNoShadowbanHstoraSource(productId)) return 0;
+    if(isPreferredTopHstoraSource(productId)) return 1;
+    return 2;
+  }
+  if(targetClass==="TOP_SEARCH"){
+    return isPreferredTopHstoraSource(productId)?0:1;
+  }
+  return (
+    isPreferredNoShadowbanHstoraSource(productId)||
+    isPreferredTopHstoraSource(productId)
+  )?0:1;
+}
+
 export function evenSplitPurchaseQuantity(value:number):number{
   const quantity=Math.max(0,Math.floor(Number(value)||0));
   if(quantity<2) return 0;
