@@ -19,7 +19,6 @@ import {
   listHstoraCatalog
 } from "./providers/hstora";
 import { DisabledHotWalletProvider } from "./providers/manual";
-import { runLtcAutoPurchase, runXProcurement } from "./x-engine";
 import { SHIIRE_DISCORD_BOT_PERMISSIONS, deliveryNonce, paymentMethodEnabled, paymentPrice } from "./shiire-vending-policy";
 import {
   inventorySummary,
@@ -55,12 +54,6 @@ import {
   ensureInviteCampaignGateway,
   stopInviteCampaignGateway
 } from "./invite-gateway";
-import {
-  getDailyRestockDashboard,
-  installDailyRestockPanel,
-  startDailyRestock,
-  updateDailyRestockConfig
-} from "./x-daily-restock";
 import {
   ensureShiireVendingSchema,
   listShiireMachines,
@@ -1386,10 +1379,12 @@ export async function handleShiireMainBridge(
   }
 
   if(suffix==="/daily-restock"&&request.method==="GET"){
+    const {getDailyRestockDashboard}=await import("./x-daily-restock");
     return responseJson(await getDailyRestockDashboard(env));
   }
 
   if(suffix==="/daily-restock/settings"&&request.method==="POST"){
+    const {updateDailyRestockConfig}=await import("./x-daily-restock");
     const input=await parseBridgeJson(rawBody);
     if(input.notificationChannelId!==undefined){
       const channelId=String(input.notificationChannelId??"").trim();
@@ -1415,6 +1410,10 @@ export async function handleShiireMainBridge(
   }
 
   if(suffix==="/daily-restock/panel"&&request.method==="POST"){
+    const {
+      getDailyRestockDashboard,
+      installDailyRestockPanel
+    }=await import("./x-daily-restock");
     const dashboard=await getDailyRestockDashboard(env);
     const channelId=String(dashboard.config.notification_channel_id??"").trim();
     if(!channelId) throw new ShiireVendingError(409,"NOTIFICATION_CHANNEL_REQUIRED");
@@ -1430,6 +1429,7 @@ export async function handleShiireMainBridge(
   }
 
   if(suffix==="/daily-restock/run"&&request.method==="POST"){
+    const {startDailyRestock}=await import("./x-daily-restock");
     try{
       return responseJson(await startDailyRestock(env,Date.now(),true));
     }catch(error){
@@ -1542,10 +1542,12 @@ export async function handleShiireMainBridge(
   }
 
   if(suffix==="/run"&&request.method==="POST"){
+    const {runXProcurement}=await import("./x-engine");
     return responseJson(await runXProcurement(env));
   }
 
   if(suffix==="/funding/auto-purchase/run"&&request.method==="POST"){
+    const {runLtcAutoPurchase}=await import("./x-engine");
     return responseJson(await runLtcAutoPurchase(env));
   }
 
