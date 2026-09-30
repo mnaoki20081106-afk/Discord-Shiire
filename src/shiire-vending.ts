@@ -38,6 +38,7 @@ import {
   rebalanceProcurementBudgets,
   pendingPurchaseOrders,
   circuitState,
+  getXSetting,
   setXSetting
 } from "./x-db";
 import { receiveMainPayment, getMainPaymentStatus } from "./main-bot";
@@ -98,6 +99,10 @@ import {
   type ShiireVendingProduct,
   type ShiireVendingOrder
 } from "./shiire-vending-db";
+import {
+  SHIIRE_VENDING_SALES_COPY_VERSION,
+  shiireSalesCopyForClass
+} from "./shiire-vending-sales-copy";
 
 const BRIDGE_MAX_SKEW_MS=5*60_000;
 let bridgeReady=false;
@@ -508,8 +513,10 @@ function machineEmbed(
 ){
   const lines=products.map(product=>{
     const emoji=product.emoji?product.emoji+" ":"";
+    const detail=product.description?product.description+"\n":"";
     return emoji+
       "**"+product.name+"**\n"+
+      detail+
       "PayPay: "+product.price_paypay+"円 / "+
       "Kyash: "+product.price_kyash+"円 / "+
       "在庫: "+product.stock_count+" / "+
@@ -557,11 +564,12 @@ function panelPayload(
 
 async function refreshMachinePanels(env:Env,machineId:string){
   const machine=await getShiireMachine(env,machineId);
-  if(!machine) return;
+  if(!machine) return true;
   const products=await listShiireProducts(env,machineId);
   const panels=(await env.DB.prepare(
     "SELECT channel_id,message_id FROM shiire_vending_panels WHERE vending_machine_id=?"
   ).bind(machineId).all<{channel_id:string;message_id:string}>()).results;
+  let ok=true;
   for(const panel of panels){
     try{
       await discordJson(
@@ -570,8 +578,54 @@ async function refreshMachinePanels(env:Env,machineId:string){
         {method:"PATCH",body:JSON.stringify(panelPayload(machine,products))}
       );
     }catch(error){
+      ok=false;
       console.error("shiire vending panel refresh failed",machineId,panel,error);
     }
+  }
+  return ok;
+}
+
+async function ensureVendingSalesCopy(env:Env,guildId:string){
+  const key="shiire_vending_sales_copy:"+guildId;
+  if(await getXSetting<string>(env,key)===SHIIRE_VENDING_SALES_COPY_VERSION) return;
+
+  const machines=await listShiireMachines(env,guildId);
+  let panelsOk=true;
+  let updated=0;
+  for(const machine of machines){
+    const products=await listShiireProducts(env,machine.id);
+    const classProducts=products.filter(product=>Boolean(shiireSalesCopyForClass(product.procurement_class)));
+    for(const product of classProducts){
+      const preset=shiireSalesCopyForClass(product.procurement_class)!;
+      if(
+        product.name!==preset.name||
+        product.description!==preset.description||
+        product.price_paypay!==preset.priceJpy||
+        product.price_kyash!==preset.priceJpy
+      ){
+        await updateShiireProduct(env,product.id,{
+          name:preset.name,
+          description:preset.description,
+          pricePayPay:preset.priceJpy,
+          priceKyash:preset.priceJpy
+        });
+        updated++;
+      }
+    }
+    if(classProducts.length>0){
+      panelsOk=(await refreshMachinePanels(env,machine.id))&&panelsOk;
+    }
+  }
+
+  if(panelsOk){
+    await setXSetting(env,key,SHIIRE_VENDING_SALES_COPY_VERSION);
+  }
+  if(updated>0){
+    await auditX(env,{
+      kind:"SHIIRE_VENDING_SALES_COPY_UPDATED",
+      message:"Class-backed vending products were updated to the configured sales copy and prices.",
+      details:{guildId,updated,version:SHIIRE_VENDING_SALES_COPY_VERSION}
+    }).catch(()=>undefined);
   }
 }
 
@@ -2067,6 +2121,7 @@ export async function handleShiireMainBridge(
 
   if(suffix==="/vending"){
     if(request.method==="GET"){
+      await ensureVendingSalesCopy(env,guildId);
       const machines=await listShiireMachines(env,guildId);
       const enriched=[];
       for(const machine of machines){
