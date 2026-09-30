@@ -561,22 +561,31 @@ async function checkHstoraBalanceGuard(
   settings:Awaited<ReturnType<typeof loadXSettings>>
 ){
   const percentages=procurementBudgetPercentages(settings);
-  const budgetBefore=await initializeProcurementBudgetsIfNeeded(
-    env,
-    current,
-    percentages
-  );
+  const existingBudget=await getProcurementBudgets(env);
+  const budgetWasInitialized=existingBudget.initialized;
+  const budgetBefore=budgetWasInitialized
+    ?existingBudget
+    :await initializeProcurementBudgetsIfNeeded(
+      env,
+      current,
+      percentages
+    );
   const previous=await getXSetting<BalanceGuard>(env,"x_hstora_balance_guard");
   let remainingAllowed=0;
   if(previous&&Number.isFinite(previous.hstoraUsd)){
     const allowed=Math.max(0,Number(previous.allowedDecreaseUsd??0));
     const delta=current-previous.hstoraUsd;
     if(delta>0.01){
-      const budgetAfter=await creditProcurementBudgets(
-        env,
-        delta,
-        percentages
-      );
+      // On the first run after this feature is deployed, the current HStora
+      // balance is already used to seed all three buckets. Do not add the
+      // same balance delta again from the legacy balance guard.
+      const budgetAfter=budgetWasInitialized
+        ?await creditProcurementBudgets(
+          env,
+          delta,
+          percentages
+        )
+        :budgetBefore;
       await auditX(env,{
         kind:"HSTORA_BALANCE_INCREASE",
         message:"HStora wallet balance increased.",
