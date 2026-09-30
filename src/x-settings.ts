@@ -31,6 +31,10 @@ export type XSettings={
   no_shadowban_target_stock:number;
   max_batch_purchase:number;
 
+  invite_campaign_budget_percent:number;
+  no_shadowban_budget_percent:number;
+  top_search_budget_percent:number;
+
   min_seller_rating:number;
   min_product_reviews:number;
   min_sales_count:number;
@@ -95,6 +99,12 @@ export const DEFAULT_X_SETTINGS:XSettings={
   no_shadowban_target_stock:50,
   max_batch_purchase:20,
 
+  // Small-capital default: do not spend replenishment funds on invite rewards
+  // until the admin explicitly allocates a share to that bucket.
+  invite_campaign_budget_percent:0,
+  no_shadowban_budget_percent:50,
+  top_search_budget_percent:50,
+
   min_seller_rating:0,
   min_product_reviews:0,
   min_sales_count:0,
@@ -140,7 +150,8 @@ const INTEGER_KEYS=new Set<keyof XSettings>([
   "reserve_jpy","max_purchase_jpy","daily_purchase_limit_jpy",
   "weekly_purchase_limit_jpy","monthly_purchase_limit_jpy","min_purchase_jpy",
   "reorder_point","target_stock","no_shadowban_reorder_point","no_shadowban_target_stock",
-  "max_batch_purchase","min_product_reviews",
+  "max_batch_purchase","invite_campaign_budget_percent","no_shadowban_budget_percent",
+  "top_search_budget_percent","min_product_reviews",
   "min_sales_count","minimum_stock","trial_purchase_count",
   "observed_paypay_balance_jpy","observed_paypay_balance_at",
   "max_paypay_balance_age_ms","pending_paypay_funding_jpy",
@@ -260,6 +271,20 @@ export async function saveXSettings(env:Env,patch:Partial<XSettings>):Promise<XS
     throw new Error("NO_SHADOWBAN_TARGET_STOCK_BELOW_REORDER_POINT");
   }
   if(next.max_batch_purchase<1) throw new Error("MAX_BATCH_PURCHASE_INVALID");
+  if(
+    next.invite_campaign_budget_percent>100||
+    next.no_shadowban_budget_percent>100||
+    next.top_search_budget_percent>100
+  ){
+    throw new Error("PROCUREMENT_BUDGET_PERCENT_OUT_OF_RANGE");
+  }
+  if(
+    next.invite_campaign_budget_percent+
+    next.no_shadowban_budget_percent+
+    next.top_search_budget_percent!==100
+  ){
+    throw new Error("PROCUREMENT_BUDGET_PERCENT_TOTAL_NOT_100");
+  }
   if(
     next.reserve_jpy<0||next.max_purchase_jpy<0||
     next.daily_purchase_limit_jpy<0||next.weekly_purchase_limit_jpy<0||
