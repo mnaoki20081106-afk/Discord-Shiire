@@ -194,8 +194,18 @@ export async function inviteCampaignStockCount(env:Env):Promise<number>{
 
 export async function getInviteCampaignDashboard(env:Env){
   await ensureInviteCampaignSchema(env);
-  const [settings,guilds,stock,runtime,progress,rewards]=await Promise.all([
-    getInviteCampaignSettings(env),
+  const settings=await getInviteCampaignSettings(env);
+  const guildId=settings.guild_id;
+
+  const [
+    guilds,
+    stock,
+    runtime,
+    progress,
+    rewards,
+    unresolved,
+    memberStats
+  ]=await Promise.all([
     listInviteCampaignGuilds(env),
     inviteCampaignStockCount(env),
     env.DB.prepare(
@@ -204,16 +214,32 @@ export async function getInviteCampaignDashboard(env:Env){
     ).first<any>(),
     env.DB.prepare(
       "SELECT guild_id,inviter_user_id,valid_invites,excluded_invites,rewards_earned,updated_at "+
-      "FROM invite_campaign_progress ORDER BY valid_invites DESC,updated_at DESC LIMIT 100"
-    ).all<any>(),
+      "FROM invite_campaign_progress WHERE guild_id=? "+
+      "ORDER BY valid_invites DESC,updated_at DESC LIMIT 100"
+    ).bind(guildId).all<any>(),
     env.DB.prepare(
       "SELECT id,guild_id,inviter_user_id,ordinal,account_id,status,error,created_at,"+
-      "updated_at,delivered_at FROM invite_campaign_rewards ORDER BY created_at DESC LIMIT 100"
-    ).all<any>()
+      "updated_at,delivered_at FROM invite_campaign_rewards "+
+      "WHERE guild_id=? ORDER BY created_at DESC LIMIT 100"
+    ).bind(guildId).all<any>(),
+    env.DB.prepare(
+      "SELECT COUNT(*) AS count FROM invite_campaign_rewards "+
+      "WHERE guild_id=? AND status<>'DELIVERED'"
+    ).bind(guildId).first<{count:number}>(),
+    env.DB.prepare(
+      "SELECT COUNT(*) AS total,"+
+      "SUM(CASE WHEN counted=1 THEN 1 ELSE 0 END) AS valid,"+
+      "SUM(CASE WHEN exclusion_reason='INVITER_AMBIGUOUS' THEN 1 ELSE 0 END) AS ambiguous,"+
+      "SUM(CASE WHEN exclusion_reason='INVITER_UNRESOLVED' THEN 1 ELSE 0 END) AS unresolved "+
+      "FROM invite_campaign_members WHERE guild_id=?"
+    ).bind(guildId).first<{
+      total:number;
+      valid:number|null;
+      ambiguous:number|null;
+      unresolved:number|null;
+    }>()
   ]);
-  const unresolved=(rewards.results as any[]).filter(
-    row=>String(row.status)!=="DELIVERED"
-  ).length;
+
   return {
     settings,
     guilds,
@@ -225,8 +251,14 @@ export async function getInviteCampaignDashboard(env:Env){
     runtime:runtime??{
       gateway_ready_at:null,last_event_at:null,last_error:null,updated_at:null
     },
+    attribution:{
+      total:Number(memberStats?.total??0),
+      valid:Number(memberStats?.valid??0),
+      ambiguous:Number(memberStats?.ambiguous??0),
+      unresolved:Number(memberStats?.unresolved??0)
+    },
     progress:progress.results,
     rewards:rewards.results,
-    unresolvedRewards:unresolved
+    unresolvedRewards:Number(unresolved?.count??0)
   };
 }
