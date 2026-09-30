@@ -68,6 +68,8 @@ import {
   PREFERRED_TOP_HSTORA_PRODUCT_IDS,
   evenSplitPurchaseQuantity,
   hasDualTopNoShadowbanEvidence,
+  hstoraProcurementPriorityTier,
+  isTopSearchFallbackEligible,
   isPreferredNoShadowbanHstoraSource,
   isPreferredTopHstoraSource,
   procurementClassOverrideForHstoraProduct
@@ -306,6 +308,7 @@ async function selectCandidate(
     if(targetClass==="TOP_SEARCH"){
       if(forceNoShadowban) continue;
       if(!hasTop) continue;
+      if(!isTopSearchFallbackEligible(product.id,visibility.labels)) continue;
       if(baseJpy===null||baseJpy>settings.max_unit_price_jpy) continue;
     }else if(targetClass==="NO_SHADOWBAN"){
       if(hasTop&&!dualCapability&&!forceNoShadowban) continue;
@@ -455,30 +458,10 @@ async function selectCandidate(
   }
 
   candidates.sort((a,b)=>{
-    if(targetClass==="INVITE_CAMPAIGN"){
-      const aPreferred=isPreferredTopHstoraSource(a.product.id)||isPreferredNoShadowbanHstoraSource(a.product.id);
-      const bPreferred=isPreferredTopHstoraSource(b.product.id)||isPreferredNoShadowbanHstoraSource(b.product.id);
-      if(aPreferred!==bPreferred) return aPreferred?-1:1;
-    }else if(targetClass==="NO_SHADOWBAN"){
-      const aPreferredNoShadow=isPreferredNoShadowbanHstoraSource(a.product.id);
-      const bPreferredNoShadow=isPreferredNoShadowbanHstoraSource(b.product.id);
-      if(aPreferredNoShadow!==bPreferredNoShadow){
-        return aPreferredNoShadow?-1:1;
-      }
-      const aPreferredTop=isPreferredTopHstoraSource(a.product.id);
-      const bPreferredTop=isPreferredTopHstoraSource(b.product.id);
-      if(aPreferredTop!==bPreferredTop) return aPreferredTop?-1:1;
-    }else{
-      const aPreferred=isPreferredTopHstoraSource(a.product.id);
-      const bPreferred=isPreferredTopHstoraSource(b.product.id);
-      if(aPreferred!==bPreferred) return aPreferred?-1:1;
-    }
-
-    if(targetClass==="NO_SHADOWBAN"){
-      const aDual=hasDualTopNoShadowbanEvidence(a.q.search_visibility);
-      const bDual=hasDualTopNoShadowbanEvidence(b.q.search_visibility);
-      if(aDual!==bDual) return aDual?-1:1;
-    }
+    const tier=
+      hstoraProcurementPriorityTier(a.product.id,targetClass)-
+      hstoraProcurementPriorityTier(b.product.id,targetClass);
+    if(tier!==0) return tier;
 
     const aPrice=
       targetClass==="NO_SHADOWBAN"
@@ -490,6 +473,7 @@ async function selectCandidate(
         :Number(b.q.unit_price_jpy??Infinity);
     const price=aPrice-bPrice;
     if(price!==0) return price;
+
     const stock=
       Number(b.product.stock_available??0)-
       Number(a.product.stock_available??0);
