@@ -1105,7 +1105,7 @@ async function load(){
       '<div class="formrow"><input id="dailyNotifyChannel" value="'+esc(cfg.notification_channel_id||"")+'" placeholder="通知先DiscordチャンネルID"></div>'+
       '<p class="hint">入荷処理が完了したら、このチャンネルへまとめて通知します。</p>'+
       '<textarea id="dailyNotifyMessage" style="min-height:120px;font:inherit">'+esc(cfg.notification_message||"")+'</textarea>'+
-      '<p class="hint">この文言の下に、通知送信時点で実際に販売可能な在庫数として「No shadow ban 〇個」「Top Search □個」を自動表示します。今回の入荷数ではありません。</p>'+
+      '<p class="hint">この文言の下に、通知送信時点で実際に販売可能な在庫数として「No shadow ban 〇個」「Top Search □個」を自動表示します。恒常在庫目標・未達・資金不足などの内部情報は外向け通知には表示しません。</p>'+
       '<div class="formrow"><button id="saveDailyRestock">設定を保存</button><button id="installDailyRestockPanel">通知パネルを設置 / 更新</button><button id="runDailyRestockNow">今すぐ差分入荷</button></div>'+
       '</section>'+
       '<div class="grid">'+

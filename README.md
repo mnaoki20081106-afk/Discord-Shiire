@@ -310,10 +310,12 @@ The counts are the actual sellable inventory at notification time
 (`READY_FOR_DELIVERY` only), not the planned deficit and not merely the number added
 during that daily batch. Accounts temporarily held in `VENDING_RESERVED` are excluded
 from the customer-facing count. A persistent notification panel can also be installed
-from the same admin tab; the panel is updated with the same live sellable counts after
-each completed or partial restock. If supplier stock, category budget, or another guard
-prevents a target from being reached, the notification therefore shows the lower
-real-world inventory instead of pretending the steady-stock target was reached.
+from the same admin tab; the panel is updated with the same live sellable counts.
+
+Customer-facing Discord messages intentionally do not expose the configured steady-stock
+targets, target shortfalls, category budget state, supplier shortages, or other internal
+procurement status. Those details remain available only in the admin dashboard and audit
+logs.
 
 Invite-campaign inventory remains on the minute-based replenishment path because reward
 delivery must not wait for the next 18:00 window. HStora balance credits are also still
