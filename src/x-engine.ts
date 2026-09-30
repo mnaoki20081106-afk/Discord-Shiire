@@ -1941,6 +1941,11 @@ export async function runXProcurement(env:Env):Promise<XRunResult>{
 
   const unitSource=Number(q.unit_price_source);
   const totalSource=unitSource*quantity;
+  const budgetCharges=procurementBudgetCharges(
+    targetClass,
+    storedSplitAcrossClasses,
+    totalSource
+  );
   let supplierBalance;
   try{supplierBalance=await getHstoraBalance(env);}
   catch(error){
@@ -1993,15 +1998,16 @@ export async function runXProcurement(env:Env):Promise<XRunResult>{
         currency:fresh.currency,
         trial:prior===0,
         targetClass,
-        availableBudgetUsd:classBudgetUsd
+        availableBudgetUsd:classBudgetUsd,
+        budgetCharges,
+        procurementBudget:budgetSnapshot
       }
     };
   }
 
-  const budgetReserved=await reserveProcurementBudget(
+  const budgetReserved=await reserveProcurementBudgetCharges(
     env,
-    targetClass,
-    totalSource
+    budgetCharges
   );
   if(!budgetReserved){
     return {
@@ -2013,6 +2019,7 @@ export async function runXProcurement(env:Env):Promise<XRunResult>{
       details:{
         targetClass,
         requiredUsd:totalSource,
+        budgetCharges,
         procurementBudget:await getProcurementBudgets(env)
       }
     };
@@ -2037,7 +2044,7 @@ export async function runXProcurement(env:Env):Promise<XRunResult>{
       dryRun:false
     });
   }catch(error){
-    await releaseProcurementBudget(env,targetClass,totalSource);
+    await releaseProcurementBudgetCharges(env,budgetCharges);
     throw error;
   }
 
@@ -2050,7 +2057,8 @@ export async function runXProcurement(env:Env):Promise<XRunResult>{
       unitPriceJpy:q.unit_price_jpy,
       trial:prior===0,
       budgetClass:targetClass,
-      budgetReservedUsd:totalSource
+      budgetReservedUsd:totalSource,
+      budgetCharges
     }
   }).catch(()=>undefined);
 
@@ -2200,7 +2208,7 @@ export async function runXProcurement(env:Env):Promise<XRunResult>{
       const definitiveRejection=
         error instanceof HstoraApiError&&!error.retryable;
       if(definitiveRejection){
-        await releaseProcurementBudget(env,targetClass,totalSource);
+        await releaseProcurementBudgetCharges(env,budgetCharges);
       }
       await updatePurchaseOrderRecord(env,recordId,{status:"FAILED",errorCode:code});
       await setCircuitBreaker(env,"hstora","OPEN",code);
@@ -2215,6 +2223,7 @@ export async function runXProcurement(env:Env):Promise<XRunResult>{
           code,
           budgetClass:targetClass,
           budgetReservedUsd:totalSource,
+          budgetCharges,
           budgetReleased:definitiveRejection
         }
       }).catch(()=>undefined);
