@@ -51,6 +51,18 @@ export function inviteUsesDelta(
   return Math.max(0,after-before);
 }
 
+export function nextPendingInviteUses(
+  previous:{uses:number;pendingUses:number}|null,
+  currentUses:unknown,
+  mode:"baseline"|"join"
+):number{
+  if(mode==="baseline") return 0;
+  const current=Math.max(0,Math.floor(Number(currentUses)||0));
+  if(!previous) return current;
+  return Math.max(0,Math.floor(Number(previous.pendingUses)||0))+
+    inviteUsesDelta(previous.uses,current);
+}
+
 export type InviteAttributionCandidate={
   code:string;
   ownerUserId:string|null;
