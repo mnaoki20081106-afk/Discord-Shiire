@@ -62,9 +62,14 @@ function fatalClose(code:number){
 }
 
 export async function ensureInviteCampaignGateway(env:Env):Promise<void>{
-  if(!env.INVITE_GATEWAY||!env.DISCORD_BOT_TOKEN?.trim()) return;
   const settings=await getInviteCampaignSettings(env);
   if(!settings.enabled) return;
+  if(!env.INVITE_GATEWAY){
+    throw new Error("INVITE_GATEWAY_BINDING_NOT_CONFIGURED");
+  }
+  if(!env.DISCORD_BOT_TOKEN?.trim()){
+    throw new Error("DISCORD_BOT_TOKEN_NOT_CONFIGURED");
+  }
   const id=env.INVITE_GATEWAY.idFromName("invite-campaign");
   const response=await env.INVITE_GATEWAY.get(id).fetch(
     "https://invite-gateway.internal/start",
@@ -190,6 +195,14 @@ export class InviteGateway{
       base=resume?stored.resumeUrl!:await this.gatewayUrl();
     }catch(error){
       await recordInviteCampaignRuntimeError(this.env,error).catch(()=>undefined);
+      const message=error instanceof Error?error.message:String(error);
+      if(
+        message.includes("DISCORD_GATEWAY_URL_FAILED:401")||
+        message.includes("DISCORD_GATEWAY_URL_FAILED:403")
+      ){
+        await this.state.storage.deleteAlarm();
+        return;
+      }
       await this.scheduleReconnect(false);
       return;
     }
@@ -235,9 +248,21 @@ export class InviteGateway{
         this.plannedClose=false;
         return;
       }
+      if(fatalClose(event.code)){
+        void (async()=>{
+          await recordInviteCampaignRuntimeError(
+            this.env,
+            new Error(
+              "DISCORD_GATEWAY_FATAL_CLOSE:"+event.code+":"+
+              String(event.reason??"").slice(0,200)
+            )
+          ).catch(()=>undefined);
+          await this.state.storage.deleteAlarm();
+        })();
+        return;
+      }
       void this.scheduleReconnect(
-        freshSessionClose(event.code),
-        fatalClose(event.code)?60000:undefined
+        freshSessionClose(event.code)
       );
     });
 

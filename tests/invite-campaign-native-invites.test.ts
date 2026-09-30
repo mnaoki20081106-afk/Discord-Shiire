@@ -23,7 +23,7 @@ test("invite campaign does not expose a member-facing slash command",()=>{
 test("invite campaign attributes Discord-native invites by inviter and use delta",()=>{
   assert.equal(campaignSource.includes("fetchDiscordGuildInvites"),true);
   assert.equal(campaignSource.includes("invite.inviter?.id"),true);
-  assert.equal(campaignSource.includes("inviteUsesDelta"),true);
+  assert.equal(campaignSource.includes("nextPendingInviteUses"),true);
 });
 
 test("campaign bot no longer creates invite URLs itself",()=>{
