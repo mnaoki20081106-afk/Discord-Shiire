@@ -309,20 +309,87 @@ export async function creditProcurementBudgets(
   return getProcurementBudgets(env);
 }
 
+export async function reserveProcurementBudgetCharges(
+  env:Env,
+  charges:Partial<Record<ProcurementBudgetClass,number>>
+):Promise<boolean>{
+  const invite=Math.max(0,Number(charges.INVITE_CAMPAIGN??0));
+  const noShadow=Math.max(0,Number(charges.NO_SHADOWBAN??0));
+  const top=Math.max(0,Number(charges.TOP_SEARCH??0));
+  if(
+    !Number.isFinite(invite)||
+    !Number.isFinite(noShadow)||
+    !Number.isFinite(top)||
+    invite+noShadow+top<=0
+  ){
+    return false;
+  }
+
+  await ensureProcurementBudgetRows(env);
+  const result=await env.DB.prepare(
+    "UPDATE procurement_budgets SET "+
+    "available_usd=MAX(0,available_usd-CASE procurement_class "+
+      "WHEN 'INVITE_CAMPAIGN' THEN ? "+
+      "WHEN 'NO_SHADOWBAN' THEN ? "+
+      "WHEN 'TOP_SEARCH' THEN ? ELSE 0 END),"+
+    "updated_at=? "+
+    "WHERE procurement_class IN ('INVITE_CAMPAIGN','NO_SHADOWBAN','TOP_SEARCH') "+
+    "AND initialized=1 "+
+    "AND NOT EXISTS ("+
+      "SELECT 1 FROM procurement_budgets p WHERE p.initialized<>1 OR "+
+      "(p.procurement_class='INVITE_CAMPAIGN' AND p.available_usd+0.00000001<?) OR "+
+      "(p.procurement_class='NO_SHADOWBAN' AND p.available_usd+0.00000001<?) OR "+
+      "(p.procurement_class='TOP_SEARCH' AND p.available_usd+0.00000001<?)"+
+    ")"
+  ).bind(
+    invite,
+    noShadow,
+    top,
+    Date.now(),
+    invite,
+    noShadow,
+    top
+  ).run();
+  return Number(result.meta?.changes??0)===3;
+}
+
+export async function releaseProcurementBudgetCharges(
+  env:Env,
+  charges:Partial<Record<ProcurementBudgetClass,number>>
+){
+  const invite=Math.max(0,Number(charges.INVITE_CAMPAIGN??0));
+  const noShadow=Math.max(0,Number(charges.NO_SHADOWBAN??0));
+  const top=Math.max(0,Number(charges.TOP_SEARCH??0));
+  if(
+    !Number.isFinite(invite)||
+    !Number.isFinite(noShadow)||
+    !Number.isFinite(top)||
+    invite+noShadow+top<=0
+  ){
+    return;
+  }
+
+  await ensureProcurementBudgetRows(env);
+  await env.DB.prepare(
+    "UPDATE procurement_budgets SET "+
+    "available_usd=available_usd+CASE procurement_class "+
+      "WHEN 'INVITE_CAMPAIGN' THEN ? "+
+      "WHEN 'NO_SHADOWBAN' THEN ? "+
+      "WHEN 'TOP_SEARCH' THEN ? ELSE 0 END,"+
+    "updated_at=? "+
+    "WHERE procurement_class IN ('INVITE_CAMPAIGN','NO_SHADOWBAN','TOP_SEARCH') "+
+    "AND initialized=1"
+  ).bind(invite,noShadow,top,Date.now()).run();
+}
+
 export async function reserveProcurementBudget(
   env:Env,
   procurementClass:ProcurementBudgetClass,
   amountUsd:number
 ):Promise<boolean>{
-  if(!Number.isFinite(amountUsd)||amountUsd<=0) return false;
-  await ensureProcurementBudgetRows(env);
-  const result=await env.DB.prepare(
-    "UPDATE procurement_budgets "+
-    "SET available_usd=MAX(0,available_usd-?),updated_at=? "+
-    "WHERE procurement_class=? AND initialized=1 "+
-    "AND available_usd+0.00000001>=?"
-  ).bind(amountUsd,Date.now(),procurementClass,amountUsd).run();
-  return Number(result.meta?.changes??0)>0;
+  return reserveProcurementBudgetCharges(env,{
+    [procurementClass]:amountUsd
+  });
 }
 
 export async function releaseProcurementBudget(
@@ -330,12 +397,9 @@ export async function releaseProcurementBudget(
   procurementClass:ProcurementBudgetClass,
   amountUsd:number
 ){
-  if(!Number.isFinite(amountUsd)||amountUsd<=0) return;
-  await ensureProcurementBudgetRows(env);
-  await env.DB.prepare(
-    "UPDATE procurement_budgets SET available_usd=available_usd+?,updated_at=? "+
-    "WHERE procurement_class=? AND initialized=1"
-  ).bind(amountUsd,Date.now(),procurementClass).run();
+  await releaseProcurementBudgetCharges(env,{
+    [procurementClass]:amountUsd
+  });
 }
 
 const SECRET_KEY_RE=/(secret|password|credential|token|2fa|api.?key|private.?key|authorization)/i;
