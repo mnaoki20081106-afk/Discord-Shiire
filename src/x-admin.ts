@@ -1,3 +1,4 @@
+import { withNamedRunLock } from "./x-run-lock";
 import type { Env } from "./types";
 import { loadXSettings, saveXSettings, type XSettings } from "./x-settings";
 import { fundingModeLabel, isBinanceAutoFundingServerEnabled } from "./x-funding-mode";
@@ -10,7 +11,12 @@ import {
   ensureXSchema,
   auditX,
   listOpenCircuitBreakers,
-  setCircuitBreaker
+  setCircuitBreaker,
+  getProcurementBudgets,
+  rebalanceProcurementBudgets,
+  pendingPurchaseOrders,
+  setXSetting,
+  circuitState
 } from "./x-db";
 import {
   confirmPendingDirectLtcFunding,
@@ -43,6 +49,12 @@ import {
   listHstoraCatalog,
   getHstoraProduct
 } from "./providers/hstora";
+import {
+  getDailyRestockDashboard,
+  installDailyRestockPanel,
+  startDailyRestock,
+  updateDailyRestockConfig
+} from "./x-daily-restock";
 
 function json(data:unknown,status=200){
   return new Response(JSON.stringify(data),{
@@ -82,6 +94,11 @@ function publicSettings(settings:XSettings){
     // Pending funding snapshots are runtime-owned state. They are exposed via
     // getFundingPlan(), not as editable Settings JSON.
     if(key.startsWith("pending_paypay_")) continue;
+    if(
+      key==="invite_campaign_budget_percent"||
+      key==="no_shadowban_budget_percent"||
+      key==="top_search_budget_percent"
+    ) continue;
     out[key]=value;
   }
   return out;
@@ -95,6 +112,14 @@ function safePatch(input:Record<string,unknown>):Partial<XSettings>{
     }
   }
   return out as Partial<XSettings>;
+}
+
+function procurementBudgetPercentages(settings:XSettings){
+  return {
+    INVITE_CAMPAIGN:settings.invite_campaign_budget_percent,
+    NO_SHADOWBAN:settings.no_shadowban_budget_percent,
+    TOP_SEARCH:settings.top_search_budget_percent
+  };
 }
 
 async function settled<T>(fn:()=>Promise<T>){
@@ -112,6 +137,15 @@ export async function handleXAdminApi(
   env:Env,
   url:URL
 ):Promise<Response|null>{
+  if(request.method==="POST"&&["/api/x/procurement-budget","/api/x/procurement-budget/rebalance"].includes(url.pathname)){
+    return withNamedRunLock<Response|null>(env,"x-finance",
+      ()=>handleXAdminApiUnlocked(request,env,url),
+      async()=>json({error:"FINANCIAL_RUN_LOCKED"},409));
+  }
+  return handleXAdminApiUnlocked(request,env,url);
+}
+
+async function handleXAdminApiUnlocked(request:Request,env:Env,url:URL):Promise<Response|null>{
   await ensureXSchema(env);
 
   if(url.pathname==="/api/x/invite-campaign"&&request.method==="GET"){
@@ -180,6 +214,185 @@ export async function handleXAdminApi(
     }catch(error){
       const message=error instanceof Error?error.message:String(error);
       return json({error:message},409);
+    }
+  }
+
+  if(url.pathname==="/api/x/daily-restock"&&request.method==="GET"){
+    return json(await getDailyRestockDashboard(env));
+  }
+
+  if(url.pathname==="/api/x/daily-restock/settings"&&request.method==="POST"){
+    const raw=await requestJson(request);
+    if(!raw) return json({error:"INVALID_JSON"},400);
+    try{
+      return json({
+        ok:true,
+        ...await updateDailyRestockConfig(env,{
+          enabled:raw.enabled,
+          topSearchTargetStock:raw.topSearchTargetStock,
+          noShadowbanTargetStock:raw.noShadowbanTargetStock,
+          notificationChannelId:raw.notificationChannelId,
+          notificationMessage:raw.notificationMessage
+        })
+      });
+    }catch(error){
+      return json({
+        error:error instanceof Error?error.message:String(error)
+      },400);
+    }
+  }
+
+  if(url.pathname==="/api/x/daily-restock/panel"&&request.method==="POST"){
+    try{
+      return json({ok:true,...await installDailyRestockPanel(env)});
+    }catch(error){
+      return json({
+        error:error instanceof Error?error.message:String(error)
+      },409);
+    }
+  }
+
+  if(url.pathname==="/api/x/daily-restock/run"&&request.method==="POST"){
+    try{
+      return json(await startDailyRestock(env,Date.now(),true));
+    }catch(error){
+      return json({
+        error:error instanceof Error?error.message:String(error)
+      },409);
+    }
+  }
+
+  if(url.pathname==="/api/x/procurement-budget"&&request.method==="GET"){
+    const settings=await loadXSettings(env);
+    return json({
+      percentages:procurementBudgetPercentages(settings),
+      budget:await getProcurementBudgets(env)
+    });
+  }
+
+  if(url.pathname==="/api/x/procurement-budget"&&request.method==="POST"){
+    const raw=await requestJson(request);
+    if(!raw) return json({error:"INVALID_JSON"},400);
+
+    const pending=await pendingPurchaseOrders(env);
+    if(pending.length>0){
+      return json({
+        error:"PENDING_HSTORA_ORDER_EXISTS",
+        message:"処理中のHStora注文があるため、予算の再配分は注文確定後に行ってください。",
+        pendingOrders:pending.length
+      },409);
+    }
+
+    const hstoraBreaker=await circuitState(env,"hstora");
+    if(String(hstoraBreaker?.state??"")==="OPEN"){
+      return json({
+        error:"HSTORA_CIRCUIT_BREAKER_OPEN",
+        message:"HStoraの停止状態を確認・解消してから予算割合を変更してください。"
+      },409);
+    }
+
+    const inviteCampaignPercent=Number(raw.inviteCampaignPercent);
+    const noShadowbanPercent=Number(raw.noShadowbanPercent);
+    const topSearchPercent=Number(raw.topSearchPercent);
+
+    let balance;
+    try{balance=await getHstoraBalance(env);}
+    catch(error){
+      return json({
+        error:"HSTORA_BALANCE_ERROR",
+        message:error instanceof Error?error.message:String(error)
+      },502);
+    }
+    if(String(balance.currency).toUpperCase()!=="USD"){
+      return json({error:"HSTORA_CURRENCY_UNSUPPORTED"},409);
+    }
+
+    try{
+      const settings=await saveXSettings(env,{
+        invite_campaign_budget_percent:inviteCampaignPercent,
+        no_shadowban_budget_percent:noShadowbanPercent,
+        top_search_budget_percent:topSearchPercent
+      });
+      const percentages=procurementBudgetPercentages(settings);
+      const budget=await rebalanceProcurementBudgets(
+        env,
+        Number(balance.balance),
+        percentages
+      );
+      await auditX(env,{
+        kind:"PROCUREMENT_BUDGET_ALLOCATION_CHANGED",
+        message:"Procurement budget percentages changed and current HStora balance was rebalanced.",
+        details:{
+          percentages,
+          currentHstoraBalanceUsd:Number(balance.balance),
+          budget:budget.available
+        }
+      });
+      return json({
+        ok:true,
+        percentages,
+        budget,
+        currentHstoraBalanceUsd:Number(balance.balance)
+      });
+    }catch(error){
+      return json({
+        error:error instanceof Error?error.message:String(error)
+      },400);
+    }
+  }
+
+  if(
+    url.pathname==="/api/x/procurement-budget/rebalance"&&
+    request.method==="POST"
+  ){
+    const pending=await pendingPurchaseOrders(env);
+    if(pending.length>0){
+      return json({
+        error:"PENDING_HSTORA_ORDER_EXISTS",
+        message:"処理中のHStora注文があるため、現在残高での再配分はできません。",
+        pendingOrders:pending.length
+      },409);
+    }
+    const hstoraBreaker=await circuitState(env,"hstora");
+    if(String(hstoraBreaker?.state??"")==="OPEN"){
+      return json({
+        error:"HSTORA_CIRCUIT_BREAKER_OPEN",
+        message:"HStoraの停止状態を確認・解消してから現在残高を再配分してください。"
+      },409);
+    }
+    try{
+      const [settings,balance]=await Promise.all([
+        loadXSettings(env),
+        getHstoraBalance(env)
+      ]);
+      if(String(balance.currency).toUpperCase()!=="USD"){
+        return json({error:"HSTORA_CURRENCY_UNSUPPORTED"},409);
+      }
+      const percentages=procurementBudgetPercentages(settings);
+      const budget=await rebalanceProcurementBudgets(
+        env,
+        Number(balance.balance),
+        percentages
+      );
+      await auditX(env,{
+        kind:"PROCUREMENT_BUDGET_REBALANCED",
+        message:"Procurement budgets were manually rebalanced from current HStora balance.",
+        details:{
+          percentages,
+          currentHstoraBalanceUsd:Number(balance.balance),
+          budget:budget.available
+        }
+      });
+      return json({
+        ok:true,
+        percentages,
+        budget,
+        currentHstoraBalanceUsd:Number(balance.balance)
+      });
+    }catch(error){
+      return json({
+        error:error instanceof Error?error.message:String(error)
+      },502);
     }
   }
 
@@ -427,7 +640,18 @@ export async function handleXAdminApi(
       ok:false as const,
       error:"BINANCE_FUNDING_INACTIVE"
     });
-    const [inventory,today,funding,hstora,market,ltc,jpy,circuitBreakers,recentLogs]=await Promise.all([
+    const [
+      inventory,
+      today,
+      funding,
+      hstora,
+      market,
+      ltc,
+      jpy,
+      circuitBreakers,
+      recentLogs,
+      procurementBudget
+    ]=await Promise.all([
       inventorySummary(env),
       todayPurchaseStats(env,dayStart),
       settled(()=>getFundingPlan(env,now)),
@@ -436,7 +660,8 @@ export async function handleXAdminApi(
       binanceActive?settled(()=>getBinanceBalance(env,"LTC")):inactiveBinance,
       binanceActive?settled(()=>getBinanceBalance(env,"JPY")):inactiveBinance,
       listOpenCircuitBreakers(env),
-      listAuditLogs(env,50)
+      listAuditLogs(env,50),
+      getProcurementBudgets(env)
     ]);
     return json({
       generatedAt:now,
@@ -449,6 +674,10 @@ export async function handleXAdminApi(
         .filter(row=>String(row.level)==="error")
         .slice(0,10),
       inventory,
+      procurementBudget:{
+        ...procurementBudget,
+        percentages:procurementBudgetPercentages(settings)
+      },
       today:{
         ...today,
         approximateJpy:
@@ -576,7 +805,7 @@ pre{white-space:pre-wrap;word-break:break-word;font-size:12px;color:#cbd2df;max-
 <nav id="nav"></nav>
 <main id="main"><div class="card">ADMIN_TOKENを入力して接続してください。</div></main>
 <script>
-const tabs=["Dashboard","Funding","Binance","LTC Wallet","HStora","招待キャンペーン","Inventory","Orders","Logs","Settings"];
+const tabs=["Dashboard","Funding","Binance","LTC Wallet","HStora","招待キャンペーン","18:00入荷","Inventory","Orders","Logs","Settings"];
 let current="Dashboard";
 const token=document.querySelector("#token");
 token.value=sessionStorage.getItem("shiireAdminToken")||"";
@@ -605,6 +834,37 @@ async function saveFundingMode(){
  await load();
 }
 async function cancelPendingFunding(){await api("/api/x/funding/pending/cancel",{method:"POST",body:"{}"});await load()}
+async function saveProcurementBudget(){
+ const inviteCampaignPercent=Number(document.querySelector("#budgetInvite")?.value);
+ const noShadowbanPercent=Number(document.querySelector("#budgetNoShadow")?.value);
+ const topSearchPercent=Number(document.querySelector("#budgetTop")?.value);
+ if(
+  !Number.isInteger(inviteCampaignPercent)||
+  !Number.isInteger(noShadowbanPercent)||
+  !Number.isInteger(topSearchPercent)||
+  inviteCampaignPercent<0||noShadowbanPercent<0||topSearchPercent<0||
+  inviteCampaignPercent>100||noShadowbanPercent>100||topSearchPercent>100
+ ){
+  throw new Error("割合は0〜100の整数で入力してください。");
+ }
+ if(inviteCampaignPercent+noShadowbanPercent+topSearchPercent!==100){
+  throw new Error("3項目の合計を100%にしてください。");
+ }
+ await api("/api/x/procurement-budget",{
+  method:"POST",
+  body:JSON.stringify({
+   inviteCampaignPercent,
+   noShadowbanPercent,
+   topSearchPercent
+  })
+ });
+ await load();
+}
+async function rebalanceProcurementBudget(){
+ if(!window.confirm("現在のHStora残高を基準に3つの仕入れ予算を作り直します。未確認の注文がないことを確認してください。")) return;
+ await api("/api/x/procurement-budget/rebalance",{method:"POST",body:"{}"});
+ await load();
+}
 async function approveBulk(){await api("/api/x/bulk-approval",{method:"POST",body:JSON.stringify({minutes:10})});await load()}
 async function resetEmergency(){await api("/api/x/emergency-stop/reset",{method:"POST",body:"{}"});await load()}
 async function saveInviteCampaign(){
@@ -626,6 +886,44 @@ async function retryInviteReward(id){
  await api("/api/x/invite-campaign/rewards/"+encodeURIComponent(id)+"/retry",{
   method:"POST",body:"{}"
  });
+ await load();
+}
+async function saveDailyRestock(){
+ const enabled=Boolean(document.querySelector("#dailyRestockEnabled")?.checked);
+ const topSearchTargetStock=Number(document.querySelector("#dailyTopTarget")?.value);
+ const noShadowbanTargetStock=Number(document.querySelector("#dailyNoShadowTarget")?.value);
+ const notificationChannelId=String(document.querySelector("#dailyNotifyChannel")?.value||"").trim();
+ const notificationMessage=String(document.querySelector("#dailyNotifyMessage")?.value||"").trim();
+ if(!Number.isInteger(topSearchTargetStock)||topSearchTargetStock<0||topSearchTargetStock>10000){
+  throw new Error("Top Searchの恒常在庫は0〜10000の整数で入力してください。");
+ }
+ if(!Number.isInteger(noShadowbanTargetStock)||noShadowbanTargetStock<0||noShadowbanTargetStock>10000){
+  throw new Error("No shadow banの恒常在庫は0〜10000の整数で入力してください。");
+ }
+ if(notificationChannelId&&!/^\\d{15,22}$/.test(notificationChannelId)){
+  throw new Error("通知チャンネルIDが不正です。");
+ }
+ if(!notificationMessage) throw new Error("通知文言を入力してください。");
+ await api("/api/x/daily-restock/settings",{
+  method:"POST",
+  body:JSON.stringify({
+   enabled,
+   topSearchTargetStock,
+   noShadowbanTargetStock,
+   notificationChannelId,
+   notificationMessage
+  })
+ });
+ await load();
+}
+async function installDailyRestockPanelNow(){
+ await api("/api/x/daily-restock/panel",{method:"POST",body:"{}"});
+ await load();
+}
+async function runDailyRestockNow(){
+ if(!window.confirm("18:00を待たず、現在在庫と恒常在庫の差分を今すぐ仕入れますか？")) return;
+ const d=await api("/api/x/daily-restock/run",{method:"POST",body:"{}"});
+ alert(JSON.stringify(d,null,2));
  await load();
 }
 function metrics(data){
@@ -679,7 +977,7 @@ async function load(){
       ?'<button id="runLtcNow">LTC自動購入判定</button>'
       :'';
     main.innerHTML=metrics(data)+
-      '<section class="card"><strong>手動実行</strong><p class="hint">Dry Run中は実購入POSTを行いません。手動LTC補充モードではHStora残高反映後に仕入れ処理が自動再開します。</p><div class="formrow">'+binanceButton+'<button id="runNow">仕入れ判定を実行</button></div></section>'+
+      '<section class="card"><strong>手動実行</strong><p class="hint">Dry Run中は実購入POSTを行いません。HStoraへのLTC入金反映は1分ごとに検知して仕入れ予算へ反映します。通常のNo shadow ban / Top Search在庫は毎日18:00（JST）に恒常在庫との差分を入荷します。</p><div class="formrow">'+binanceButton+'<button id="runNow">仕入れ判定を実行</button></div></section>'+
       card(current,data);
     const runLtc=document.querySelector("#runLtcNow"); if(runLtc) runLtc.onclick=()=>runLtcNow().catch(e=>alert(e.message));
     document.querySelector("#runNow").onclick=()=>runNow().catch(e=>alert(e.message));
@@ -688,17 +986,33 @@ async function load(){
     const s=data.settings||{};
     const manual=s.funding_mode==="manual_hstora";
     const unlocked=Boolean(data.safety?.binanceAutoFundingServerEnabled);
+    const procurementBudget=data.procurementBudget||{};
+    const budgetPercentages=procurementBudget.percentages||{};
+    const budgetAvailable=procurementBudget.available||{};
     const modeCard=
       '<section class="card"><strong>LTC補充方法</strong>'+
-      '<p class="hint">通常はHStora Main WalletへLTCを手動補充します。残高反映後はBOTが在庫判定→HStora購入→自販機納品まで自動再開します。Binanceモードはサーバー側ロックを解除した場合だけ選択できます。</p>'+
+      '<p class="hint">通常はHStora Main WalletへLTCを手動補充します。残高反映は1分Cronで検知してカテゴリ別の仕入れ予算へ反映します。No shadow ban / Top Searchの通常在庫は毎日18:00（JST）に差分入荷し、招待キャンペーン在庫は従来どおり随時補充します。Binanceモードはサーバー側ロックを解除した場合だけ選択できます。</p>'+
       '<div class="formrow"><select id="fundingMode" style="flex:1;border:1px solid #353b49;border-radius:10px;padding:10px;background:#151922;color:#fff">'+
       '<option value="manual_hstora" '+(manual?'selected':'')+'>HStoraへLTC手動補充</option>'+
       '<option value="binance_auto" '+(!manual?'selected':'')+' '+(unlocked?'':'disabled')+'>Binance自動LTC購入'+(unlocked?'':'（ロック中）')+'</option>'+
       '</select><button id="saveFundingMode">切り替え</button></div>'+
       '<p class="status '+(unlocked?'good':'warn')+'">Binanceサーバーロック: '+(unlocked?'解除済み':'有効')+'</p></section>';
+    const budgetCard=
+      '<section class="card"><strong>仕入れ資金の配分</strong>'+
+      '<p class="hint">HStoraへ補充された資金を、招待用 / No shadow ban / Top Search の3枠へ分けます。0%のカテゴリは在庫が不足していても自動仕入れをスキップします。割合変更時は現在のHStora残高を新しい比率で再配分します。</p>'+
+      '<div class="grid">'+
+      '<div class="metric"><small>招待用 予算残</small><strong>'+esc(Number(budgetAvailable.INVITE_CAMPAIGN??0).toFixed(4))+' USD</strong></div>'+
+      '<div class="metric"><small>No shadow ban 予算残</small><strong>'+esc(Number(budgetAvailable.NO_SHADOWBAN??0).toFixed(4))+' USD</strong></div>'+
+      '<div class="metric"><small>Top Search 予算残</small><strong>'+esc(Number(budgetAvailable.TOP_SEARCH??0).toFixed(4))+' USD</strong></div>'+
+      '<div class="metric"><small>配分状態</small><strong>'+(procurementBudget.initialized?'有効':'初期化待ち')+'</strong></div>'+
+      '</div>'+
+      '<div class="formrow"><input id="budgetInvite" type="number" min="0" max="100" step="1" value="'+esc(budgetPercentages.INVITE_CAMPAIGN??0)+'" placeholder="招待用 %"><input id="budgetNoShadow" type="number" min="0" max="100" step="1" value="'+esc(budgetPercentages.NO_SHADOWBAN??50)+'" placeholder="No shadow ban %"><input id="budgetTop" type="number" min="0" max="100" step="1" value="'+esc(budgetPercentages.TOP_SEARCH??50)+'" placeholder="Top Search %"></div>'+
+      '<div class="hint">左から 招待用 / No shadow ban / Top Search。3項目の合計は必ず100%。</div>'+
+      '<div class="formrow"><button id="saveProcurementBudget">割合を保存して現在残高へ適用</button><button id="rebalanceProcurementBudget">現在残高で再配分</button></div>'+
+      '</section>';
     const manualCard=
       '<section class="card"><strong>現在の運用: LTC手動補充</strong>'+
-      '<p class="hint">HStoraの Wallet → Add Funds からLTCで補充してください。BOTはHStora残高を1分Cronで確認し、必要残高が入れば人手を挟まず仕入れ処理へ戻ります。</p>'+
+      '<p class="hint">HStoraの Wallet → Add Funds からLTCで補充してください。BOTはHStora残高を1分Cronで確認し、増加分を設定済みの仕入れ割合へ自動配分します。通常在庫の実仕入れは毎日18:00（JST）に行い、現在在庫と恒常在庫の差分だけを補充します。</p>'+
       '<div class="grid"><div class="metric"><small>HStora Main Wallet</small><strong>'+esc(data.balances?.hstora?.data?.balance??"-")+' USD</strong></div><div class="metric"><small>自動仕入れ</small><strong>'+(data.safety?.autoProcurementEnabled?'ON':'OFF')+'</strong></div></div></section>';
     const binanceCards=
       '<section class="card"><strong>Binance自動LTC購入</strong>'+
@@ -711,12 +1025,14 @@ async function load(){
       '<section class="card"><strong>USD/JPY（手動観測）</strong>'+
       '<p class="hint">HStoraのUSD建て商品をJPY上限と比較するための換算値です。</p>'+
       '<div class="formrow"><input id="usdJpy" inputmode="decimal" type="number" min="0" step="0.001" value="'+esc(s.usd_jpy_rate??0)+'"><button id="saveFx">換算値を保存</button></div></section>';
-    main.innerHTML=metrics(data)+modeCard+(manual?manualCard:binanceCards)+fxCard+
+    main.innerHTML=metrics(data)+modeCard+budgetCard+(manual?manualCard:binanceCards)+fxCard+
       (!manual&&data.funding?.data?.pendingManualFunding
         ?'<section class="card"><strong>PayPay手動操作待ち</strong><p class="hint">最大予約額: '+esc(data.funding.data.pendingManualFunding.amountJpy)+'円。残高増加を確認後に再開します。</p><button id="cancelPending" class="danger">この要求を取消</button></section>'
         :'')+
       card("Funding detail",data.funding);
     document.querySelector("#saveFundingMode").onclick=()=>saveFundingMode().catch(e=>alert(e.message));
+    document.querySelector("#saveProcurementBudget").onclick=()=>saveProcurementBudget().catch(e=>alert(e.message));
+    document.querySelector("#rebalanceProcurementBudget").onclick=()=>rebalanceProcurementBudget().catch(e=>alert(e.message));
     const cancel=document.querySelector("#cancelPending"); if(cancel) cancel.onclick=()=>cancelPendingFunding().catch(e=>alert(e.message));
     const runLtcFunding=document.querySelector("#runLtcFundingNow"); if(runLtcFunding) runLtcFunding.onclick=()=>runLtcNow().catch(e=>alert(e.message));
     const savePayPay=document.querySelector("#savePayPay"); if(savePayPay) savePayPay.onclick=()=>observePayPay().catch(e=>alert(e.message));
@@ -770,6 +1086,45 @@ async function load(){
     document.querySelectorAll("[data-retry-reward]").forEach(el=>{
       el.onclick=()=>retryInviteReward(el.getAttribute("data-retry-reward")).catch(e=>alert(e.message));
     });
+  }
+  else if(current==="18:00入荷"){
+    data=await api("/api/x/daily-restock");
+    const cfg=data.config||{};
+    const state=data.state||{};
+    const top=data.stock?.TOP_SEARCH||{};
+    const noShadow=data.stock?.NO_SHADOWBAN||{};
+    const stateText=state.status
+      ?esc(state.status)+" / "+esc(state.date_key||"-")
+      :"未実行";
+    main.innerHTML=
+      '<section class="card"><strong>毎日18:00 在庫入荷</strong>'+
+      '<p class="hint">毎日18:00（日本時間）に、現在在庫と恒常在庫の差分だけをHStoraから仕入れます。仕入れ資金の配分とHStora商品優先順位は既存設定をそのまま使用します。HStoraが処理中の場合は1分Cronで納品完了まで追跡し、全体が終わってから集計通知を1回だけ送ります。</p>'+
+      '<div class="formrow"><label style="display:flex;align-items:center;gap:8px"><input id="dailyRestockEnabled" type="checkbox" style="flex:0" '+(cfg.enabled?'checked':'')+'>18:00自動入荷を有効化</label></div>'+
+      '<div class="formrow"><input id="dailyNoShadowTarget" type="number" min="0" max="10000" step="1" value="'+esc(cfg.no_shadowban_target_stock??50)+'" placeholder="No shadow ban 恒常在庫"><input id="dailyTopTarget" type="number" min="0" max="10000" step="1" value="'+esc(cfg.top_search_target_stock??50)+'" placeholder="Top Search 恒常在庫"></div>'+
+      '<div class="hint">左: No shadow ban / 右: Top Search。18:00時点の在庫との差分だけを入荷します。</div>'+
+      '<div class="formrow"><input id="dailyNotifyChannel" value="'+esc(cfg.notification_channel_id||"")+'" placeholder="通知先DiscordチャンネルID"></div>'+
+      '<p class="hint">入荷処理が完了したら、このチャンネルへまとめて通知します。</p>'+
+      '<textarea id="dailyNotifyMessage" style="min-height:120px;font:inherit">'+esc(cfg.notification_message||"")+'</textarea>'+
+      '<p class="hint">この文言の下に、通知送信時点で実際に販売可能な在庫数として「No shadow ban 〇個」「Top Search □個」を自動表示します。恒常在庫目標・未達・資金不足などの内部情報は外向け通知には表示しません。</p>'+
+      '<div class="formrow"><button id="saveDailyRestock">設定を保存</button><button id="installDailyRestockPanel">通知パネルを設置 / 更新</button><button id="runDailyRestockNow">今すぐ差分入荷</button></div>'+
+      '</section>'+
+      '<div class="grid">'+
+      '<div class="metric"><small>No shadow ban</small><strong>'+esc(noShadow.current??0)+' / '+esc(noShadow.target??0)+'</strong><div class="hint">不足 '+esc(noShadow.deficit??0)+'個</div></div>'+
+      '<div class="metric"><small>Top Search</small><strong>'+esc(top.current??0)+' / '+esc(top.target??0)+'</strong><div class="hint">不足 '+esc(top.deficit??0)+'個</div></div>'+
+      '<div class="metric"><small>次回入荷</small><strong>18:00 JST</strong></div>'+
+      '<div class="metric"><small>前回ジョブ</small><strong>'+stateText+'</strong></div>'+
+      '</div>'+
+      (state.started_at
+        ?'<section class="card"><strong>前回 / 実行中の入荷結果</strong><div class="grid" style="margin-top:10px">'+
+          '<div class="metric"><small>No shadow ban 入荷数</small><strong>'+esc(state.added_no_shadowban??0)+'個</strong></div>'+
+          '<div class="metric"><small>Top Search 入荷数</small><strong>'+esc(state.added_top_search??0)+'個</strong></div>'+
+          '<div class="metric"><small>最終状態</small><strong>'+esc(state.last_action||state.status||"-")+'</strong></div>'+
+          '<div class="metric"><small>通知</small><strong>'+(state.notified_at?'送信済み':'未送信')+'</strong></div>'+
+          '</div>'+(state.error?'<pre class="bad">'+esc(state.error)+'</pre>':'')+'</section>'
+        :'');
+    document.querySelector("#saveDailyRestock").onclick=()=>saveDailyRestock().catch(e=>alert(e.message));
+    document.querySelector("#installDailyRestockPanel").onclick=()=>installDailyRestockPanelNow().catch(e=>alert(e.message));
+    document.querySelector("#runDailyRestockNow").onclick=()=>runDailyRestockNow().catch(e=>alert(e.message));
   }
   else if(current==="Inventory"){data=await api("/api/x/inventory");main.innerHTML=card(current,data)}
   else if(current==="Orders"){data=await api("/api/x/orders");main.innerHTML=card(current,data)}

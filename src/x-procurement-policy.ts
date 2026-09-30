@@ -29,6 +29,35 @@ export function hasDualTopNoShadowbanEvidence(labels:readonly string[]):boolean{
   return hasTop&&labels.includes("No Shadowban");
 }
 
+export function isTopSearchFallbackEligible(
+  productId:unknown,
+  labels:readonly string[]
+):boolean{
+  // The two explicitly trusted TOP products are allowed even if HStora's
+  // catalog labels change wording. Every other fallback must prove both
+  // TOP-search visibility and No Shadowban capability.
+  if(isPreferredTopHstoraSource(productId)) return true;
+  return hasDualTopNoShadowbanEvidence(labels);
+}
+
+export function hstoraProcurementPriorityTier(
+  productId:unknown,
+  targetClass:ProcurementClass|"INVITE_CAMPAIGN"
+):number{
+  if(targetClass==="NO_SHADOWBAN"){
+    if(isPreferredNoShadowbanHstoraSource(productId)) return 0;
+    if(isPreferredTopHstoraSource(productId)) return 1;
+    return 2;
+  }
+  if(targetClass==="TOP_SEARCH"){
+    return isPreferredTopHstoraSource(productId)?0:1;
+  }
+  return (
+    isPreferredNoShadowbanHstoraSource(productId)||
+    isPreferredTopHstoraSource(productId)
+  )?0:1;
+}
+
 export function evenSplitPurchaseQuantity(value:number):number{
   const quantity=Math.max(0,Math.floor(Number(value)||0));
   if(quantity<2) return 0;

@@ -214,6 +214,8 @@ Current default:
 LTC manual top-up
   -> HStora Main Wallet
   -> HStora balance credit detected by the 1-minute Cron
+  -> procurement budget allocation
+  -> daily 18:00 JST steady-stock restock for No Shadowban / Top Search
   -> HStora official API purchase
 
 Future optional funding path:
@@ -243,6 +245,7 @@ Binance
 LTC Wallet
 HStora
 招待キャンペーン
+18:00入荷
 Inventory
 Orders
 Logs
@@ -250,6 +253,74 @@ Settings
 ```
 
 All `/api/x/*` endpoints require the existing `ADMIN_TOKEN`.
+
+### Procurement budget allocation
+
+The X procurement balance can be split into three strict funding buckets from
+the Funding tab in `/x-admin`:
+
+- Invite campaign
+- No Shadowban
+- Top Search
+
+The three percentages must total 100%. The small-capital default is:
+
+```text
+Invite campaign: 0%
+No Shadowban:   50%
+Top Search:     50%
+```
+
+When the official HStora balance API detects a new wallet credit, only the
+increase is distributed into the three buckets. A category with 0% allocation
+is skipped even if its stock target is below the configured level, so it cannot
+block funded categories from restocking.
+
+Live purchases atomically reserve their category budget before the HStora
+order is submitted. The order quantity is reduced when necessary to stay
+inside the category's remaining budget. Products that are intentionally stored
+50/50 as Top Search and No Shadowban consume both of those budget buckets
+50/50; if either side has no usable budget, that dual-class product is skipped
+instead of borrowing from the other category. Changing the percentages
+rebalances the current HStora wallet balance, and is blocked while an HStora
+order is still pending or the HStora circuit breaker is open.
+
+### Daily 18:00 steady-stock restock
+
+Ordinary X-account vending inventory is replenished once per day at **18:00 JST**.
+The **18:00入荷** tab in `/x-admin` configures independent steady-stock targets for
+No Shadowban and Top Search. At 18:00, Discord-Shiire reads the live class inventory
+and purchases only the difference between the current count and each configured target.
+
+The daily job uses the existing procurement budget allocation, HStora qualification
+guards, and preferred-product priority rules. If an HStora order remains processing,
+the 1-minute Cron continues official order reconciliation until delivery is available.
+Per-product vending stock alerts are suppressed while this daily batch is active so
+customers do not receive fragmented alerts for each supplier order.
+
+After the batch finishes, one aggregate Discord arrival notification is sent to the
+configured channel. Its main message is editable, followed by:
+
+```text
+No shadow ban N個
+Top Search M個
+```
+
+The counts are the actual sellable inventory at notification time
+(`READY_FOR_DELIVERY` only), not the planned deficit and not merely the number added
+during that daily batch. Accounts temporarily held in `VENDING_RESERVED` are excluded
+from the customer-facing count. A persistent notification panel can also be installed
+from the same admin tab; the panel is updated with the same live sellable counts.
+
+Customer-facing Discord messages intentionally do not expose the configured steady-stock
+targets, target shortfalls, category budget state, supplier shortages, or other internal
+procurement status. Those details remain available only in the admin dashboard and audit
+logs.
+
+Invite-campaign inventory remains on the minute-based replenishment path because reward
+delivery must not wait for the next 18:00 window. HStora balance credits are also still
+detected every minute so new LTC funding is assigned to the configured procurement
+budget buckets before the daily restock runs.
 
 ### Safety defaults
 
@@ -269,7 +340,7 @@ seller_quality_mode = trial_only
 Turning Dry Run off through the admin API requires an explicit live-mode confirmation.
 Emergency Stop disables both automatic purchase and automatic procurement.
 
-The current default funding mode is `manual_hstora`. In this mode Discord-Shiire never calls the Binance market-buy path. When the HStora Main Wallet is short, it sends a rate-limited notice, waits for an LTC top-up made through HStora's Wallet UI, and automatically resumes procurement after the official HStora balance API reflects the credit.
+The current default funding mode is `manual_hstora`. In this mode Discord-Shiire never calls the Binance market-buy path. When the HStora Main Wallet is short, it sends a rate-limited notice and waits for an LTC top-up made through HStora's Wallet UI. The 1-minute Cron detects the credited HStora balance and allocates the increase to the configured procurement budget buckets. Invite-campaign stock may continue replenishing on the minute loop, while ordinary No Shadowban / Top Search inventory is replenished at 18:00 JST.
 
 The existing Binance purchase code is preserved for later use. Selecting `binance_auto` is rejected unless the Worker environment also has `BINANCE_AUTO_FUNDING_ENABLED=true`. Live Binance market buys perform the same hard server-side check again, so changing D1 settings alone cannot unlock trading.
 
@@ -384,7 +455,7 @@ The current HStora product schema does not expose the requested seller rating, r
 
 No seller quality value is fabricated.
 
-HStora wallet deposit-address automation is not guessed. The official v1 API currently used by this project exposes balance/catalog/order operations but no deposit-address or deposit-execution endpoint. Therefore the default `manual_hstora` flow deliberately stops only at the HStora Wallet top-up action. After the balance increase is detected, procurement and vending delivery continue automatically. Discord-Shiire does not store a self-custody LTC private key in the Worker for this flow.
+HStora wallet deposit-address automation is not guessed. The official v1 API currently used by this project exposes balance/catalog/order operations but no deposit-address or deposit-execution endpoint. Therefore the default `manual_hstora` flow deliberately stops only at the HStora Wallet top-up action. After the balance increase is detected, the procurement budgets are updated automatically; ordinary No Shadowban / Top Search purchases are then made by the 18:00 JST restock job, while invite-campaign replenishment remains minute-based. Discord-Shiire does not store a self-custody LTC private key in the Worker for this flow.
 
 ### Credential storage
 
@@ -710,7 +781,7 @@ Discord setup required for this feature:
 8. HStora Webhook を使う場合だけ、Webhook URLを `https://<Discord-Shiire Worker>/webhooks/hstora` に設定し、同じ署名Secretを `HSTORA_WEBHOOK_SECRET` として保存する。
 9. Xaccount-Bot の GitHub Repository Variable `VITE_API_BASE_URL` を実際の Xaccount-Bot Worker origin に設定する。
 
-なお、現在の標準フローでは HStora Main Wallet へのLTC入金だけが手動境界です。入金反映後は1分Cronで残高増加を検知し、仕入れ・在庫保存・自販機納品へ自動復帰します。Binance出金APIの安全チェック実装は残していますが、HStoraの入金先を公式APIから取得できないため、自動仕入れエンジンから出金関数を呼びません。専用LTC Walletも未接続です。
+なお、現在の標準フローでは HStora Main Wallet へのLTC入金だけが手動境界です。入金反映後は1分Cronで残高増加を検知して仕入れ予算へ自動配分します。No shadow ban / Top Searchの通常在庫は毎日18:00（JST）に恒常在庫との差分を仕入れ、招待キャンペーン在庫だけは従来どおり随時補充します。Binance出金APIの安全チェック実装は残していますが、HStoraの入金先を公式APIから取得できないため、自動仕入れエンジンから出金関数を呼びません。専用LTC Walletも未接続です。
 
 
 ### Discord-Bot-Factory

@@ -17,3 +17,16 @@ Typecheck and all 94 tests passed, including six new local Worker/D1 runtime tes
 Unresolved Binance intents and ambiguous payment receipts require provider-side reconciliation; automatic inference from balances or public payment-link status is not sufficient. Existing stranded inventory or historical inconsistent rows are not automatically repaired. End-to-end live Binance/HStora/Discord behavior was not exercised. Shared financial lease expires after 30 minutes after an interrupted invocation; persistent intent checks remain in place afterward.
 
 Transaction reference: https://developers.cloudflare.com/d1/worker-api/d1-database/#batch
+
+## Follow-up on new main commits (through c6651ce)
+
+Integrated the new category budgets, supplier priority, daily 18:00 restock and public actual-stock notification changes with the financial integrity branch. The previous PR was still unmerged.
+
+- Reproduced duplicate deposit budget credit after an audit-write failure; budget credit and the observed balance checkpoint now commit atomically. Manual rebalance also updates that checkpoint atomically and uses the procurement lease.
+- Reserved budgets and purchase intent records now share a transaction. A failed order insert leaves funds available, and overlapping reservations cannot overspend a bucket.
+- Malformed successful supplier responses and schema errors do not count as definitive order rejection; ambiguous budget reservations remain held.
+- Reproduced two notifications from overlapping daily continuations. Daily start/continuation now share a database lease; known financial contention retains a running daily state for the next tick instead of prematurely ending the batch. A stable Discord nonce is included for short-window response-loss retries; this is not a promise of indefinite exactly-once delivery.
+- Verified public notification fields show available stock only (reserved stock excluded), with no internal target or budget fields.
+- Fixed the original reconciliation test fixture to include the real HStora success envelope, and assert the persisted PROCESSING state rather than merely observing that no purchase occurred.
+
+Validation: typecheck passed; all 116 tests passed including 12 Worker/D1 integration cases. External funds and production databases were not touched. Existing ambiguous historical payments still require recipient-side reconciliation.

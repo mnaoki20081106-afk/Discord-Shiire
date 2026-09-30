@@ -23,6 +23,7 @@ import {
 import { ensureInviteCampaignGateway, InviteGateway } from "./invite-gateway";
 import { isBinanceAutoFundingServerEnabled } from "./x-funding-mode";
 import { handleHstoraWebhook } from "./x-webhooks";
+import { handleDailyRestockCron } from "./x-daily-restock";
 import {
   handleShiireVendingInteraction,
   handleShiireMainBridge,
@@ -454,7 +455,7 @@ export default {
     }
   },
 
-  async scheduled(_controller:ScheduledController,env:Env,ctx:ExecutionContext){
+  async scheduled(controller:ScheduledController,env:Env,ctx:ExecutionContext){
     ctx.waitUntil((async()=>{
       try{
         await ensureInviteCampaignGateway(env);
@@ -479,10 +480,19 @@ export default {
         }
         if(settings.auto_procurement_enabled){
           try{
-            await runXProcurement(env);
+            // Outside the 18:00 daily batch, only the invite-campaign bucket
+            // is allowed to auto-procure. This call also keeps HStora wallet
+            // balance increases and procurement budgets synchronized.
+            await runXProcurement(env,{targetClasses:["INVITE_CAMPAIGN"]});
           }catch(error){
-            console.error("scheduled X procurement failed",error);
+            console.error("scheduled invite X procurement failed",error);
           }
+        }
+
+        try{
+          await handleDailyRestockCron(env,controller.scheduledTime);
+        }catch(error){
+          console.error("scheduled daily 18:00 restock failed",error);
         }
       }catch(error){
         console.error("scheduled X automation settings load failed",error);

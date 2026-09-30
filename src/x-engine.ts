@@ -8,6 +8,10 @@ import {
   fundingSpendSince,
   getSupplierProductRecord,
   getXSetting,
+  getProcurementBudgets,
+  initializeProcurementBudgetsIfNeeded,
+  creditProcurementBudgets,
+  releaseProcurementBudgetCharges,
   pendingPurchaseOrders,
   purchasedAccountCountForOrder,
   readyInventoryCount,
@@ -22,6 +26,11 @@ import {
   upsertSupplierProduct
 } from "./x-db";
 import { loadXSettings, saveXSettings } from "./x-settings";
+import {
+  procurementBudgetCharges,
+  maxAffordableQuantityForBudget,
+  type ProcurementBudgetAmounts
+} from "./x-budget";
 import { isBinanceAutoFundingServerEnabled } from "./x-funding-mode";
 import {
   calculateLtcPurchaseAllowance,
@@ -43,6 +52,7 @@ import {
   createHstoraOrder,
   lookupHstoraOrder,
   getHstoraProduct,
+  isDefinitiveHstoraOrderRejection,
   type HstoraProduct,
   type HstoraCatalogItem
 } from "./providers/hstora";
@@ -58,11 +68,14 @@ import {
   PREFERRED_TOP_HSTORA_PRODUCT_IDS,
   evenSplitPurchaseQuantity,
   hasDualTopNoShadowbanEvidence,
+  hstoraProcurementPriorityTier,
+  isTopSearchFallbackEligible,
   isPreferredNoShadowbanHstoraSource,
   isPreferredTopHstoraSource,
   procurementClassOverrideForHstoraProduct
 } from "./x-procurement-policy";
 import { notifyDiscord } from "./x-alerts";
+import { isDailyRestockBatchActive } from "./x-daily-restock-state";
 import { notifyShiireVendingStockArrival } from "./shiire-vending";
 import {
   getInviteCampaignSettings,
@@ -83,7 +96,22 @@ export type XRunResult={
   details?:unknown;
 };
 
-type ProcurementTarget=ProcurementClass|"INVITE_CAMPAIGN";
+export type ProcurementTarget=ProcurementClass|"INVITE_CAMPAIGN";
+
+export type XProcurementRunOptions={
+  targetClasses?:readonly ProcurementTarget[];
+  targetStockOverride?:Partial<Record<ProcurementTarget,number>>;
+};
+
+function procurementBudgetPercentages(
+  settings:Awaited<ReturnType<typeof loadXSettings>>
+){
+  return {
+    INVITE_CAMPAIGN:settings.invite_campaign_budget_percent,
+    NO_SHADOWBAN:settings.no_shadowban_budget_percent,
+    TOP_SEARCH:settings.top_search_budget_percent
+  };
+}
 
 function jstPeriodStarts(now=Date.now()){
   const JST=9*60*60*1000;
@@ -121,7 +149,7 @@ export async function reconcilePendingXOrders(env:Env){
           orderResponse:order
         });
         const added=stored.inserted;
-        if(added>0){
+        if(added>0&&!(await isDailyRestockBatchActive(env))){
           await notifyShiireVendingStockArrival(
             env,
             String(row.supplier_product_id),
@@ -239,7 +267,8 @@ function catalogBasePriceJpy(
 async function selectCandidate(
   env:Env,
   quantityLimit:number,
-  targetClass:ProcurementTarget
+  targetClass:ProcurementTarget,
+  budgetAvailable?:ProcurementBudgetAmounts
 ){
   const settings=await loadXSettings(env);
   const trustedApprovedIds=[...new Set([
@@ -285,6 +314,7 @@ async function selectCandidate(
     if(targetClass==="TOP_SEARCH"){
       if(forceNoShadowban) continue;
       if(!hasTop) continue;
+      if(!isTopSearchFallbackEligible(product.id,visibility.labels)) continue;
       if(baseJpy===null||baseJpy>settings.max_unit_price_jpy) continue;
     }else if(targetClass==="NO_SHADOWBAN"){
       if(hasTop&&!dualCapability&&!forceNoShadowban) continue;
@@ -335,8 +365,12 @@ async function selectCandidate(
     );
     const fullForceNoShadowban=
       procurementClassOverrideForHstoraProduct(full.id)==="NO_SHADOWBAN";
+    const candidateQuantityLimit=
+      targetClass!=="INVITE_CAMPAIGN"&&fullDualCapability&&!fullForceNoShadowban
+        ?Math.min(settings.max_batch_purchase,Math.max(2,quantityLimit*2))
+        :quantityLimit;
     let plannedQuantity=Math.min(
-      quantityLimit,
+      candidateQuantityLimit,
       Math.max(1,trialCap),
       Math.max(0,Number(full.stock_available??0))
     );
@@ -434,30 +468,10 @@ async function selectCandidate(
   }
 
   candidates.sort((a,b)=>{
-    if(targetClass==="INVITE_CAMPAIGN"){
-      const aPreferred=isPreferredTopHstoraSource(a.product.id)||isPreferredNoShadowbanHstoraSource(a.product.id);
-      const bPreferred=isPreferredTopHstoraSource(b.product.id)||isPreferredNoShadowbanHstoraSource(b.product.id);
-      if(aPreferred!==bPreferred) return aPreferred?-1:1;
-    }else if(targetClass==="NO_SHADOWBAN"){
-      const aPreferredNoShadow=isPreferredNoShadowbanHstoraSource(a.product.id);
-      const bPreferredNoShadow=isPreferredNoShadowbanHstoraSource(b.product.id);
-      if(aPreferredNoShadow!==bPreferredNoShadow){
-        return aPreferredNoShadow?-1:1;
-      }
-      const aPreferredTop=isPreferredTopHstoraSource(a.product.id);
-      const bPreferredTop=isPreferredTopHstoraSource(b.product.id);
-      if(aPreferredTop!==bPreferredTop) return aPreferredTop?-1:1;
-    }else{
-      const aPreferred=isPreferredTopHstoraSource(a.product.id);
-      const bPreferred=isPreferredTopHstoraSource(b.product.id);
-      if(aPreferred!==bPreferred) return aPreferred?-1:1;
-    }
-
-    if(targetClass==="NO_SHADOWBAN"){
-      const aDual=hasDualTopNoShadowbanEvidence(a.q.search_visibility);
-      const bDual=hasDualTopNoShadowbanEvidence(b.q.search_visibility);
-      if(aDual!==bDual) return aDual?-1:1;
-    }
+    const tier=
+      hstoraProcurementPriorityTier(a.product.id,targetClass)-
+      hstoraProcurementPriorityTier(b.product.id,targetClass);
+    if(tier!==0) return tier;
 
     const aPrice=
       targetClass==="NO_SHADOWBAN"
@@ -469,6 +483,7 @@ async function selectCandidate(
         :Number(b.q.unit_price_jpy??Infinity);
     const price=aPrice-bPrice;
     if(price!==0) return price;
+
     const stock=
       Number(b.product.stock_available??0)-
       Number(a.product.stock_available??0);
@@ -505,7 +520,59 @@ async function selectCandidate(
     }
   });
 
-  return candidates[0]??null;
+  if(!budgetAvailable) return candidates[0]??null;
+
+  for(const candidate of candidates){
+    const forceNoShadowban=
+      procurementClassOverrideForHstoraProduct(candidate.product.id)==="NO_SHADOWBAN";
+    const splitAcrossClasses=
+      targetClass!=="INVITE_CAMPAIGN"&&
+      !forceNoShadowban&&
+      hasDualTopNoShadowbanEvidence(candidate.q.search_visibility);
+    const step=splitAcrossClasses?2:1;
+    const classOverride=
+      procurementClassOverrideForHstoraProduct(candidate.product.id)??undefined;
+
+    for(
+      let affordableQuantity=candidate.plannedQuantity;
+      affordableQuantity>=step;
+      affordableQuantity-=step
+    ){
+      const budgetQualification=qualifyHstoraProduct(
+        candidate.product,
+        qualificationSettings,
+        affordableQuantity,
+        Date.now(),
+        classOverride
+      );
+      const supportsTarget=
+        targetClass==="INVITE_CAMPAIGN"
+          ?Boolean(budgetQualification.procurement_class)
+          :budgetQualification.procurement_class===targetClass||
+            (
+              targetClass==="NO_SHADOWBAN"&&
+              budgetQualification.procurement_class==="TOP_SEARCH"&&
+              hasDualTopNoShadowbanEvidence(
+                budgetQualification.search_visibility
+              )
+            );
+      if(!budgetQualification.qualified||!supportsTarget) continue;
+
+      const unitPriceUsd=Number(budgetQualification.unit_price_source);
+      const maxAffordable=maxAffordableQuantityForBudget(
+        targetClass,
+        splitAcrossClasses,
+        unitPriceUsd,
+        affordableQuantity,
+        budgetAvailable
+      );
+      if(maxAffordable>=affordableQuantity){
+        return candidate;
+      }
+    }
+  }
+
+  return null;
 }
 
 async function fundingWindowRemaining(env:Env,limit:number,since:number){
@@ -540,22 +607,59 @@ async function checkLtcPriceGuard(env:Env,current:number,maxJumpPercent:number){
 }
 
 type BalanceGuard={hstoraUsd:number;allowedDecreaseUsd:number;updatedAt:number};
-async function checkHstoraBalanceGuard(env:Env,current:number){
+async function checkHstoraBalanceGuard(
+  env:Env,
+  current:number,
+  settings:Awaited<ReturnType<typeof loadXSettings>>
+){
+  const percentages=procurementBudgetPercentages(settings);
+  const existingBudget=await getProcurementBudgets(env);
+  const budgetWasInitialized=existingBudget.initialized;
+  const budgetBefore=budgetWasInitialized
+    ?existingBudget
+    :await initializeProcurementBudgetsIfNeeded(
+      env,
+      current,
+      percentages
+    );
   const previous=await getXSetting<BalanceGuard>(env,"x_hstora_balance_guard");
   let remainingAllowed=0;
   if(previous&&Number.isFinite(previous.hstoraUsd)){
     const allowed=Math.max(0,Number(previous.allowedDecreaseUsd??0));
     const delta=current-previous.hstoraUsd;
     if(delta>0.01){
+      // On the first run after this feature is deployed, the current HStora
+      // balance is already used to seed all three buckets. Do not add the
+      // same balance delta again from the legacy balance guard.
+      const budgetAfter=budgetWasInitialized
+        ?await creditProcurementBudgets(
+          env,
+          delta,
+          percentages,
+          {hstoraUsd:current,allowedDecreaseUsd:allowed,updatedAt:Date.now()}
+        )
+        :budgetBefore;
       await auditX(env,{
         kind:"HSTORA_BALANCE_INCREASE",
         message:"HStora wallet balance increased.",
-        details:{previous:previous.hstoraUsd,current,increaseUsd:delta}
+        details:{
+          previous:previous.hstoraUsd,
+          current,
+          increaseUsd:delta,
+          budgetBefore:budgetBefore.available,
+          budgetAfter:budgetAfter.available,
+          percentages
+        }
       });
       await notifyDiscord(env,{
         title:"HStora入金完了",
-        message:"HStora Main Wallet残高の増加を公式Balance APIで確認しました。",
-        details:{increaseUsd:delta,currentBalanceUsd:current}
+        message:"HStora Main Wallet残高の増加を確認し、設定割合で仕入れ予算へ自動配分しました。",
+        details:{
+          increaseUsd:delta,
+          currentBalanceUsd:current,
+          budget:budgetAfter.available,
+          percentages
+        }
       }).catch(()=>undefined);
       await setXSetting(env,"x_manual_hstora_topup_notice",{
         neededUsd:0,
@@ -1411,12 +1515,21 @@ async function handleHstoraFundingNeed(
   });
 }
 
-export async function runXProcurement(env:Env):Promise<XRunResult>{
-  return withFinancialRunLock(env,lease=>runXProcurementLocked(env,lease));
+export async function runXProcurement(
+  env:Env,
+  options:XProcurementRunOptions={}
+):Promise<XRunResult>{
+  return withFinancialRunLock(env,lease=>runXProcurementLocked(env,lease,options));
 }
 
-async function runXProcurementLocked(env:Env,assertLease:AssertFinancialLease):Promise<XRunResult>{
+async function runXProcurementLocked(
+  env:Env,
+  assertLease:AssertFinancialLease,
+  options:XProcurementRunOptions
+):Promise<XRunResult>{
   const settings=await loadXSettings(env);
+  const allowTarget=(target:ProcurementTarget)=>
+    !options.targetClasses||options.targetClasses.includes(target);
   if(settings.emergency_stop) return {action:"EMERGENCY_STOP",dryRun:settings.dry_run};
 
   const breakerKeys=[
@@ -1460,7 +1573,7 @@ async function runXProcurementLocked(env:Env,assertLease:AssertFinancialLease):P
     const observedHstora=await getHstoraBalance(env);
     if(
       String(observedHstora.currency).toUpperCase()==="USD"&&
-      !await checkHstoraBalanceGuard(env,Number(observedHstora.balance))
+      !await checkHstoraBalanceGuard(env,Number(observedHstora.balance),settings)
     ){
       return {action:"UNEXPECTED_BALANCE_CIRCUIT_BREAKER",dryRun:settings.dry_run};
     }
@@ -1478,23 +1591,65 @@ async function runXProcurementLocked(env:Env,assertLease:AssertFinancialLease):P
     inviteCampaignStockCount(env)
   ]);
 
-  let targetClass:ProcurementTarget|null=null;
-  let classInventory=0;
-  let classTarget=0;
+  const budgetSnapshot=await getProcurementBudgets(env);
+  const targetOptions:Array<{
+    targetClass:ProcurementTarget;
+    classInventory:number;
+    classTarget:number;
+    budgetUsd:number;
+  }> = [];
 
-  if(campaignSettings.enabled&&campaignInventory<campaignSettings.target_stock){
-    targetClass="INVITE_CAMPAIGN";
-    classInventory=campaignInventory;
-    classTarget=campaignSettings.target_stock;
-  }else if(topInventory<=settings.reorder_point){
-    targetClass="TOP_SEARCH";
-    classInventory=topInventory;
-    classTarget=settings.target_stock;
-  }else if(noShadowInventory<=settings.no_shadowban_reorder_point){
-    targetClass="NO_SHADOWBAN";
-    classInventory=noShadowInventory;
-    classTarget=settings.no_shadowban_target_stock;
-  }else{
+  const inviteTarget=
+    options.targetStockOverride?.INVITE_CAMPAIGN??campaignSettings.target_stock;
+  const topTarget=
+    options.targetStockOverride?.TOP_SEARCH??settings.target_stock;
+  const noShadowTarget=
+    options.targetStockOverride?.NO_SHADOWBAN??settings.no_shadowban_target_stock;
+
+  if(
+    allowTarget("INVITE_CAMPAIGN")&&
+    campaignSettings.enabled&&
+    campaignInventory<inviteTarget
+  ){
+    targetOptions.push({
+      targetClass:"INVITE_CAMPAIGN",
+      classInventory:campaignInventory,
+      classTarget:inviteTarget,
+      budgetUsd:budgetSnapshot.available.INVITE_CAMPAIGN
+    });
+  }
+  if(
+    allowTarget("TOP_SEARCH")&&
+    (
+      options.targetStockOverride?.TOP_SEARCH!==undefined
+        ?topInventory<topTarget
+        :topInventory<=settings.reorder_point
+    )
+  ){
+    targetOptions.push({
+      targetClass:"TOP_SEARCH",
+      classInventory:topInventory,
+      classTarget:topTarget,
+      budgetUsd:budgetSnapshot.available.TOP_SEARCH
+    });
+  }
+  if(
+    allowTarget("NO_SHADOWBAN")&&
+    (
+      options.targetStockOverride?.NO_SHADOWBAN!==undefined
+        ?noShadowInventory<noShadowTarget
+        :noShadowInventory<=settings.no_shadowban_reorder_point
+    )
+  ){
+    targetOptions.push({
+      targetClass:"NO_SHADOWBAN",
+      classInventory:noShadowInventory,
+      classTarget:noShadowTarget,
+      budgetUsd:budgetSnapshot.available.NO_SHADOWBAN
+    });
+  }
+
+  if(targetOptions.length===0){
     return {
       action:"INVENTORY_OK",
       dryRun:settings.dry_run,
@@ -1503,47 +1658,119 @@ async function runXProcurementLocked(env:Env,assertLease:AssertFinancialLease):P
         topSearch:topInventory,
         noShadowban:noShadowInventory,
         inviteCampaign:campaignInventory,
-        inviteCampaignTarget:campaignSettings.target_stock
+        inviteCampaignTarget:campaignSettings.target_stock,
+        procurementBudget:budgetSnapshot
       }
     };
   }
 
-  const need=Math.max(0,classTarget-classInventory);
-  let batch=Math.min(need,settings.max_batch_purchase);
-  if(batch<=0){
+  let targetClass:ProcurementTarget|null=null;
+  let classInventory=0;
+  let classTarget=0;
+  let classBudgetUsd=0;
+  let batch=0;
+  type ProcurementCandidate={
+    product:HstoraProduct;
+    q:ReturnType<typeof qualifyHstoraProduct>;
+    plannedQuantity:number;
+    priorPurchases:number;
+  };
+  let candidate:ProcurementCandidate|null=null;
+  const skippedTargets:Array<Record<string,unknown>>=[];
+
+  for(const option of targetOptions){
+    if(option.budgetUsd<=0.00000001){
+      skippedTargets.push({
+        targetClass:option.targetClass,
+        reason:"BUDGET_ZERO",
+        budgetUsd:option.budgetUsd
+      });
+      continue;
+    }
+
+    const need=Math.max(0,option.classTarget-option.classInventory);
+    const plannedBatch=Math.min(need,settings.max_batch_purchase);
+    if(plannedBatch<=0) continue;
+
+    let possible:ProcurementCandidate|null=null;
+    try{
+      possible=await selectCandidate(
+        env,
+        plannedBatch,
+        option.targetClass,
+        budgetSnapshot.available
+      );
+    }catch(error){
+      const message=error instanceof Error?error.message:String(error);
+      if(message==="PRODUCT_PRICE_JUMP"){
+        return {
+          action:"PRODUCT_PRICE_CIRCUIT_BREAKER",
+          dryRun:settings.dry_run,
+          inventory
+        };
+      }
+      await setCircuitBreaker(env,"hstora","OPEN",message);
+      await notifyDiscord(env,{
+        title:"Circuit Breaker: HStora",
+        message:"HStora APIの候補取得に失敗したため自動仕入れを停止しました。",
+        level:"error"
+      }).catch(()=>undefined);
+      return {
+        action:"HSTORA_API_BLOCKED",
+        dryRun:settings.dry_run,
+        inventory
+      };
+    }
+
+    if(!possible){
+      skippedTargets.push({
+        targetClass:option.targetClass,
+        reason:"NO_QUALIFIED_PRODUCT",
+        budgetUsd:option.budgetUsd
+      });
+      continue;
+    }
+
+    targetClass=option.targetClass;
+    classInventory=option.classInventory;
+    classTarget=option.classTarget;
+    classBudgetUsd=option.budgetUsd;
+    batch=plannedBatch;
+    candidate=possible;
+    break;
+  }
+
+  if(!targetClass||!candidate){
+    const allZero=targetOptions.every(
+      option=>option.budgetUsd<=0.00000001
+    );
     return {
-      action:"INVENTORY_OK",
+      action:allZero
+        ?"PROCUREMENT_BUDGET_EXHAUSTED"
+        :"NO_AFFORDABLE_HSTORA_PRODUCT",
       dryRun:settings.dry_run,
       inventory,
-      details:{targetClass,classInventory,classTarget}
+      details:{
+        procurementBudget:budgetSnapshot,
+        targetOptions,
+        skippedTargets
+      }
     };
   }
 
-  let candidate;
-  try{candidate=await selectCandidate(env,batch,targetClass);}
-  catch(error){
-    const message=error instanceof Error?error.message:String(error);
-    if(message==="PRODUCT_PRICE_JUMP"){
-      return {action:"PRODUCT_PRICE_CIRCUIT_BREAKER",dryRun:settings.dry_run,inventory};
-    }
-    await setCircuitBreaker(env,"hstora","OPEN",message);
-    await notifyDiscord(env,{
-      title:"Circuit Breaker: HStora",
-      message:"HStora APIの候補取得に失敗したため自動仕入れを停止しました。",
-      level:"error"
-    }).catch(()=>undefined);
-    return {action:"HSTORA_API_BLOCKED",dryRun:settings.dry_run,inventory};
-  }
   const refreshedClassInventory=await readyInventoryCountByClass(
     env,
     targetClass
   );
+  const overrideTarget=options.targetStockOverride?.[targetClass];
   const refreshedReorder=
-    targetClass==="INVITE_CAMPAIGN"
-      ?Math.max(0,campaignSettings.target_stock-1)
-      :targetClass==="TOP_SEARCH"
-        ?settings.reorder_point
-        :settings.no_shadowban_reorder_point;
+    overrideTarget!==undefined
+      ?Math.max(0,overrideTarget-1)
+      :targetClass==="INVITE_CAMPAIGN"
+        ?Math.max(0,campaignSettings.target_stock-1)
+        :targetClass==="TOP_SEARCH"
+          ?settings.reorder_point
+          :settings.no_shadowban_reorder_point;
   if(refreshedClassInventory>refreshedReorder){
     return {
       action:"INVENTORY_RECLASSIFIED_OK",
@@ -1552,7 +1779,8 @@ async function runXProcurementLocked(env:Env,assertLease:AssertFinancialLease):P
       details:{
         targetClass,
         before:classInventory,
-        after:refreshedClassInventory
+        after:refreshedClassInventory,
+        procurementBudget:budgetSnapshot
       }
     };
   }
@@ -1563,52 +1791,30 @@ async function runXProcurementLocked(env:Env,assertLease:AssertFinancialLease):P
       action:"INVENTORY_RECLASSIFIED_OK",
       dryRun:settings.dry_run,
       inventory:await readyInventoryCount(env),
-      details:{targetClass,classInventory:refreshedClassInventory,classTarget}
-    };
-  }
-
-  if(!candidate){
-    return {
-      action:"NO_QUALIFIED_HSTORA_PRODUCT",
-      dryRun:settings.dry_run,
-      inventory,
       details:{
-        sellerQualityMode:settings.seller_quality_mode,
-        strategy:settings.procurement_strategy,
         targetClass,
-        maxUnitPrice:
-          targetClass==="TOP_SEARCH"
-            ?{currency:"JPY",value:settings.max_unit_price_jpy}
-            :targetClass==="NO_SHADOWBAN"
-              ?{currency:"USD",value:settings.max_no_shadowban_unit_price_usd}
-              :{
-                topSearch:{currency:"JPY",value:settings.max_unit_price_jpy},
-                noShadowban:{currency:"USD",value:settings.max_no_shadowban_unit_price_usd}
-              },
-        searchVisibilityRequirement:
-          targetClass==="TOP_SEARCH"
-            ?"TOP Search / TOP+Latest"
-            :targetClass==="NO_SHADOWBAN"
-              ?"No Shadowban without TOP Search"
-              :"TOP Search / TOP+Latest または No Shadowban",
-        note:settings.seller_quality_mode==="strict_api"
-          ?"HStora v1 APIにはseller rating/reviews/sales/dispute rateがないためstrict_apiでは自動購入しません。"
-          :"80円以下のX TOP-search条件に一致する商品が見つかりませんでした。"
+        classInventory:refreshedClassInventory,
+        classTarget,
+        procurementBudget:budgetSnapshot
       }
     };
   }
 
   const fresh=await getHstoraProduct(env,Number(candidate.product.id));
   const prior=await successfulPurchaseCountForProduct(env,String(fresh.id));
-  const trialCap=prior===0?settings.trial_purchase_count:batch;
   const freshVisibility=detectSearchVisibility(fresh);
   const freshForceNoShadowban=
     procurementClassOverrideForHstoraProduct(fresh.id)==="NO_SHADOWBAN";
   const splitAcrossClasses=
     !freshForceNoShadowban&&
     hasDualTopNoShadowbanEvidence(freshVisibility.labels);
+  const purchaseBatch=
+    targetClass!=="INVITE_CAMPAIGN"&&splitAcrossClasses
+      ?Math.min(settings.max_batch_purchase,Math.max(2,batch*2))
+      :batch;
+  const trialCap=prior===0?settings.trial_purchase_count:purchaseBatch;
   let quantity=Math.min(
-    batch,
+    purchaseBatch,
     Math.max(1,trialCap),
     Math.max(0,Number(fresh.stock_available??0))
   );
@@ -1624,9 +1830,9 @@ async function runXProcurementLocked(env:Env,assertLease:AssertFinancialLease):P
     };
   }
 
-  // Recalculate the effective tier price using the quantity that will really
-  // be ordered. This prevents a 20-unit discount from qualifying a 10-unit
-  // trial purchase above the JPY ceiling.
+  // Recalculate the effective tier price whenever the budget reduces the
+  // quantity. A smaller order can lose a volume discount, so affordability
+  // must be checked again until the quantity and tier price are stable.
   const trustedApprovedIds=[...new Set([
     ...PREFERRED_TOP_HSTORA_PRODUCT_IDS,
     ...PREFERRED_NO_SHADOWBAN_HSTORA_PRODUCT_IDS,
@@ -1638,15 +1844,16 @@ async function runXProcurementLocked(env:Env,assertLease:AssertFinancialLease):P
       :settings;
   const classOverride=
     procurementClassOverrideForHstoraProduct(fresh.id)??undefined;
-  const policyQualification=qualifyHstoraProduct(
-    fresh,
-    qualificationSettings,
-    quantity,
-    Date.now(),
-    classOverride
-  );
-  const q=
-    classOverride
+
+  const qualifyForQuantity=(orderQuantity:number)=>{
+    const policyQualification=qualifyHstoraProduct(
+      fresh,
+      qualificationSettings,
+      orderQuantity,
+      Date.now(),
+      classOverride
+    );
+    return classOverride
       ?{
         ...policyQualification,
         evidence:[
@@ -1655,6 +1862,43 @@ async function runXProcurementLocked(env:Env,assertLease:AssertFinancialLease):P
         ]
       }
       :policyQualification;
+  };
+
+  let q=qualifyForQuantity(quantity);
+  while(quantity>0){
+    const budgetUnitSource=Number(q.unit_price_source);
+    if(!Number.isFinite(budgetUnitSource)||budgetUnitSource<=0) break;
+
+    const nextQuantity=maxAffordableQuantityForBudget(
+      targetClass,
+      splitAcrossClasses,
+      budgetUnitSource,
+      quantity,
+      budgetSnapshot.available
+    );
+    if(nextQuantity===quantity) break;
+
+    quantity=nextQuantity;
+    if(quantity<=0){
+      return {
+        action:"PROCUREMENT_BUDGET_EXHAUSTED",
+        dryRun:settings.dry_run,
+        inventory,
+        productId:Number(fresh.id),
+        details:{
+          targetClass,
+          availableBudgetUsd:classBudgetUsd,
+          unitPriceUsd:budgetUnitSource,
+          requiredBudgetClasses:splitAcrossClasses
+            ?["TOP_SEARCH","NO_SHADOWBAN"]
+            :[targetClass],
+          procurementBudget:budgetSnapshot
+        }
+      };
+    }
+    q=qualifyForQuantity(quantity);
+  }
+
   const supportsTarget=
     targetClass==="INVITE_CAMPAIGN"
       ?Boolean(q.procurement_class)
@@ -1709,6 +1953,11 @@ async function runXProcurementLocked(env:Env,assertLease:AssertFinancialLease):P
 
   const unitSource=Number(q.unit_price_source);
   const totalSource=unitSource*quantity;
+  const budgetCharges=procurementBudgetCharges(
+    targetClass,
+    storedSplitAcrossClasses,
+    totalSource
+  );
   let supplierBalance;
   try{supplierBalance=await getHstoraBalance(env);}
   catch(error){
@@ -1718,7 +1967,7 @@ async function runXProcurementLocked(env:Env,assertLease:AssertFinancialLease):P
 
   if(
     String(supplierBalance.currency).toUpperCase()==="USD"&&
-    !await checkHstoraBalanceGuard(env,Number(supplierBalance.balance))
+    !await checkHstoraBalanceGuard(env,Number(supplierBalance.balance),settings)
   ){
     return {action:"UNEXPECTED_BALANCE_CIRCUIT_BREAKER",dryRun:settings.dry_run,inventory};
   }
@@ -1755,32 +2004,59 @@ async function runXProcurementLocked(env:Env,assertLease:AssertFinancialLease):P
       requested:quantity,
       productId:Number(fresh.id),
       unitPriceJpy:q.unit_price_jpy,
-      details:{qualification:q,totalSource,currency:fresh.currency,trial:prior===0}
+      details:{
+        qualification:q,
+        totalSource,
+        currency:fresh.currency,
+        trial:prior===0,
+        targetClass,
+        availableBudgetUsd:classBudgetUsd,
+        budgetCharges,
+        procurementBudget:budgetSnapshot
+      }
     };
   }
 
   await assertLease();
-  const recordId=await createPurchaseOrderRecord(env,{
-    supplier:"hstora",
-    supplierProductId:String(fresh.id),
-    quantity,
-    unitPrice:unitSource,
-    totalAmount:totalSource,
-    currency:String(fresh.currency),
-    externalOrderId,
-    idempotencyKey,
-    procurementClass:storedProcurementClass,
-    deliverySplitMode:
-      storedSplitAcrossClasses
-        ?DUAL_TOP_SPLIT_MODE
-        :null,
-    dryRun:false
-  });
+  let recordId:string;
+  try{
+    recordId=await createPurchaseOrderRecord(env,{
+      supplier:"hstora",
+      supplierProductId:String(fresh.id),
+      quantity,
+      unitPrice:unitSource,
+      totalAmount:totalSource,
+      currency:String(fresh.currency),
+      externalOrderId,
+      idempotencyKey,
+      procurementClass:storedProcurementClass,
+      deliverySplitMode:
+        storedSplitAcrossClasses
+          ?DUAL_TOP_SPLIT_MODE
+          :null,
+      dryRun:false,
+      budgetCharges
+    });
+  }catch(error){
+    if(error instanceof Error&&error.message==="PROCUREMENT_BUDGET_CHANGED"){
+      return {action:"PROCUREMENT_BUDGET_CHANGED",dryRun:false,inventory};
+    }
+    throw error;
+  }
+
 
   await notifyDiscord(env,{
     title:"仕入れ開始",
     message:"HStoraでXアカウント仕入れを開始します。",
-    details:{productId:fresh.id,quantity,unitPriceJpy:q.unit_price_jpy,trial:prior===0}
+    details:{
+      productId:fresh.id,
+      quantity,
+      unitPriceJpy:q.unit_price_jpy,
+      trial:prior===0,
+      budgetClass:targetClass,
+      budgetReservedUsd:totalSource,
+      budgetCharges
+    }
   }).catch(()=>undefined);
 
   try{
@@ -1803,7 +2079,7 @@ async function runXProcurementLocked(env:Env,assertLease:AssertFinancialLease):P
       })
       :null;
     const added=stored?.inserted??0;
-    if(added>0){
+    if(added>0&&!(await isDailyRestockBatchActive(env))){
       await notifyShiireVendingStockArrival(
         env,
         String(fresh.id),
@@ -1876,7 +2152,7 @@ async function runXProcurementLocked(env:Env,assertLease:AssertFinancialLease):P
         })
         :null;
       const added=stored?.inserted??0;
-      if(added>0){
+      if(added>0&&!(await isDailyRestockBatchActive(env))){
         await notifyShiireVendingStockArrival(
           env,
           String(fresh.id),
@@ -1926,13 +2202,27 @@ async function runXProcurementLocked(env:Env,assertLease:AssertFinancialLease):P
     }catch{}
     if(!recovered){
       const code=error instanceof Error?error.message.slice(0,120):"HSTORA_PURCHASE_FAILED";
-      await updatePurchaseOrderRecord(env,recordId,{status:"UNKNOWN",errorCode:code});
+      const definitiveRejection=isDefinitiveHstoraOrderRejection(error);
+      if(definitiveRejection){
+        await releaseProcurementBudgetCharges(env,budgetCharges);
+      }
+      await updatePurchaseOrderRecord(env,recordId,{status:definitiveRejection?"FAILED":"UNKNOWN",errorCode:code});
+
       await setCircuitBreaker(env,"hstora","OPEN",code);
       await notifyDiscord(env,{
         title:"Circuit Breaker: HStora購入",
-        message:"注文結果をlookupでも確認できなかったため停止しました。手動確認が必要です。",
+        message:definitiveRejection
+          ?"HStoraが注文を確定拒否したため、予約していたカテゴリ予算を戻して停止しました。"
+          :"注文結果をlookupでも確認できなかったため停止しました。予算は二重使用防止のため予約状態を維持します。",
         level:"error",
-        details:{externalOrderId,code}
+        details:{
+          externalOrderId,
+          code,
+          budgetClass:targetClass,
+          budgetReservedUsd:totalSource,
+          budgetCharges,
+          budgetReleased:definitiveRejection
+        }
       }).catch(()=>undefined);
     }
     return {action:"HSTORA_PURCHASE_FAILED",dryRun:false,inventory,productId:Number(fresh.id)};
