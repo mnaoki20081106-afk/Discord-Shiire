@@ -918,6 +918,18 @@ export async function readyInventoryCountByClass(
   return Math.max(0,Number(row?.quantity??0));
 }
 
+export async function availableInventoryCountByClass(
+  env:Env,
+  procurementClass:"TOP_SEARCH"|"NO_SHADOWBAN"|"INVITE_CAMPAIGN"
+):Promise<number>{
+  await ensureXSchema(env);
+  const row=await env.DB.prepare(
+    "SELECT COUNT(*) AS quantity FROM purchased_accounts "+
+    "WHERE procurement_class=? AND status='READY_FOR_DELIVERY'"
+  ).bind(procurementClass).first<{quantity:number}>();
+  return Math.max(0,Number(row?.quantity??0));
+}
+
 export async function readyInventoryCount(env:Env):Promise<number>{
   await ensureXSchema(env);
   const row=await env.DB.prepare(
