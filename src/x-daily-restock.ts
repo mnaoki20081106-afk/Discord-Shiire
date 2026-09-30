@@ -11,6 +11,7 @@ import {
   type XRunResult
 } from "./x-engine";
 import { loadXSettings } from "./x-settings";
+import { isDailyRestockScheduleMinute } from "./x-daily-restock-policy";
 import {
   jstDateKey,
   loadDailyRestockConfig,
@@ -382,10 +383,17 @@ export async function installDailyRestockPanel(env:Env){
     messageId=String(message.id);
   }
 
-  const saved=await saveDailyRestockConfig(env,{
-    panel_channel_id:config.notification_channel_id,
-    panel_message_id:messageId
-  });
+  const saved=await saveDailyRestockConfig(
+    env,
+    {
+      panel_channel_id:config.notification_channel_id,
+      panel_message_id:messageId
+    },
+    {
+      top_search_target_stock:config.top_search_target_stock,
+      no_shadowban_target_stock:config.no_shadowban_target_stock
+    }
+  );
   await auditX(env,{
     kind:"DAILY_RESTOCK_PANEL_INSTALLED",
     message:"Daily restock notification panel was installed or updated.",
@@ -593,8 +601,7 @@ export async function handleDailyRestockCron(
     return continueDailyRestock(env);
   }
 
-  const d=new Date(scheduledTime+9*60*60*1000);
-  if(d.getUTCHours()===18&&d.getUTCMinutes()===0){
+  if(isDailyRestockScheduleMinute(scheduledTime)){
     return startDailyRestock(env,scheduledTime,false);
   }
   return {action:"NO_DAILY_RESTOCK_CRON_ACTION"};
