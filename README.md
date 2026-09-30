@@ -306,12 +306,14 @@ No shadow ban N個
 Top Search M個
 ```
 
-The counts are based on accounts actually stored during that daily batch, rather than
-just the target-stock deficit. A persistent notification panel can also be installed
-from the same admin tab; the panel is updated with the latest daily result after each
-completed or partial restock. If supplier stock, category budget, or another guard
-prevents a target from being reached, the batch is marked partial and the notification
-shows the actual received counts without pretending the missing stock was delivered.
+The counts are the actual sellable inventory at notification time
+(`READY_FOR_DELIVERY` only), not the planned deficit and not merely the number added
+during that daily batch. Accounts temporarily held in `VENDING_RESERVED` are excluded
+from the customer-facing count. A persistent notification panel can also be installed
+from the same admin tab; the panel is updated with the same live sellable counts after
+each completed or partial restock. If supplier stock, category budget, or another guard
+prevents a target from being reached, the notification therefore shows the lower
+real-world inventory instead of pretending the steady-stock target was reached.
 
 Invite-campaign inventory remains on the minute-based replenishment path because reward
 delivery must not wait for the next 18:00 window. HStora balance credits are also still
