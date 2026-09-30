@@ -14,7 +14,8 @@ import {
   getProcurementBudgets,
   rebalanceProcurementBudgets,
   pendingPurchaseOrders,
-  setXSetting
+  setXSetting,
+  circuitState
 } from "./x-db";
 import {
   confirmPendingDirectLtcFunding,
@@ -229,6 +230,14 @@ export async function handleXAdminApi(
       },409);
     }
 
+    const hstoraBreaker=await circuitState(env,"hstora");
+    if(String(hstoraBreaker?.state??"")==="OPEN"){
+      return json({
+        error:"HSTORA_CIRCUIT_BREAKER_OPEN",
+        message:"HStoraの停止状態を確認・解消してから予算割合を変更してください。"
+      },409);
+    }
+
     const inviteCampaignPercent=Number(raw.inviteCampaignPercent);
     const noShadowbanPercent=Number(raw.noShadowbanPercent);
     const topSearchPercent=Number(raw.topSearchPercent);
@@ -290,6 +299,13 @@ export async function handleXAdminApi(
         error:"PENDING_HSTORA_ORDER_EXISTS",
         message:"処理中のHStora注文があるため、現在残高での再配分はできません。",
         pendingOrders:pending.length
+      },409);
+    }
+    const hstoraBreaker=await circuitState(env,"hstora");
+    if(String(hstoraBreaker?.state??"")==="OPEN"){
+      return json({
+        error:"HSTORA_CIRCUIT_BREAKER_OPEN",
+        message:"HStoraの停止状態を確認・解消してから現在残高を再配分してください。"
       },409);
     }
     try{
