@@ -619,14 +619,23 @@ async function ensureVendingSalesCopy(env:Env,guildId:string){
     }
   }
 
-  if(panelsOk){
-    await setXSetting(env,key,SHIIRE_VENDING_SALES_COPY_VERSION);
-  }
-  if(updated>0){
+  // The 350/500 prices are only an initial migration/default. Persist the
+  // migration version even if a Discord panel refresh failed so a later admin
+  // price edit can never be overwritten by this migration on the next GET.
+  await setXSetting(env,key,SHIIRE_VENDING_SALES_COPY_VERSION);
+  if(updated>0||!panelsOk){
     await auditX(env,{
+      level:panelsOk?"info":"warn",
       kind:"SHIIRE_VENDING_SALES_COPY_UPDATED",
-      message:"Class-backed vending products were updated to the configured sales copy and prices.",
-      details:{guildId,updated,version:SHIIRE_VENDING_SALES_COPY_VERSION}
+      message:panelsOk
+        ?"Class-backed vending products were updated to the initial sales copy and prices."
+        :"Initial vending copy/prices were saved, but at least one existing Discord panel could not be refreshed.",
+      details:{
+        guildId,
+        updated,
+        version:SHIIRE_VENDING_SALES_COPY_VERSION,
+        panelRefreshOk:panelsOk
+      }
     }).catch(()=>undefined);
   }
 }
