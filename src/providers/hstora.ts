@@ -76,6 +76,12 @@ export class HstoraApiError extends Error{
   }
 }
 
+// Non-retryable parsing/schema errors still do not prove a POST was rejected.
+export function isDefinitiveHstoraOrderRejection(error:unknown):boolean{
+  return error instanceof HstoraApiError&&error.status>=400&&error.status<500&&
+    error.status!==408&&!error.retryable;
+}
+
 function credentials(env:Env){
   const key=env.HSTORA_API_KEY?.trim()??"";
   const secret=env.HSTORA_API_SECRET?.trim()??"";

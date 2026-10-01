@@ -1,3 +1,4 @@
+import { withNamedRunLock } from "./x-run-lock";
 import type { Env } from "./types";
 import { loadXSettings, saveXSettings, type XSettings } from "./x-settings";
 import { fundingModeLabel, isBinanceAutoFundingServerEnabled } from "./x-funding-mode";
@@ -121,14 +122,6 @@ function procurementBudgetPercentages(settings:XSettings){
   };
 }
 
-async function syncHstoraBudgetBaseline(env:Env,balanceUsd:number){
-  await setXSetting(env,"x_hstora_balance_guard",{
-    hstoraUsd:Math.max(0,balanceUsd),
-    allowedDecreaseUsd:0,
-    updatedAt:Date.now()
-  });
-}
-
 async function settled<T>(fn:()=>Promise<T>){
   try{return {ok:true as const,data:await fn()};}
   catch(error){
@@ -144,6 +137,15 @@ export async function handleXAdminApi(
   env:Env,
   url:URL
 ):Promise<Response|null>{
+  if(request.method==="POST"&&["/api/x/procurement-budget","/api/x/procurement-budget/rebalance"].includes(url.pathname)){
+    return withNamedRunLock<Response|null>(env,"x-finance",
+      ()=>handleXAdminApiUnlocked(request,env,url),
+      async()=>json({error:"FINANCIAL_RUN_LOCKED"},409));
+  }
+  return handleXAdminApiUnlocked(request,env,url);
+}
+
+async function handleXAdminApiUnlocked(request:Request,env:Env,url:URL):Promise<Response|null>{
   await ensureXSchema(env);
 
   if(url.pathname==="/api/x/invite-campaign"&&request.method==="GET"){
@@ -317,7 +319,6 @@ export async function handleXAdminApi(
         Number(balance.balance),
         percentages
       );
-      await syncHstoraBudgetBaseline(env,Number(balance.balance));
       await auditX(env,{
         kind:"PROCUREMENT_BUDGET_ALLOCATION_CHANGED",
         message:"Procurement budget percentages changed and current HStora balance was rebalanced.",
@@ -373,7 +374,6 @@ export async function handleXAdminApi(
         Number(balance.balance),
         percentages
       );
-      await syncHstoraBudgetBaseline(env,Number(balance.balance));
       await auditX(env,{
         kind:"PROCUREMENT_BUDGET_REBALANCED",
         message:"Procurement budgets were manually rebalanced from current HStora balance.",

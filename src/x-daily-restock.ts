@@ -1,3 +1,4 @@
+import { withNamedRunLock } from "./x-run-lock";
 import type { Env } from "./types";
 import {
   auditX,
@@ -13,7 +14,7 @@ import {
 } from "./x-engine";
 import { loadXSettings } from "./x-settings";
 import {
-  isDailyRestockScheduleMinute,
+  isDailyRestockScheduleWindow,
   shouldNotifyDailyRestock
 } from "./x-daily-restock-policy";
 import {
@@ -190,7 +191,8 @@ async function publishDailyRestockSummary(
   await discordJson(
     env,
     "/channels/"+config.notification_channel_id+"/messages",
-    {method:"POST",body:JSON.stringify(payload)}
+    {method:"POST",body:JSON.stringify({...payload,
+      nonce:"restock-"+String(state.started_at),enforce_nonce:true})}
   );
   state.notified_at=Date.now();
   state.notification_skipped_reason="";
@@ -444,7 +446,12 @@ export async function installDailyRestockPanel(env:Env){
   return getDailyRestockDashboard(env);
 }
 
-export async function continueDailyRestock(env:Env){
+export async function continueDailyRestock(env:Env):Promise<any>{
+  return withNamedRunLock<any>(env,"daily-restock",()=>continueDailyRestockLocked(env),
+    async()=>({action:"DAILY_RESTOCK_LOCKED"}));
+}
+
+async function continueDailyRestockLocked(env:Env){
   const state=await loadDailyRestockState(env);
   if(!state){
     return {action:"NO_DAILY_RESTOCK_STATE"};
@@ -545,6 +552,9 @@ export async function continueDailyRestock(env:Env){
       };
     }
 
+    if(result.action==="FINANCIAL_RUN_LOCKED"||result.action==="HSTORA_PENDING_ORDER"){
+      return {action:"DAILY_RESTOCK_CONTINUES_NEXT_TICK",state};
+    }
     if(isPurchaseProgress(result)) continue;
 
     const partial=await finishDailyRestock(
@@ -567,11 +577,12 @@ export async function continueDailyRestock(env:Env){
   return {action:"DAILY_RESTOCK_CONTINUES_NEXT_TICK",state};
 }
 
-export async function startDailyRestock(
-  env:Env,
-  now=Date.now(),
-  force=false
-){
+export async function startDailyRestock(env:Env,now=Date.now(),force=false):Promise<any>{
+  return withNamedRunLock<any>(env,"daily-restock",()=>startDailyRestockLocked(env,now,force),
+    async()=>({action:"DAILY_RESTOCK_LOCKED"}));
+}
+
+async function startDailyRestockLocked(env:Env,now:number,force:boolean){
   const xSettings=await loadXSettings(env);
   const config=await loadDailyRestockConfig(env,{
     top_search_target_stock:xSettings.target_stock,
@@ -583,11 +594,11 @@ export async function startDailyRestock(
 
   const dateKey=jstDateKey(now);
   const existing=await loadDailyRestockState(env);
+  if(existing?.status==="running") return continueDailyRestockLocked(env);
   if(
     !force&&
     existing?.date_key===dateKey
   ){
-    if(existing.status==="running") return continueDailyRestock(env);
     return {action:"DAILY_RESTOCK_ALREADY_RAN",state:existing};
   }
 
@@ -622,7 +633,7 @@ export async function startDailyRestock(
       targetNoShadowban:state.target_no_shadowban
     }
   });
-  return continueDailyRestock(env);
+  return continueDailyRestockLocked(env);
 }
 
 export async function handleDailyRestockCron(
@@ -641,7 +652,7 @@ export async function handleDailyRestockCron(
     return continueDailyRestock(env);
   }
 
-  if(isDailyRestockScheduleMinute(scheduledTime)){
+  if(isDailyRestockScheduleWindow(scheduledTime)){
     return startDailyRestock(env,scheduledTime,false);
   }
   return {action:"NO_DAILY_RESTOCK_CRON_ACTION"};

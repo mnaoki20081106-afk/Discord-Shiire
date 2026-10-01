@@ -258,14 +258,16 @@ export async function rebalanceProcurementBudgets(
     percentages
   );
   const now=Date.now();
-  await env.DB.batch(
-    PROCUREMENT_BUDGET_CLASSES.map(procurementClass=>
+  await env.DB.batch([
+    ...PROCUREMENT_BUDGET_CLASSES.map(procurementClass=>
       env.DB.prepare(
         "UPDATE procurement_budgets SET available_usd=?,initialized=1,updated_at=? "+
         "WHERE procurement_class=?"
       ).bind(allocation[procurementClass],now,procurementClass)
-    )
-  );
+    ),
+    env.DB.prepare("INSERT INTO settings(key,value_json,updated_at) VALUES ('x_hstora_balance_guard',?,?) ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json,updated_at=excluded.updated_at")
+      .bind(JSON.stringify({hstoraUsd:currentHstoraBalanceUsd,allowedDecreaseUsd:0,updatedAt:now}),now)
+  ]);
   return getProcurementBudgets(env);
 }
 
@@ -286,7 +288,8 @@ export async function initializeProcurementBudgetsIfNeeded(
 export async function creditProcurementBudgets(
   env:Env,
   amountUsd:number,
-  percentages:ProcurementBudgetPercentages
+  percentages:ProcurementBudgetPercentages,
+  checkpoint?:{hstoraUsd:number;allowedDecreaseUsd:number;updatedAt:number}
 ){
   validateProcurementBudgetPercentages(percentages);
   const current=await getProcurementBudgets(env);
@@ -298,20 +301,25 @@ export async function creditProcurementBudgets(
     percentages
   );
   const now=Date.now();
-  await env.DB.batch(
-    PROCUREMENT_BUDGET_CLASSES.map(procurementClass=>
+  const statements=PROCUREMENT_BUDGET_CLASSES.map(procurementClass=>
       env.DB.prepare(
         "UPDATE procurement_budgets SET available_usd=available_usd+?,"+
         "updated_at=? WHERE procurement_class=?"
       ).bind(allocation[procurementClass],now,procurementClass)
-    )
-  );
+    );
+  if(checkpoint){
+    statements.push(env.DB.prepare(
+      "INSERT INTO settings(key,value_json,updated_at) VALUES ('x_hstora_balance_guard',?,?) ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json,updated_at=excluded.updated_at"
+    ).bind(JSON.stringify(checkpoint),now));
+  }
+  await env.DB.batch(statements);
   return getProcurementBudgets(env);
 }
 
 export async function reserveProcurementBudgetCharges(
   env:Env,
-  charges:Partial<Record<ProcurementBudgetClass,number>>
+  charges:Partial<Record<ProcurementBudgetClass,number>>,
+  orderStatement?:D1PreparedStatement
 ):Promise<boolean>{
   const invite=Math.max(0,Number(charges.INVITE_CAMPAIGN??0));
   const noShadow=Math.max(0,Number(charges.NO_SHADOWBAN??0));
@@ -326,7 +334,7 @@ export async function reserveProcurementBudgetCharges(
   }
 
   await ensureProcurementBudgetRows(env);
-  const result=await env.DB.prepare(
+  const statement=env.DB.prepare(
     "UPDATE procurement_budgets SET "+
     "available_usd=MAX(0,available_usd-CASE procurement_class "+
       "WHEN 'INVITE_CAMPAIGN' THEN ? "+
@@ -349,7 +357,12 @@ export async function reserveProcurementBudgetCharges(
     invite,
     noShadow,
     top
-  ).run();
+  );
+  if(orderStatement){
+    const results=await env.DB.batch([statement,orderStatement]);
+    return Number(results[0]?.meta.changes??0)===3&&Number(results[1]?.meta.changes??0)===1;
+  }
+  const result=await statement.run();
   return Number(result.meta?.changes??0)===3;
 }
 
@@ -605,18 +618,26 @@ export async function createPurchaseOrderRecord(env:Env,input:{
   procurementClass?:"TOP_SEARCH"|"NO_SHADOWBAN"|"INVITE_CAMPAIGN"|null;
   deliverySplitMode?:typeof DUAL_TOP_SPLIT_MODE|null;
   dryRun:boolean;
+  budgetCharges?:Partial<Record<ProcurementBudgetClass,number>>;
 }){
   await ensureXSchema(env);
   const now=Date.now();
   const id=randomId();
-  await env.DB.prepare(`INSERT INTO purchase_orders(
+  const statement=env.DB.prepare(`INSERT INTO purchase_orders(
     id,supplier,supplier_product_id,quantity,unit_price,total_amount,currency,status,
     external_order_id,idempotency_key,procurement_class,delivery_split_mode,dry_run,created_at,updated_at
-  ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(
+  ) SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,?,? ${input.budgetCharges?"WHERE changes()=3":""}`).bind(
     id,input.supplier,input.supplierProductId,input.quantity,input.unitPrice,input.totalAmount,input.currency,
     input.dryRun?"DRY_RUN":"CREATED",input.externalOrderId,input.idempotencyKey,
     input.procurementClass??null,input.deliverySplitMode??null,input.dryRun?1:0,now,now
-  ).run();
+  );
+  if(input.budgetCharges){
+    if(!await reserveProcurementBudgetCharges(env,input.budgetCharges,statement)){
+      throw new Error("PROCUREMENT_BUDGET_CHANGED");
+    }
+  }else{
+    await statement.run();
+  }
   return id;
 }
 

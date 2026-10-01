@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { hmacHex, sha256Hex } from "../src/crypto.ts";
-import { HstoraApiError, verifyHstoraWebhook } from "../src/providers/hstora.ts";
+import { HstoraApiError, verifyHstoraWebhook, isDefinitiveHstoraOrderRejection } from "../src/providers/hstora.ts";
 
 async function signedRequest(input?:{signatureOverride?:string;eventType?:string}){
   const secret="test-webhook-secret";
@@ -62,4 +62,12 @@ test("rejects unsupported HStora webhook signature version",async()=>{
       return true;
     }
   );
+});
+
+
+test("malformed success and schema responses never release a purchase budget",()=>{
+  for(const status of [0,200,408,409,429,500,502]){
+    assert.equal(isDefinitiveHstoraOrderRejection(new HstoraApiError(status,"RESPONSE_INVALID",status===409||status===429,"invalid")),false);
+  }
+  assert.equal(isDefinitiveHstoraOrderRejection(new HstoraApiError(422,"REJECTED",false,"rejected")),true);
 });
