@@ -1,3 +1,4 @@
+import { panelPayload } from "./shiire-panel-payload";
 import type { Env } from "./types";
 import { hmacHex, sha256Hex } from "./crypto";
 import { loadXSettings, saveXSettings } from "./x-settings";
@@ -510,60 +511,6 @@ async function requireRoleInGuild(
   }
 }
 
-function machineEmbed(
-  machine:ShiireVendingMachine,
-  products:Array<ShiireVendingProduct&{stock_count:number}>
-){
-  const lines=products.map(product=>{
-    const emoji=product.emoji?product.emoji+" ":"";
-    const detail=product.description?product.description+"\n":"";
-    return emoji+
-      "**"+product.name+"**\n"+
-      detail+
-      "PayPay: "+product.price_paypay+"円 / "+
-      "Kyash: "+product.price_kyash+"円 / "+
-      "在庫: "+product.stock_count+" / "+
-      "販売: "+product.sales_count;
-  });
-  const description=(
-    (machine.panel_description||"購入したい商品を下のボタンから選択してください。")+
-    (lines.length?"\n\n"+lines.join("\n\n"):"\n\n現在販売中の商品はありません。")
-  ).slice(0,4096);
-  return {
-    title:(machine.panel_title||machine.name||"仕入れBOT自販機").slice(0,256),
-    description,
-    color:5763719,
-    ...(machine.panel_image_url?{image:{url:machine.panel_image_url}}:{})
-  };
-}
-
-function panelPayload(
-  machine:ShiireVendingMachine,
-  products:Array<ShiireVendingProduct&{stock_count:number}>
-){
-  return {
-    embeds:[machineEmbed(machine,products)],
-    components:[{
-      type:1,
-      components:[
-        {
-          type:2,
-          style:3,
-          label:"購入する",
-          emoji:{name:"🛒"},
-          custom_id:"svm:buy:"+machine.id
-        },
-        {
-          type:2,
-          style:1,
-          label:"在庫・販売数",
-          emoji:{name:"📦"},
-          custom_id:"svm:stock:"+machine.id
-        }
-      ]
-    }]
-  };
-}
 
 async function refreshMachinePanels(env:Env,machineId:string){
   const machine=await getShiireMachine(env,machineId);
