@@ -3,6 +3,7 @@ import { randomId } from "./crypto";
 import { encryptSensitive, decryptSensitive, type EncryptedSecret } from "./x-crypto";
 import { ensureXSchema } from "./x-db";
 import { paymentPrice } from "./shiire-vending-policy";
+import { SHIIRE_VENDING_SALES_COPY } from "./shiire-vending-sales-copy";
 
 export type ShiireVendingMachine={
   id:string;
@@ -138,6 +139,7 @@ export async function createShiireMachine(env:Env,guildId:string,name:string){
   await env.DB.prepare(
     "INSERT INTO shiire_vending_machines(id,guild_id,name,active,created_at,updated_at) VALUES (?,?,?,1,?,?)"
   ).bind(id,guildId,name,now,now).run();
+  await ensureShiireDefaultProducts(env,id);
   return getShiireMachine(env,id);
 }
 
@@ -198,12 +200,29 @@ export async function getShiirePanelImage(env:Env,machineId:string){
   ).bind(machineId).first<{panel_image_mime:string|null;panel_image_base64:string|null}>()??null;
 }
 
+export async function ensureShiireDefaultProducts(env:Env,machineId:string){
+  await ensureShiireVendingSchema(env);
+  const now=Date.now();
+  const results=await env.DB.batch(Object.entries(SHIIRE_VENDING_SALES_COPY).map(([procurementClass,preset])=>
+    env.DB.prepare(
+      "INSERT OR IGNORE INTO shiire_vending_products(id,vending_machine_id,supplier_product_id,procurement_class,name,description,price_paypay,price_kyash,active,created_at,updated_at) "+
+      "SELECT ?,?,'',?,?,?,?,?,1,?,? WHERE EXISTS (SELECT 1 FROM shiire_vending_machines WHERE id=? AND active=1) "+
+      "AND NOT EXISTS (SELECT 1 FROM shiire_vending_products WHERE vending_machine_id=? AND procurement_class=?)"
+    ).bind("default:"+machineId+":"+procurementClass,machineId,procurementClass,preset.name,preset.description,preset.priceJpy,preset.priceJpy,now,now,machineId,machineId,procurementClass)
+  ));
+  // An inactive product records an intentional deletion; never recreate it on GET.
+  return results.reduce((sum,result)=>sum+Number(result.meta.changes??0),0);
+}
+
 export async function deleteShiireMachine(env:Env,id:string){
   await ensureShiireVendingSchema(env);
   const result=await env.DB.prepare(
-    "UPDATE shiire_vending_machines SET active=0,updated_at=? WHERE id=? AND active=1"
-  ).bind(Date.now(),id).run();
-  return Number(result.meta.changes??0)>0;
+    "UPDATE shiire_vending_machines SET active=0,updated_at=? WHERE id=? AND active=1 "+
+    "AND NOT EXISTS (SELECT 1 FROM shiire_vending_orders WHERE vending_machine_id=? AND status IN ('reserving','awaiting_payment','payment_pending','paid','delivering','delivery_sent'))"
+  ).bind(Date.now(),id,id).run();
+  if(Number(result.meta.changes??0)>0) return true;
+  if(await getShiireMachine(env,id)) throw new Error("SHIIRE_MACHINE_HAS_OPEN_ORDERS");
+  return false;
 }
 
 export async function listShiireSourceProducts(env:Env){
@@ -491,13 +510,15 @@ export async function reserveShiireOrder(
   const total=Math.max(0,(unit-discount)*quantity);
   const now=Date.now(),orderId=randomId(),until=now+10*60_000;
 
-  await env.DB.prepare(
-    "INSERT INTO shiire_vending_orders(id,vending_machine_id,product_id,guild_id,user_id,payment_method,quantity,unit_price,discount_each,total_amount,status,reserved_until,created_at,updated_at,paid_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
+  const inserted=await env.DB.prepare(
+    "INSERT INTO shiire_vending_orders(id,vending_machine_id,product_id,guild_id,user_id,payment_method,quantity,unit_price,discount_each,total_amount,status,reserved_until,created_at,updated_at,paid_at) "+
+    "SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,?,? WHERE EXISTS (SELECT 1 FROM shiire_vending_machines WHERE id=? AND active=1)"
   ).bind(
     orderId,input.machine.id,input.product.id,input.guildId,input.userId,
     total===0?"free":input.method,quantity,unit,discount,total,
-    "reserving",until,now,now,total===0?now:null
+    "reserving",until,now,now,total===0?now:null,input.machine.id
   ).run();
+  if(Number(inserted.meta.changes??0)!==1) throw new Error("VENDING_MACHINE_NOT_AVAILABLE");
 
   try{
     await reserveAccounts(env,orderId,input.product,quantity);

@@ -62,6 +62,7 @@ import {
   createShiireMachine,
   updateShiireMachine,
   deleteShiireMachine,
+  ensureShiireDefaultProducts,
   saveShiirePanelImage,
   deleteShiirePanelImage,
   getShiirePanelImage,
@@ -2245,6 +2246,8 @@ export async function handleShiireMainBridge(
       const machines=await listShiireMachines(env,guildId);
       const enriched=[];
       for(const machine of machines){
+        const added=await ensureShiireDefaultProducts(env,machine.id);
+        if(added>0) await refreshMachinePanels(env,machine.id);
         enriched.push({
           ...machine,
           products:await listShiireProducts(env,machine.id),
@@ -2268,6 +2271,8 @@ export async function handleShiireMainBridge(
   if(machineMatch){
     const machine=await machineInGuild(env,machineMatch[1]!,guildId);
     if(request.method==="GET"){
+      const added=await ensureShiireDefaultProducts(env,machine.id);
+      if(added>0) await refreshMachinePanels(env,machine.id);
       return responseJson({
         ...machine,
         products:await listShiireProducts(env,machine.id),
@@ -2317,7 +2322,25 @@ export async function handleShiireMainBridge(
       return responseJson({ok:true});
     }
     if(request.method==="DELETE"){
-      return responseJson({ok:await deleteShiireMachine(env,machine.id)});
+      await cleanShiireVendingExpired(env);
+      try{await deleteShiireMachine(env,machine.id);}
+      catch(error){
+        if(error instanceof Error&&error.message==="SHIIRE_MACHINE_HAS_OPEN_ORDERS"){
+          return responseJson({message:"支払い待ち・決済処理中・納品中の注文があります。注文の完了または期限切れ後に削除してください。"},409);
+        }
+        throw error;
+      }
+      const panelErrors=[];
+      for(const panel of await listShiirePanels(env,machine.id)){
+        try{
+          const result=await deleteDiscordMessage(env,panel.channel_id,panel.message_id);
+          if(!result.ok) throw new Error("DISCORD_"+result.status);
+          await deleteShiirePanelRecord(env,machine.id,panel.channel_id,panel.message_id);
+        }catch(error){
+          panelErrors.push({channelId:panel.channel_id,messageId:panel.message_id,error:error instanceof Error?error.message:String(error)});
+        }
+      }
+      return responseJson({ok:true,panelErrors});
     }
   }
 
