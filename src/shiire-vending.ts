@@ -94,6 +94,8 @@ import {
   listShiireDeliverySent,
   listShiireOrders,
   saveShiirePanel,
+  listShiirePanels,
+  deleteShiirePanelRecord,
   machinesForSupplierProduct,
   type ShiireVendingMachine,
   type ShiireVendingProduct,
@@ -617,16 +619,131 @@ async function ensureVendingSalesCopy(env:Env,guildId:string){
     }
   }
 
-  if(panelsOk){
-    await setXSetting(env,key,SHIIRE_VENDING_SALES_COPY_VERSION);
-  }
-  if(updated>0){
+  // The 350/500 prices are only an initial migration/default. Persist the
+  // migration version even if a Discord panel refresh failed so a later admin
+  // price edit can never be overwritten by this migration on the next GET.
+  await setXSetting(env,key,SHIIRE_VENDING_SALES_COPY_VERSION);
+  if(updated>0||!panelsOk){
     await auditX(env,{
+      level:panelsOk?"info":"warn",
       kind:"SHIIRE_VENDING_SALES_COPY_UPDATED",
-      message:"Class-backed vending products were updated to the configured sales copy and prices.",
-      details:{guildId,updated,version:SHIIRE_VENDING_SALES_COPY_VERSION}
+      message:panelsOk
+        ?"Class-backed vending products were updated to the initial sales copy and prices."
+        :"Initial vending copy/prices were saved, but at least one existing Discord panel could not be refreshed.",
+      details:{
+        guildId,
+        updated,
+        version:SHIIRE_VENDING_SALES_COPY_VERSION,
+        panelRefreshOk:panelsOk
+      }
     }).catch(()=>undefined);
   }
+}
+
+async function deleteDiscordMessage(
+  env:Env,
+  channelId:string,
+  messageId:string
+){
+  const response=await fetch(
+    "https://discord.com/api/v10/channels/"+
+      encodeURIComponent(channelId)+
+      "/messages/"+
+      encodeURIComponent(messageId),
+    {
+      method:"DELETE",
+      headers:{Authorization:"Bot "+discordToken(env)}
+    }
+  );
+  if(response.ok||response.status===404) return {
+    ok:true,
+    missing:response.status===404
+  };
+  return {
+    ok:false,
+    missing:false,
+    status:response.status,
+    error:(await response.text()).slice(0,300)
+  };
+}
+
+async function repostMachinePanels(env:Env,machineId:string){
+  const machine=await getShiireMachine(env,machineId);
+  if(!machine) throw new ShiireVendingError(404,"VENDING_MACHINE_NOT_FOUND");
+  const oldPanels=await listShiirePanels(env,machineId);
+  if(oldPanels.length===0){
+    throw new ShiireVendingError(409,"NO_VENDING_PANEL_TO_REPOST");
+  }
+
+  const products=await listShiireProducts(env,machineId);
+  const channels=[...new Set(oldPanels.map(panel=>panel.channel_id))];
+  let posted=0;
+  let removed=0;
+  const failures:Array<{channelId:string;messageId:string;error:string}>=[];
+
+  for(const channelId of channels){
+    await requireChannelInGuild(env,machine.guild_id,channelId);
+    const message=await sendJsonMessage(
+      env,
+      channelId,
+      panelPayload(machine,products)
+    );
+    await saveShiirePanel(
+      env,
+      machine.id,
+      machine.guild_id,
+      channelId,
+      message.id
+    );
+    posted++;
+
+    for(const panel of oldPanels.filter(row=>row.channel_id===channelId)){
+      const deleted=await deleteDiscordMessage(
+        env,
+        channelId,
+        panel.message_id
+      );
+      if(deleted.ok){
+        await deleteShiirePanelRecord(
+          env,
+          machine.id,
+          channelId,
+          panel.message_id
+        );
+        removed++;
+      }else{
+        failures.push({
+          channelId,
+          messageId:panel.message_id,
+          error:"DISCORD_"+String(deleted.status)+":"+deleted.error
+        });
+      }
+    }
+  }
+
+  await auditX(env,{
+    level:failures.length?"warn":"info",
+    kind:"SHIIRE_VENDING_PANELS_REPOSTED",
+    message:failures.length
+      ?"Vending panels were reposted, but some old messages could not be deleted."
+      :"Vending panels were deleted and reposted after a product update.",
+    details:{
+      machineId,
+      guildId:machine.guild_id,
+      channels,
+      posted,
+      removed,
+      failures
+    }
+  }).catch(()=>undefined);
+
+  return {
+    ok:failures.length===0,
+    posted,
+    removed,
+    failedDeletes:failures.length,
+    failures
+  };
 }
 
 async function sendJsonMessage(
@@ -2128,6 +2245,7 @@ export async function handleShiireMainBridge(
         enriched.push({
           ...machine,
           products:await listShiireProducts(env,machine.id),
+          panels:await listShiirePanels(env,machine.id),
           stockNotification:await getShiireStockNotification(env,machine.id)
         });
       }
@@ -2150,6 +2268,7 @@ export async function handleShiireMainBridge(
       return responseJson({
         ...machine,
         products:await listShiireProducts(env,machine.id),
+        panels:await listShiirePanels(env,machine.id),
         coupons:await listShiireCoupons(env,machine.id),
         stockNotification:await getShiireStockNotification(env,machine.id)
       });
@@ -2286,6 +2405,12 @@ export async function handleShiireMainBridge(
       }
       if(input.emoji!==undefined) patch.emoji=input.emoji?String(input.emoji).slice(0,64):null;
       await updateShiireProduct(env,product.id,patch);
+      if(input.repostPanels===true){
+        return responseJson({
+          ok:true,
+          panelRepost:await repostMachinePanels(env,machine.id)
+        });
+      }
       await refreshMachinePanels(env,machine.id);
       return responseJson({ok:true});
     }
@@ -2377,6 +2502,12 @@ export async function handleShiireMainBridge(
     );
     await saveShiirePanel(env,machine.id,guildId,channelId,message.id);
     return responseJson({ok:true,messageId:message.id});
+  }
+
+  const panelRepost=suffix.match(/^\/vending\/([^/]+)\/panel\/repost$/);
+  if(panelRepost&&request.method==="POST"){
+    const machine=await machineInGuild(env,panelRepost[1]!,guildId);
+    return responseJson(await repostMachinePanels(env,machine.id));
   }
 
   const panelUpdate=suffix.match(/^\/vending\/([^/]+)\/panel\/update$/);
