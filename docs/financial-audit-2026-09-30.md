@@ -30,3 +30,8 @@ Integrated the new category budgets, supplier priority, daily 18:00 restock and 
 - Fixed the original reconciliation test fixture to include the real HStora success envelope, and assert the persisted PROCESSING state rather than merely observing that no purchase occurred.
 
 Validation: typecheck passed; all 116 tests passed including 12 Worker/D1 integration cases. External funds and production databases were not touched. Existing ambiguous historical payments still require recipient-side reconciliation.
+
+## 2026-10-01 main統合検証
+
+最新main（29ca976）を統合。通知再送が18時に重なった際の開始取りこぼしを修正し、18時以降の当日未実行バッチを開始可能にした。日付ごとの重複開始防止は維持。入荷時のみ通知する仕様に統合テストを対応。typecheck・123テスト成功。
+実送金・本番デプロイの検証は実施していない。

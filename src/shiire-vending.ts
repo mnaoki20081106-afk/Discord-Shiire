@@ -33,9 +33,28 @@ import {
   recentFundingEvents,
   recentCryptoTransactions,
   auditX,
-  setCircuitBreaker
+  setCircuitBreaker,
+  getProcurementBudgets,
+  rebalanceProcurementBudgets,
+  pendingPurchaseOrders,
+  circuitState,
+  getXSetting,
+  setXSetting
 } from "./x-db";
 import { receiveMainPayment, getMainPaymentStatus } from "./main-bot";
+import {
+  getInviteCampaignDashboard,
+  saveInviteCampaignSettings
+} from "./invite-campaign-db";
+import { seedInviteCampaignSnapshot } from "./invite-campaign";
+import {
+  reconcileInviteCampaignRewards,
+  retryInviteCampaignReward
+} from "./invite-campaign-rewards";
+import {
+  ensureInviteCampaignGateway,
+  stopInviteCampaignGateway
+} from "./invite-gateway";
 import {
   ensureShiireVendingSchema,
   listShiireMachines,
@@ -75,11 +94,17 @@ import {
   listShiireDeliverySent,
   listShiireOrders,
   saveShiirePanel,
+  listShiirePanels,
+  deleteShiirePanelRecord,
   machinesForSupplierProduct,
   type ShiireVendingMachine,
   type ShiireVendingProduct,
   type ShiireVendingOrder
 } from "./shiire-vending-db";
+import {
+  SHIIRE_VENDING_SALES_COPY_VERSION,
+  shiireSalesCopyForClass
+} from "./shiire-vending-sales-copy";
 
 const BRIDGE_MAX_SKEW_MS=5*60_000;
 let bridgeReady=false;
@@ -128,6 +153,23 @@ function safeProcurementSettings(settings:Awaited<ReturnType<typeof loadXSetting
     no_shadowban_target_stock:settings.no_shadowban_target_stock,
     trial_purchase_count:settings.trial_purchase_count,
     max_batch_purchase:settings.max_batch_purchase,
+    invite_campaign_budget_percent:settings.invite_campaign_budget_percent,
+    no_shadowban_budget_percent:settings.no_shadowban_budget_percent,
+    top_search_budget_percent:settings.top_search_budget_percent,
+    min_seller_rating:settings.min_seller_rating,
+    min_product_reviews:settings.min_product_reviews,
+    min_sales_count:settings.min_sales_count,
+    max_dispute_rate:settings.max_dispute_rate,
+    minimum_stock:settings.minimum_stock,
+    seller_quality_mode:settings.seller_quality_mode,
+    approved_hstora_product_ids:settings.approved_hstora_product_ids,
+    max_paypay_balance_age_ms:settings.max_paypay_balance_age_ms,
+    max_fx_age_ms:settings.max_fx_age_ms,
+    max_fx_jump_percent:settings.max_fx_jump_percent,
+    max_price_jump_percent:settings.max_price_jump_percent,
+    max_ltc_price_jump_percent:settings.max_ltc_price_jump_percent,
+    require_bulk_confirmation:settings.require_bulk_confirmation,
+    bulk_confirmation_threshold:settings.bulk_confirmation_threshold,
     observed_paypay_balance_jpy:settings.observed_paypay_balance_jpy,
     observed_paypay_balance_at:settings.observed_paypay_balance_at,
     pending_paypay_funding_jpy:settings.pending_paypay_funding_jpy,
@@ -135,6 +177,24 @@ function safeProcurementSettings(settings:Awaited<ReturnType<typeof loadXSetting
     usd_jpy_rate_updated_at:settings.usd_jpy_rate_updated_at,
     bulk_approval_until:settings.bulk_approval_until
   };
+}
+
+function procurementBudgetPercentages(
+  settings:Awaited<ReturnType<typeof loadXSettings>>
+){
+  return {
+    INVITE_CAMPAIGN:settings.invite_campaign_budget_percent,
+    NO_SHADOWBAN:settings.no_shadowban_budget_percent,
+    TOP_SEARCH:settings.top_search_budget_percent
+  };
+}
+
+async function syncHstoraBudgetBaseline(env:Env,balanceUsd:number){
+  await setXSetting(env,"x_hstora_balance_guard",{
+    hstoraUsd:Math.max(0,balanceUsd),
+    allowedDecreaseUsd:0,
+    updatedAt:Date.now()
+  });
 }
 
 async function operationsOverview(env:Env){
@@ -455,8 +515,10 @@ function machineEmbed(
 ){
   const lines=products.map(product=>{
     const emoji=product.emoji?product.emoji+" ":"";
+    const detail=product.description?product.description+"\n":"";
     return emoji+
       "**"+product.name+"**\n"+
+      detail+
       "PayPay: "+product.price_paypay+"円 / "+
       "Kyash: "+product.price_kyash+"円 / "+
       "在庫: "+product.stock_count+" / "+
@@ -504,11 +566,12 @@ function panelPayload(
 
 async function refreshMachinePanels(env:Env,machineId:string){
   const machine=await getShiireMachine(env,machineId);
-  if(!machine) return;
+  if(!machine) return true;
   const products=await listShiireProducts(env,machineId);
   const panels=(await env.DB.prepare(
     "SELECT channel_id,message_id FROM shiire_vending_panels WHERE vending_machine_id=?"
   ).bind(machineId).all<{channel_id:string;message_id:string}>()).results;
+  let ok=true;
   for(const panel of panels){
     try{
       await discordJson(
@@ -517,9 +580,170 @@ async function refreshMachinePanels(env:Env,machineId:string){
         {method:"PATCH",body:JSON.stringify(panelPayload(machine,products))}
       );
     }catch(error){
+      ok=false;
       console.error("shiire vending panel refresh failed",machineId,panel,error);
     }
   }
+  return ok;
+}
+
+async function ensureVendingSalesCopy(env:Env,guildId:string){
+  const key="shiire_vending_sales_copy:"+guildId;
+  if(await getXSetting<string>(env,key)===SHIIRE_VENDING_SALES_COPY_VERSION) return;
+
+  const machines=await listShiireMachines(env,guildId);
+  let panelsOk=true;
+  let updated=0;
+  for(const machine of machines){
+    const products=await listShiireProducts(env,machine.id);
+    const classProducts=products.filter(product=>Boolean(shiireSalesCopyForClass(product.procurement_class)));
+    for(const product of classProducts){
+      const preset=shiireSalesCopyForClass(product.procurement_class)!;
+      if(
+        product.name!==preset.name||
+        product.description!==preset.description||
+        product.price_paypay!==preset.priceJpy||
+        product.price_kyash!==preset.priceJpy
+      ){
+        await updateShiireProduct(env,product.id,{
+          name:preset.name,
+          description:preset.description,
+          pricePayPay:preset.priceJpy,
+          priceKyash:preset.priceJpy
+        });
+        updated++;
+      }
+    }
+    if(classProducts.length>0){
+      panelsOk=(await refreshMachinePanels(env,machine.id))&&panelsOk;
+    }
+  }
+
+  // The 350/500 prices are only an initial migration/default. Persist the
+  // migration version even if a Discord panel refresh failed so a later admin
+  // price edit can never be overwritten by this migration on the next GET.
+  await setXSetting(env,key,SHIIRE_VENDING_SALES_COPY_VERSION);
+  if(updated>0||!panelsOk){
+    await auditX(env,{
+      level:panelsOk?"info":"warn",
+      kind:"SHIIRE_VENDING_SALES_COPY_UPDATED",
+      message:panelsOk
+        ?"Class-backed vending products were updated to the initial sales copy and prices."
+        :"Initial vending copy/prices were saved, but at least one existing Discord panel could not be refreshed.",
+      details:{
+        guildId,
+        updated,
+        version:SHIIRE_VENDING_SALES_COPY_VERSION,
+        panelRefreshOk:panelsOk
+      }
+    }).catch(()=>undefined);
+  }
+}
+
+async function deleteDiscordMessage(
+  env:Env,
+  channelId:string,
+  messageId:string
+){
+  const response=await fetch(
+    "https://discord.com/api/v10/channels/"+
+      encodeURIComponent(channelId)+
+      "/messages/"+
+      encodeURIComponent(messageId),
+    {
+      method:"DELETE",
+      headers:{Authorization:"Bot "+discordToken(env)}
+    }
+  );
+  if(response.ok||response.status===404) return {
+    ok:true,
+    missing:response.status===404
+  };
+  return {
+    ok:false,
+    missing:false,
+    status:response.status,
+    error:(await response.text()).slice(0,300)
+  };
+}
+
+async function repostMachinePanels(env:Env,machineId:string){
+  const machine=await getShiireMachine(env,machineId);
+  if(!machine) throw new ShiireVendingError(404,"VENDING_MACHINE_NOT_FOUND");
+  const oldPanels=await listShiirePanels(env,machineId);
+  if(oldPanels.length===0){
+    throw new ShiireVendingError(409,"NO_VENDING_PANEL_TO_REPOST");
+  }
+
+  const products=await listShiireProducts(env,machineId);
+  const channels=[...new Set(oldPanels.map(panel=>panel.channel_id))];
+  let posted=0;
+  let removed=0;
+  const failures:Array<{channelId:string;messageId:string;error:string}>=[];
+
+  for(const channelId of channels){
+    await requireChannelInGuild(env,machine.guild_id,channelId);
+    const message=await sendJsonMessage(
+      env,
+      channelId,
+      panelPayload(machine,products)
+    );
+    await saveShiirePanel(
+      env,
+      machine.id,
+      machine.guild_id,
+      channelId,
+      message.id
+    );
+    posted++;
+
+    for(const panel of oldPanels.filter(row=>row.channel_id===channelId)){
+      const deleted=await deleteDiscordMessage(
+        env,
+        channelId,
+        panel.message_id
+      );
+      if(deleted.ok){
+        await deleteShiirePanelRecord(
+          env,
+          machine.id,
+          channelId,
+          panel.message_id
+        );
+        removed++;
+      }else{
+        failures.push({
+          channelId,
+          messageId:panel.message_id,
+          error:"DISCORD_"+String(deleted.status)+":"+deleted.error
+        });
+      }
+    }
+  }
+
+  await auditX(env,{
+    level:failures.length?"warn":"info",
+    kind:"SHIIRE_VENDING_PANELS_REPOSTED",
+    message:failures.length
+      ?"Vending panels were reposted, but some old messages could not be deleted."
+      :"Vending panels were deleted and reposted after a product update.",
+    details:{
+      machineId,
+      guildId:machine.guild_id,
+      channels,
+      posted,
+      removed,
+      failures
+    }
+  }).catch(()=>undefined);
+
+  return {
+    ok:failures.length===0,
+    posted,
+    removed,
+    failedDeletes:failures.length,
+    failures
+  };
 }
 
 async function sendJsonMessage(
@@ -1226,6 +1450,281 @@ export async function handleShiireMainBridge(
     return responseJson({logs,breakers,fundingEvents,cryptoTransactions});
   }
 
+  if(suffix==="/procurement-budget"&&request.method==="GET"){
+    const settings=await loadXSettings(env);
+    return responseJson({
+      percentages:procurementBudgetPercentages(settings),
+      budget:await getProcurementBudgets(env)
+    });
+  }
+
+  if(suffix==="/procurement-budget"&&request.method==="POST"){
+    const input=await parseBridgeJson(rawBody);
+    const pending=await pendingPurchaseOrders(env);
+    if(pending.length>0){
+      throw new ShiireVendingError(409,"PENDING_HSTORA_ORDER_EXISTS");
+    }
+    const hstoraBreaker=await circuitState(env,"hstora");
+    if(String(hstoraBreaker?.state??"")==="OPEN"){
+      throw new ShiireVendingError(409,"HSTORA_CIRCUIT_BREAKER_OPEN");
+    }
+    const inviteCampaignPercent=Number(input.inviteCampaignPercent);
+    const noShadowbanPercent=Number(input.noShadowbanPercent);
+    const topSearchPercent=Number(input.topSearchPercent);
+    const balance=await getHstoraBalance(env);
+    if(String(balance.currency).toUpperCase()!=="USD"){
+      throw new ShiireVendingError(409,"HSTORA_CURRENCY_UNSUPPORTED");
+    }
+    try{
+      const settings=await saveXSettings(env,{
+        invite_campaign_budget_percent:inviteCampaignPercent,
+        no_shadowban_budget_percent:noShadowbanPercent,
+        top_search_budget_percent:topSearchPercent
+      });
+      const percentages=procurementBudgetPercentages(settings);
+      const budget=await rebalanceProcurementBudgets(
+        env,
+        Number(balance.balance),
+        percentages
+      );
+      await syncHstoraBudgetBaseline(env,Number(balance.balance));
+      await auditX(env,{
+        kind:"PROCUREMENT_BUDGET_ALLOCATION_CHANGED",
+        message:"Procurement budget percentages changed from the authenticated main dashboard.",
+        details:{
+          percentages,
+          currentHstoraBalanceUsd:Number(balance.balance),
+          budget:budget.available
+        }
+      });
+      return responseJson({
+        ok:true,
+        percentages,
+        budget,
+        currentHstoraBalanceUsd:Number(balance.balance)
+      });
+    }catch(error){
+      if(error instanceof ShiireVendingError) throw error;
+      throw new ShiireVendingError(
+        400,
+        error instanceof Error?error.message:"PROCUREMENT_BUDGET_INVALID"
+      );
+    }
+  }
+
+  if(suffix==="/procurement-budget/rebalance"&&request.method==="POST"){
+    const pending=await pendingPurchaseOrders(env);
+    if(pending.length>0){
+      throw new ShiireVendingError(409,"PENDING_HSTORA_ORDER_EXISTS");
+    }
+    const hstoraBreaker=await circuitState(env,"hstora");
+    if(String(hstoraBreaker?.state??"")==="OPEN"){
+      throw new ShiireVendingError(409,"HSTORA_CIRCUIT_BREAKER_OPEN");
+    }
+    const [settings,balance]=await Promise.all([
+      loadXSettings(env),
+      getHstoraBalance(env)
+    ]);
+    if(String(balance.currency).toUpperCase()!=="USD"){
+      throw new ShiireVendingError(409,"HSTORA_CURRENCY_UNSUPPORTED");
+    }
+    const percentages=procurementBudgetPercentages(settings);
+    const budget=await rebalanceProcurementBudgets(
+      env,
+      Number(balance.balance),
+      percentages
+    );
+    await syncHstoraBudgetBaseline(env,Number(balance.balance));
+    await auditX(env,{
+      kind:"PROCUREMENT_BUDGET_REBALANCED",
+      message:"Procurement budgets were manually rebalanced from the authenticated main dashboard.",
+      details:{
+        percentages,
+        currentHstoraBalanceUsd:Number(balance.balance),
+        budget:budget.available
+      }
+    });
+    return responseJson({
+      ok:true,
+      percentages,
+      budget,
+      currentHstoraBalanceUsd:Number(balance.balance)
+    });
+  }
+
+  if(suffix==="/daily-restock"&&request.method==="GET"){
+    const {getDailyRestockDashboard}=await import("./x-daily-restock");
+    return responseJson(await getDailyRestockDashboard(env));
+  }
+
+  if(suffix==="/daily-restock/settings"&&request.method==="POST"){
+    const {updateDailyRestockConfig}=await import("./x-daily-restock");
+    const input=await parseBridgeJson(rawBody);
+    if(input.notificationChannelId!==undefined){
+      const channelId=String(input.notificationChannelId??"").trim();
+      if(channelId) await requireChannelInGuild(env,guildId,channelId);
+    }
+    try{
+      return responseJson({
+        ok:true,
+        ...await updateDailyRestockConfig(env,{
+          enabled:input.enabled,
+          topSearchTargetStock:input.topSearchTargetStock,
+          noShadowbanTargetStock:input.noShadowbanTargetStock,
+          notificationChannelId:input.notificationChannelId,
+          notificationMessage:input.notificationMessage
+        })
+      });
+    }catch(error){
+      throw new ShiireVendingError(
+        400,
+        error instanceof Error?error.message:"DAILY_RESTOCK_SETTINGS_INVALID"
+      );
+    }
+  }
+
+  if(suffix==="/daily-restock/panel"&&request.method==="POST"){
+    const {
+      getDailyRestockDashboard,
+      installDailyRestockPanel
+    }=await import("./x-daily-restock");
+    const dashboard=await getDailyRestockDashboard(env);
+    const channelId=String(dashboard.config.notification_channel_id??"").trim();
+    if(!channelId) throw new ShiireVendingError(409,"NOTIFICATION_CHANNEL_REQUIRED");
+    await requireChannelInGuild(env,guildId,channelId);
+    try{
+      return responseJson({ok:true,...await installDailyRestockPanel(env)});
+    }catch(error){
+      throw new ShiireVendingError(
+        409,
+        error instanceof Error?error.message:"DAILY_RESTOCK_PANEL_FAILED"
+      );
+    }
+  }
+
+  if(suffix==="/daily-restock/run"&&request.method==="POST"){
+    const {startDailyRestock}=await import("./x-daily-restock");
+    try{
+      return responseJson(await startDailyRestock(env,Date.now(),true));
+    }catch(error){
+      throw new ShiireVendingError(
+        409,
+        error instanceof Error?error.message:"DAILY_RESTOCK_RUN_FAILED"
+      );
+    }
+  }
+
+  if(suffix==="/invite-campaign"&&request.method==="GET"){
+    const dashboard=await getInviteCampaignDashboard(env);
+    return responseJson({
+      ...dashboard,
+      currentGuildId:guildId,
+      currentGuildSelected:dashboard.settings.guild_id===guildId
+    });
+  }
+
+  if(suffix==="/invite-campaign/settings"&&request.method==="POST"){
+    const input=await parseBridgeJson(rawBody);
+    try{
+      const settings=await saveInviteCampaignSettings(env,{
+        enabled:input.enabled,
+        guildId,
+        invitesPerReward:input.invitesPerReward,
+        targetStock:input.targetStock
+      });
+      if(settings.enabled){
+        try{
+          await ensureInviteCampaignGateway(env);
+          await seedInviteCampaignSnapshot(env,guildId);
+          await reconcileInviteCampaignRewards(env);
+        }catch(error){
+          await saveInviteCampaignSettings(env,{enabled:false,guildId});
+          await stopInviteCampaignGateway(env).catch(()=>undefined);
+          throw new ShiireVendingError(
+            409,
+            "INVITE_CAMPAIGN_START_FAILED:"+
+            (error instanceof Error?error.message:String(error))
+          );
+        }
+      }else{
+        await stopInviteCampaignGateway(env);
+      }
+      return responseJson({
+        ok:true,
+        ...await getInviteCampaignDashboard(env),
+        currentGuildId:guildId,
+        currentGuildSelected:true
+      });
+    }catch(error){
+      if(error instanceof ShiireVendingError) throw error;
+      throw new ShiireVendingError(
+        400,
+        error instanceof Error?error.message:"INVITE_CAMPAIGN_SETTINGS_INVALID"
+      );
+    }
+  }
+
+  if(suffix==="/invite-campaign/seed"&&request.method==="POST"){
+    const settings=await getInviteCampaignDashboard(env);
+    if(settings.settings.guild_id!==guildId){
+      throw new ShiireVendingError(409,"INVITE_CAMPAIGN_DIFFERENT_GUILD");
+    }
+    try{
+      const result=await seedInviteCampaignSnapshot(env,guildId);
+      return responseJson({
+        ok:true,
+        result,
+        ...await getInviteCampaignDashboard(env),
+        currentGuildId:guildId,
+        currentGuildSelected:true
+      });
+    }catch(error){
+      throw new ShiireVendingError(
+        409,
+        error instanceof Error?error.message:"INVITE_CAMPAIGN_SEED_FAILED"
+      );
+    }
+  }
+
+  const inviteRewardRetry=suffix.match(
+    /^\/invite-campaign\/rewards\/([^/]+)\/retry$/
+  );
+  if(inviteRewardRetry&&request.method==="POST"){
+    const dashboard=await getInviteCampaignDashboard(env);
+    if(dashboard.settings.guild_id!==guildId){
+      throw new ShiireVendingError(409,"INVITE_CAMPAIGN_DIFFERENT_GUILD");
+    }
+    const rewardId=decodeURIComponent(inviteRewardRetry[1]!);
+    if(!(dashboard.rewards as Array<{id:string}>).some(row=>row.id===rewardId)){
+      throw new ShiireVendingError(404,"INVITE_REWARD_NOT_FOUND_IN_GUILD");
+    }
+    try{
+      const result=await retryInviteCampaignReward(env,rewardId);
+      return responseJson({
+        ok:true,
+        result,
+        ...await getInviteCampaignDashboard(env),
+        currentGuildId:guildId,
+        currentGuildSelected:true
+      });
+    }catch(error){
+      throw new ShiireVendingError(
+        409,
+        error instanceof Error?error.message:"INVITE_REWARD_RETRY_FAILED"
+      );
+    }
+  }
+
+  if(suffix==="/run"&&request.method==="POST"){
+    const {runXProcurement}=await import("./x-engine");
+    return responseJson(await runXProcurement(env));
+  }
+
+  if(suffix==="/funding/auto-purchase/run"&&request.method==="POST"){
+    const {runLtcAutoPurchase}=await import("./x-engine");
+    return responseJson(await runLtcAutoPurchase(env));
+  }
+
   if(suffix==="/funding/mode"&&request.method==="POST"){
     const input=await parseBridgeJson(rawBody);
     const mode=String(input.mode??"");
@@ -1276,6 +1775,12 @@ export async function handleShiireMainBridge(
         min_purchase_jpy:settings.min_purchase_jpy,
         target_ltc_balance:settings.target_ltc_balance,
         max_ltc_balance:settings.max_ltc_balance,
+        wallet_target_ltc:settings.wallet_target_ltc,
+        wallet_max_ltc:settings.wallet_max_ltc,
+        max_paypay_balance_age_ms:settings.max_paypay_balance_age_ms,
+        max_fx_age_ms:settings.max_fx_age_ms,
+        max_fx_jump_percent:settings.max_fx_jump_percent,
+        max_ltc_price_jump_percent:settings.max_ltc_price_jump_percent,
         observed_paypay_balance_jpy:settings.observed_paypay_balance_jpy,
         observed_paypay_balance_at:settings.observed_paypay_balance_at,
         usd_jpy_rate:settings.usd_jpy_rate,
@@ -1295,7 +1800,15 @@ export async function handleShiireMainBridge(
       ] as const;
       const numberKeys=[
         "target_ltc_balance",
-        "max_ltc_balance"
+        "max_ltc_balance",
+        "wallet_target_ltc",
+        "wallet_max_ltc",
+        "max_fx_jump_percent",
+        "max_ltc_price_jump_percent"
+      ] as const;
+      const extraIntegerKeys=[
+        "max_paypay_balance_age_ms",
+        "max_fx_age_ms"
       ] as const;
       for(const key of integerKeys){
         if(input[key]===undefined) continue;
@@ -1309,6 +1822,14 @@ export async function handleShiireMainBridge(
         if(input[key]===undefined) continue;
         const value=Number(input[key]);
         if(!Number.isFinite(value)||value<0){
+          throw new ShiireVendingError(400,"INVALID_FUNDING_SETTING_"+key.toUpperCase());
+        }
+        patch[key]=value;
+      }
+      for(const key of extraIntegerKeys){
+        if(input[key]===undefined) continue;
+        const value=Number(input[key]);
+        if(!Number.isSafeInteger(value)||value<0){
           throw new ShiireVendingError(400,"INVALID_FUNDING_SETTING_"+key.toUpperCase());
         }
         patch[key]=value;
@@ -1330,7 +1851,13 @@ export async function handleShiireMainBridge(
             monthly_purchase_limit_jpy:settings.monthly_purchase_limit_jpy,
             min_purchase_jpy:settings.min_purchase_jpy,
             target_ltc_balance:settings.target_ltc_balance,
-            max_ltc_balance:settings.max_ltc_balance
+            max_ltc_balance:settings.max_ltc_balance,
+            wallet_target_ltc:settings.wallet_target_ltc,
+            wallet_max_ltc:settings.wallet_max_ltc,
+            max_paypay_balance_age_ms:settings.max_paypay_balance_age_ms,
+            max_fx_age_ms:settings.max_fx_age_ms,
+            max_fx_jump_percent:settings.max_fx_jump_percent,
+            max_ltc_price_jump_percent:settings.max_ltc_price_jump_percent
           }
         });
       }catch(error){
@@ -1584,23 +2111,52 @@ export async function handleShiireMainBridge(
         no_shadowban_target_stock:settings.no_shadowban_target_stock,
         trial_purchase_count:settings.trial_purchase_count,
         max_batch_purchase:settings.max_batch_purchase,
+        min_seller_rating:settings.min_seller_rating,
+        min_product_reviews:settings.min_product_reviews,
+        min_sales_count:settings.min_sales_count,
+        max_dispute_rate:settings.max_dispute_rate,
+        minimum_stock:settings.minimum_stock,
+        seller_quality_mode:settings.seller_quality_mode,
+        approved_hstora_product_ids:settings.approved_hstora_product_ids,
+        max_price_jump_percent:settings.max_price_jump_percent,
+        require_bulk_confirmation:settings.require_bulk_confirmation,
+        bulk_confirmation_threshold:settings.bulk_confirmation_threshold,
+        procurement_strategy:settings.procurement_strategy,
+        search_visibility_requirement:settings.search_visibility_requirement,
         dry_run:settings.dry_run,
         auto_procurement_enabled:settings.auto_procurement_enabled
       });
     }
     if(request.method==="PATCH"){
       const input=await parseBridgeJson(rawBody);
-      const patch:Record<string,number>={};
-      const numberKeys=[
-        "max_unit_price_jpy",
-        "max_no_shadowban_unit_price_usd",
+      const patch:Record<string,unknown>={};
+      const integerKeys=[
         "reorder_point",
         "target_stock",
         "no_shadowban_reorder_point",
         "no_shadowban_target_stock",
         "trial_purchase_count",
-        "max_batch_purchase"
+        "max_batch_purchase",
+        "min_product_reviews",
+        "min_sales_count",
+        "minimum_stock",
+        "bulk_confirmation_threshold"
       ] as const;
+      const numberKeys=[
+        "max_unit_price_jpy",
+        "max_no_shadowban_unit_price_usd",
+        "min_seller_rating",
+        "max_dispute_rate",
+        "max_price_jump_percent"
+      ] as const;
+      for(const key of integerKeys){
+        if(input[key]===undefined) continue;
+        const value=Number(input[key]);
+        if(!Number.isSafeInteger(value)||value<0){
+          throw new ShiireVendingError(400,"INVALID_PROCUREMENT_SETTING_"+key.toUpperCase());
+        }
+        patch[key]=value;
+      }
       for(const key of numberKeys){
         if(input[key]===undefined) continue;
         const value=Number(input[key]);
@@ -1609,8 +2165,36 @@ export async function handleShiireMainBridge(
         }
         patch[key]=value;
       }
+      if(input.require_bulk_confirmation!==undefined){
+        if(typeof input.require_bulk_confirmation!=="boolean"){
+          throw new ShiireVendingError(400,"INVALID_PROCUREMENT_SETTING_REQUIRE_BULK_CONFIRMATION");
+        }
+        patch.require_bulk_confirmation=input.require_bulk_confirmation;
+      }
+      if(input.seller_quality_mode!==undefined){
+        const mode=String(input.seller_quality_mode);
+        if(!["strict_api","manual_product_approval","trial_only"].includes(mode)){
+          throw new ShiireVendingError(400,"INVALID_SELLER_QUALITY_MODE");
+        }
+        patch.seller_quality_mode=mode;
+      }
+      if(input.approved_hstora_product_ids!==undefined){
+        if(!Array.isArray(input.approved_hstora_product_ids)){
+          throw new ShiireVendingError(400,"INVALID_APPROVED_HSTORA_PRODUCT_IDS");
+        }
+        const ids=[...new Set(input.approved_hstora_product_ids.map(Number))];
+        if(ids.some(id=>!Number.isSafeInteger(id)||id<=0)){
+          throw new ShiireVendingError(400,"INVALID_APPROVED_HSTORA_PRODUCT_IDS");
+        }
+        patch.approved_hstora_product_ids=ids;
+      }
       try{
         const settings=await saveXSettings(env,patch);
+        await auditX(env,{
+          kind:"PROCUREMENT_SETTINGS_UPDATED",
+          message:"Procurement settings were updated from the authenticated main dashboard.",
+          details:{keys:Object.keys(patch)}
+        });
         return responseJson({
           ok:true,
           settings:{
@@ -1621,7 +2205,17 @@ export async function handleShiireMainBridge(
             no_shadowban_reorder_point:settings.no_shadowban_reorder_point,
             no_shadowban_target_stock:settings.no_shadowban_target_stock,
             trial_purchase_count:settings.trial_purchase_count,
-            max_batch_purchase:settings.max_batch_purchase
+            max_batch_purchase:settings.max_batch_purchase,
+            min_seller_rating:settings.min_seller_rating,
+            min_product_reviews:settings.min_product_reviews,
+            min_sales_count:settings.min_sales_count,
+            max_dispute_rate:settings.max_dispute_rate,
+            minimum_stock:settings.minimum_stock,
+            seller_quality_mode:settings.seller_quality_mode,
+            approved_hstora_product_ids:settings.approved_hstora_product_ids,
+            max_price_jump_percent:settings.max_price_jump_percent,
+            require_bulk_confirmation:settings.require_bulk_confirmation,
+            bulk_confirmation_threshold:settings.bulk_confirmation_threshold
           }
         });
       }catch(error){
@@ -1647,12 +2241,14 @@ export async function handleShiireMainBridge(
 
   if(suffix==="/vending"){
     if(request.method==="GET"){
+      await ensureVendingSalesCopy(env,guildId);
       const machines=await listShiireMachines(env,guildId);
       const enriched=[];
       for(const machine of machines){
         enriched.push({
           ...machine,
           products:await listShiireProducts(env,machine.id),
+          panels:await listShiirePanels(env,machine.id),
           stockNotification:await getShiireStockNotification(env,machine.id)
         });
       }
@@ -1675,6 +2271,7 @@ export async function handleShiireMainBridge(
       return responseJson({
         ...machine,
         products:await listShiireProducts(env,machine.id),
+        panels:await listShiirePanels(env,machine.id),
         coupons:await listShiireCoupons(env,machine.id),
         stockNotification:await getShiireStockNotification(env,machine.id)
       });
@@ -1811,6 +2408,12 @@ export async function handleShiireMainBridge(
       }
       if(input.emoji!==undefined) patch.emoji=input.emoji?String(input.emoji).slice(0,64):null;
       await updateShiireProduct(env,product.id,patch);
+      if(input.repostPanels===true){
+        return responseJson({
+          ok:true,
+          panelRepost:await repostMachinePanels(env,machine.id)
+        });
+      }
       await refreshMachinePanels(env,machine.id);
       return responseJson({ok:true});
     }
@@ -1902,6 +2505,12 @@ export async function handleShiireMainBridge(
     );
     await saveShiirePanel(env,machine.id,guildId,channelId,message.id);
     return responseJson({ok:true,messageId:message.id});
+  }
+
+  const panelRepost=suffix.match(/^\/vending\/([^/]+)\/panel\/repost$/);
+  if(panelRepost&&request.method==="POST"){
+    const machine=await machineInGuild(env,panelRepost[1]!,guildId);
+    return responseJson(await repostMachinePanels(env,machine.id));
   }
 
   const panelUpdate=suffix.match(/^\/vending\/([^/]+)\/panel\/update$/);

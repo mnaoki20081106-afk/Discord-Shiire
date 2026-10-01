@@ -6,7 +6,7 @@ const bundle=await build({stdin:{contents:`
 import {withFinancialRunLock} from './src/x-run-lock';
 import {runXProcurement} from './src/x-engine';
 import {ensureXSchema,createPurchaseOrderRecord,rebalanceProcurementBudgets,setXSetting} from './src/x-db';
-import {startDailyRestock,continueDailyRestock} from './src/x-daily-restock';
+import {startDailyRestock,continueDailyRestock,handleDailyRestockCron} from './src/x-daily-restock';
 import {saveDailyRestockConfig,saveDailyRestockState,loadDailyRestockState} from './src/x-daily-restock-state';
 import {handleXAdminApi} from './src/x-admin';
 import {saveXSettings} from './src/x-settings';
@@ -23,6 +23,7 @@ export default {async fetch(req,env){
  if(u.pathname==='/api/x/procurement-budget/rebalance')return handleXAdminApi(req,env,u);
  if(u.pathname==='/daily-running'){await saveDailyRestockState(env,{date_key:'2026-09-30',status:'running',started_at:Date.now(),completed_at:0,notified_at:0,initial_top_search:0,initial_no_shadowban:0,target_top_search:1,target_no_shadowban:1,final_top_search:0,final_no_shadowban:0,added_top_search:0,added_no_shadowban:0,last_action:'STARTED',error:''});return Response.json({ok:true});}
  if(u.pathname==='/daily-init'){await saveDailyRestockConfig(env,{top_search_target_stock:0,no_shadowban_target_stock:0,notification_channel_id:'123456789012345678'});return Response.json({ok:true});}
+ if(u.pathname==='/daily-cron')return Response.json(await handleDailyRestockCron(env,Number(u.searchParams.get('time'))));
  if(u.pathname==='/daily-start')return Response.json(await startDailyRestock(env));
  if(u.pathname==='/daily-continue')return Response.json(await continueDailyRestock(env));
 
@@ -88,8 +89,8 @@ test('deposit budget credit survives audit failure without crediting twice',asyn
  assert.equal((await db.prepare('SELECT SUM(available_usd) n FROM procurement_budgets').first()).n,110);
 });
 test('overlapping daily executions publish one summary',async()=>{
- const {mf,calls,entered,release}=await fixture({holdNotification:true});await mf.dispatchFetch('https://test/daily-init');
- const first=mf.dispatchFetch('https://test/daily-start');await entered;
+ const {mf,db,calls,entered,release}=await fixture({holdNotification:true});await mf.dispatchFetch('https://test/daily-init');await notificationState(mf,db);
+ const first=mf.dispatchFetch('https://test/daily-continue');await entered;
  const second=mf.dispatchFetch('https://test/daily-continue');
  // Flush the second invocation through its database operations before responding.
  const response=await Promise.race([second,new Promise(r=>setTimeout(()=>r(null),100))]);
@@ -122,10 +123,27 @@ test('busy financial run keeps daily batch running and blocks admin rebalance',a
 });
 
 test('public arrival notice lists sellable stock without internal target or budget fields',async()=>{
- const {mf,db,messages}=await fixture();await mf.dispatchFetch('https://test/daily-init');await account(db);
+ const {mf,db,messages}=await fixture();await mf.dispatchFetch('https://test/daily-init');await notificationState(mf,db);
  await db.prepare("UPDATE purchased_accounts SET procurement_class='TOP_SEARCH' WHERE id='a'").run();
  await db.prepare("INSERT INTO purchased_accounts(id,supplier,supplier_product_id,purchase_order_id,purchase_price,purchased_at,credentials_ciphertext,credential_fingerprint,procurement_class,status,created_at) VALUES ('b','hstora','1','po',1,1,'{}','reserved-fingerprint','NO_SHADOWBAN','VENDING_RESERVED',1)").run();
- assert.equal((await mf.dispatchFetch('https://test/daily-start')).status,200);
+ assert.equal((await mf.dispatchFetch('https://test/daily-continue')).status,200);
  assert.deepEqual(messages[0].embeds[0].fields,[{name:'No shadow ban',value:'0個',inline:true},{name:'Top Search',value:'1個',inline:true}]);
  assert.doesNotMatch(JSON.stringify(messages[0]),/TARGET_NOT_REACHED|budget|恒常在庫未達/);
+});
+
+async function notificationState(mf,db){
+ await mf.dispatchFetch('https://test/daily-running');await account(db);
+ await db.prepare("UPDATE purchased_accounts SET procurement_class='TOP_SEARCH',created_at=? WHERE id='a'").bind(Date.now()+1000).run();
+ const row=await db.prepare("SELECT value_json FROM settings WHERE key='x_daily_restock_state'").first();
+ const state=JSON.parse(row.value_json);state.status='completed';
+ await db.prepare("UPDATE settings SET value_json=? WHERE key='x_daily_restock_state'").bind(JSON.stringify(state)).run();
+}
+test('previous day notification at 18:00 does not skip todays restock',async()=>{
+ const {mf,db}=await fixture();await mf.dispatchFetch('https://test/daily-init');await notificationState(mf,db);
+ const at=Date.UTC(2026,9,1,9,0);
+ await mf.dispatchFetch('https://test/daily-cron?time='+at);
+ await mf.dispatchFetch('https://test/daily-cron?time='+(at+60000));
+ const state=JSON.parse((await db.prepare("SELECT value_json FROM settings WHERE key='x_daily_restock_state'").first()).value_json);
+ assert.equal(state.date_key,'2026-10-01');
+ assert.equal((await (await mf.dispatchFetch('https://test/daily-cron?time='+(at+120000))).json()).action,'DAILY_RESTOCK_ALREADY_RAN');
 });

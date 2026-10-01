@@ -298,8 +298,11 @@ the 1-minute Cron continues official order reconciliation until delivery is avai
 Per-product vending stock alerts are suppressed while this daily batch is active so
 customers do not receive fragmented alerts for each supplier order.
 
-After the batch finishes, one aggregate Discord arrival notification is sent to the
-configured channel. Its main message is editable, followed by:
+After the batch finishes, an aggregate Discord arrival notification is sent to the
+configured channel **only when at least one No Shadowban or Top Search account was
+actually added during that 18:00 batch**. If the batch adds zero accounts (for example
+because no procurement budget is available), no customer-facing notification or panel
+update is emitted for that day. When sent, its main message is editable, followed by:
 
 ```text
 No shadow ban N個

@@ -719,6 +719,35 @@ export async function saveShiirePanel(
   ).bind(machineId,guildId,channelId,messageId,now,now).run();
 }
 
+export async function listShiirePanels(env:Env,machineId:string){
+  await ensureShiireVendingSchema(env);
+  return (await env.DB.prepare(
+    "SELECT vending_machine_id,guild_id,channel_id,message_id,created_at,updated_at "+
+    "FROM shiire_vending_panels WHERE vending_machine_id=? ORDER BY created_at ASC"
+  ).bind(machineId).all<{
+    vending_machine_id:string;
+    guild_id:string;
+    channel_id:string;
+    message_id:string;
+    created_at:number;
+    updated_at:number;
+  }>()).results;
+}
+
+export async function deleteShiirePanelRecord(
+  env:Env,
+  machineId:string,
+  channelId:string,
+  messageId:string
+){
+  await ensureShiireVendingSchema(env);
+  const result=await env.DB.prepare(
+    "DELETE FROM shiire_vending_panels "+
+    "WHERE vending_machine_id=? AND channel_id=? AND message_id=?"
+  ).bind(machineId,channelId,messageId).run();
+  return Number(result.meta.changes??0)>0;
+}
+
 export async function machinesForSupplierProduct(env:Env,supplierProductId:string){
   await ensureShiireVendingSchema(env);
 

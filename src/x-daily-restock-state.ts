@@ -28,6 +28,7 @@ export type DailyRestockState={
   started_at:number;
   completed_at:number;
   notified_at:number;
+  notification_skipped_reason?:string;
   initial_top_search:number;
   initial_no_shadowban:number;
   target_top_search:number;
