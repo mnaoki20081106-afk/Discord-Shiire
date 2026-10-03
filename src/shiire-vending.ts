@@ -1,4 +1,4 @@
-import { panelPayload, isPanelColor } from "./shiire-panel-payload";
+import { panelPayload, isPanelColor, PANEL_FORMAT_VERSION } from "./shiire-panel-payload";
 import type { Env } from "./types";
 import { hmacHex, sha256Hex } from "./crypto";
 import { loadXSettings, saveXSettings } from "./x-settings";
@@ -1307,6 +1307,7 @@ export async function handleShiireMainBridge(
     catch(error){discordError=error instanceof Error?error.message:String(error);}
     const payment=await getMainPaymentStatus(env).catch(()=>({paypay:false,kyash:false}));
     return responseJson({
+      panelFormat:PANEL_FORMAT_VERSION,
       configured:Boolean(env.DISCORD_BOT_TOKEN&&env.DISCORD_APPLICATION_ID),
       installed:Boolean(guild),
       guild,

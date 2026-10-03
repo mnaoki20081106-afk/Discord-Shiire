@@ -78,12 +78,14 @@ for(const status of ['reserving','awaiting_payment','payment_pending','paid','de
 test('legacy database migrates panel color, persists changes and refreshes tracked Discord messages',async t=>{
  const {call,machine,db,discordUpdates}=await fixture(t,true);
  assert.equal(machine.panel_color,5763719);
+ assert.equal((await (await call('/status')).json()).panelFormat,'price-code-block-v1');
  await db.prepare("INSERT INTO shiire_vending_panels(vending_machine_id,guild_id,channel_id,message_id,created_at,updated_at) VALUES (?, ?, 'channel', 'message',1,1)").bind(machine.id,guild).run();
  for(const color of [0xff3366,0,0xffffff]){
   const response=await call('/vending/'+machine.id,'PATCH',{panelColor:color});
   assert.equal(response.status,200,await response.clone().text());
   assert.equal((await (await call('/vending/'+machine.id)).json()).panel_color,color);
   assert.equal(discordUpdates.at(-1).embeds[0].color,color);
+  assert.match(discordUpdates.at(-1).embeds[0].description,/```\nPayPay:[\s\S]*?\n```/);
  }
  await call('/vending/'+machine.id,'PATCH',{panelTitle:'Color persists'});
  assert.equal((await (await call('/vending/'+machine.id)).json()).panel_color,0xffffff);

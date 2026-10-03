@@ -5,14 +5,14 @@ const machine={id:'fixture',name:'自販機',panel_title:null,panel_description:
 const product:PanelProduct={id:'p',name:'商品',description:'説明',emoji:'✨',price_paypay:150,price_kyash:200,stock_count:2,sales_count:3};
 test('production panel payload preserves Discord embed, image omission and button contract',()=>{
  const payload=panelPayload(machine,[product]);
- assert.deepEqual(payload.embeds,[{title:'自販機',description:'購入したい商品を下のボタンから選択してください。\n\n✨ **商品**\n説明\n`PayPay: 150円 / Kyash: 200円 / 在庫: 2 / 販売: 3`',color:5763719}]);
+ assert.deepEqual(payload.embeds,[{title:'自販機',description:'購入したい商品を下のボタンから選択してください。\n\n✨ **商品**\n説明\n```\nPayPay: 150円 / Kyash: 200円 / 在庫: 2 / 販売: 3\n```',color:5763719}]);
  assert.deepEqual(payload.components[0].components.map(p=>[p.label,p.style,p.custom_id]),[['購入する',3,'svm:buy:fixture'],['在庫・販売数',1,'svm:stock:fixture']]);
  assert.deepEqual(panelPayload({...machine,panel_image_url:'https://example.com/image.png'},[]).embeds[0].image,{url:'https://example.com/image.png'});
 });
 test('description truncation matches previous Discord payload for every boundary',()=>{
  for(let length=3990;length<4100;length++){
   const description='x'.repeat(length),p={...product,description:'z'.repeat(500)};
-  const expected=(description+'\n\n✨ **商品**\n'+p.description+'\n`PayPay: 150円 / Kyash: 200円 / 在庫: 2 / 販売: 3`').slice(0,4096);
+  const expected=(description+'\n\n✨ **商品**\n'+p.description+'\n```\nPayPay: 150円 / Kyash: 200円 / 在庫: 2 / 販売: 3\n```').slice(0,4096);
   assert.equal(panelPayload({...machine,panel_description:description},[p]).embeds[0].description,expected);
  }
  assert.equal(panelPayload({...machine,panel_title:'x'.repeat(300)},[]).embeds[0].title.length,256);
