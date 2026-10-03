@@ -1,3 +1,4 @@
+import { restockMessagePayload, validateRestockMessage, isRestockMention } from "./shiire-restock-message";
 import { withNamedRunLock } from "./x-run-lock";
 import type { Env } from "./types";
 import {
@@ -60,32 +61,15 @@ function notificationPayload(
   available:{
     topSearch:number;
     noShadowban:number;
-  }
+  },
+  notify=false
 ){
-  return {
-    allowed_mentions:{parse:[]},
-    embeds:[{
-      title:"在庫入荷のお知らせ",
-      color:5763719,
-      description:config.notification_message,
-      fields:[
-        {
-          name:"No shadow ban",
-          value:String(available.noShadowban)+"個",
-          inline:true
-        },
-        {
-          name:"Top Search",
-          value:String(available.topSearch)+"個",
-          inline:true
-        }
-      ],
-      footer:{
-        text:"現在の販売可能在庫 / 毎日18:00（JST）入荷"
-      },
-      timestamp:new Date(state.completed_at||Date.now()).toISOString()
-    }]
-  };
+  return restockMessagePayload(config.notification_message,{
+    normal_stock:available.noShadowban,
+    normal_added:state.added_no_shadowban,
+    old_stock:available.topSearch,
+    old_added:state.added_top_search
+  },notify,config.notification_mention);
 }
 
 async function currentStocks(env:Env){
@@ -191,7 +175,7 @@ async function publishDailyRestockSummary(
   await discordJson(
     env,
     "/channels/"+config.notification_channel_id+"/messages",
-    {method:"POST",body:JSON.stringify({...payload,
+    {method:"POST",body:JSON.stringify({...notificationPayload(config,state,available,true),
       nonce:"restock-"+String(state.started_at),enforce_nonce:true})}
   );
   state.notified_at=Date.now();
@@ -299,6 +283,7 @@ export async function updateDailyRestockConfig(
     noShadowbanTargetStock?:unknown;
     notificationChannelId?:unknown;
     notificationMessage?:unknown;
+    notificationMention?:unknown;
   }
 ){
   const xSettings=await loadXSettings(env);
@@ -339,9 +324,13 @@ export async function updateDailyRestockConfig(
       patch.panel_message_id="";
     }
   }
+  if(input.notificationMention!==undefined){
+    if(typeof input.notificationMention!=="string"||!isRestockMention(input.notificationMention)) throw new Error("NOTIFICATION_MENTION_INVALID");
+    patch.notification_mention=input.notificationMention;
+  }
   if(input.notificationMessage!==undefined){
     const value=String(input.notificationMessage??"").trim();
-    if(!value||value.length>2000){
+    if(!validateRestockMessage(value)){
       throw new Error("NOTIFICATION_MESSAGE_INVALID");
     }
     patch.notification_message=value;

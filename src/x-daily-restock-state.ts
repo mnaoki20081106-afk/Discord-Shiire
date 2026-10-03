@@ -1,3 +1,4 @@
+import { DEFAULT_RESTOCK_MESSAGE, normalizeRestockMessage, validateRestockMessage, isRestockMention } from "./shiire-restock-message";
 import type { Env } from "./types";
 import { getXSetting, setXSetting } from "./x-db";
 import { jstDateKey } from "./x-daily-restock-policy";
@@ -18,6 +19,7 @@ export type DailyRestockConfig={
   no_shadowban_target_stock:number;
   notification_channel_id:string;
   notification_message:string;
+  notification_mention:string;
   panel_channel_id:string;
   panel_message_id:string;
 };
@@ -46,7 +48,8 @@ export const DEFAULT_DAILY_RESTOCK_CONFIG:DailyRestockConfig={
   top_search_target_stock:50,
   no_shadowban_target_stock:50,
   notification_channel_id:"",
-  notification_message:"本日の在庫を入荷しました！",
+  notification_message:DEFAULT_RESTOCK_MESSAGE,
+  notification_mention:"everyone",
   panel_channel_id:"",
   panel_message_id:""
 };
@@ -83,9 +86,10 @@ export function sanitizeDailyRestockConfig(
     notification_channel_id:safeSnowflake(
       input.notification_channel_id
     ),
-    notification_message:String(
+    notification_message:normalizeRestockMessage(String(
       input.notification_message??fallback.notification_message
-    ).trim().slice(0,2000),
+    ).trim().slice(0,2000)),
+    notification_mention:typeof input.notification_mention==="string"&&isRestockMention(input.notification_mention)?input.notification_mention:fallback.notification_mention,
     panel_channel_id:safeSnowflake(input.panel_channel_id),
     panel_message_id:safeSnowflake(input.panel_message_id)
   };
@@ -121,8 +125,8 @@ export async function saveDailyRestockConfig(
   if(next.top_search_target_stock>10000||next.no_shadowban_target_stock>10000){
     throw new Error("DAILY_RESTOCK_TARGET_OUT_OF_RANGE");
   }
-  if(!next.notification_message){
-    throw new Error("DAILY_RESTOCK_MESSAGE_REQUIRED");
+  if(!validateRestockMessage(next.notification_message)){
+    throw new Error("NOTIFICATION_MESSAGE_INVALID");
   }
   await setXSetting(env,DAILY_RESTOCK_CONFIG_KEY,next);
   return next;

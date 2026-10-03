@@ -235,6 +235,13 @@
           "required": true,
           "description": "招待キャンペーンでGuild Invitesの利用回数を取得し、誰の招待かを照合するために必要です。",
           "discord_permission": "MANAGE_GUILD"
+        },
+        {
+          "id": "mention-everyone",
+          "label": "入荷通知で @everyone をメンション",
+          "required": false,
+          "description": "18時のまとめ通知で @everyone を使用する場合、通知先チャンネルでこの権限を許可してください。",
+          "discord_permission": "MENTION_EVERYONE"
         }
       ],
       "checks": [
@@ -257,7 +264,7 @@
         "招待キャンペーンを使うため、Discord Developer PortalでServer Members IntentをONにしてください。",
         "Binance出金キー・固定IP・Travel Rule設定は現在のHStora手動入金境界では不要です。",
         "初期状態は funding_mode=manual_hstora / Dry Run=true / Binance自動購入OFF / 自動仕入れOFFです。",
-        "在庫通知でロールをpingする場合は、通知対象ロールをDiscord側でメンション可能にしてください。BOTへMention Everyone権限を広く付ける構成にはしていません。",
+        "18時のまとめ通知で @everyone を使う場合は、通知先チャンネルでBOTに「@everyone、@here、すべてのロールにメンション」権限を許可してください。",
         "BINANCE_AUTO_FUNDING_ENABLEDは通常OFFです。ONにしない限り、Binanceの実LTC購入はコード側で拒否されます。",
         "招待キャンペーン参加者は、Discord標準の「招待を作成」を使います。参加者ロールには招待URLを発行させたいチャンネルで「招待を作成」権限を付与してください。BOT自身にCREATE_INSTANT_INVITE権限は不要です。",
         "旧版で /invite-link を登録済みの場合、デプロイ後に管理API POST /api/discord/register を1回実行すると旧コマンドが削除され、管理者向けコマンドだけに同期されます。"

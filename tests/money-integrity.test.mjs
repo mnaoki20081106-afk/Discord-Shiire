@@ -6,7 +6,7 @@ const bundle=await build({stdin:{contents:`
 import {withFinancialRunLock} from './src/x-run-lock';
 import {runXProcurement,runXMaintenance} from './src/x-engine';
 import {ensureXSchema,createPurchaseOrderRecord,rebalanceProcurementBudgets,setXSetting} from './src/x-db';
-import {startDailyRestock,continueDailyRestock,handleDailyRestockCron} from './src/x-daily-restock';
+import {startDailyRestock,continueDailyRestock,handleDailyRestockCron,updateDailyRestockConfig,installDailyRestockPanel} from './src/x-daily-restock';
 import {saveDailyRestockConfig,saveDailyRestockState,loadDailyRestockState} from './src/x-daily-restock-state';
 import {handleXAdminApi} from './src/x-admin';
 import {saveXSettings} from './src/x-settings';
@@ -25,6 +25,8 @@ export default {async fetch(req,env){
  if(u.pathname==='/api/x/procurement-budget/rebalance')return handleXAdminApi(req,env,u);
  if(u.pathname==='/daily-running'){await saveDailyRestockState(env,{date_key:'2026-09-30',status:'running',started_at:Date.now(),completed_at:0,notified_at:0,initial_top_search:0,initial_no_shadowban:0,target_top_search:1,target_no_shadowban:1,final_top_search:0,final_no_shadowban:0,added_top_search:0,added_no_shadowban:0,last_action:'STARTED',error:''});return Response.json({ok:true});}
  if(u.pathname==='/daily-init'){await saveDailyRestockConfig(env,{top_search_target_stock:0,no_shadowban_target_stock:0,notification_channel_id:'123456789012345678'});return Response.json({ok:true});}
+ if(u.pathname==='/daily-settings')return Response.json(await updateDailyRestockConfig(env,await req.json()));
+ if(u.pathname==='/daily-panel')return Response.json(await installDailyRestockPanel(env));
  if(u.pathname==='/daily-cron')return Response.json(await handleDailyRestockCron(env,Number(u.searchParams.get('time'))));
  if(u.pathname==='/daily-start')return Response.json(await startDailyRestock(env));
  if(u.pathname==='/daily-continue')return Response.json(await continueDailyRestock(env));
@@ -129,7 +131,13 @@ test('public arrival notice lists sellable stock without internal target or budg
  await db.prepare("UPDATE purchased_accounts SET procurement_class='TOP_SEARCH' WHERE id='a'").run();
  await db.prepare("INSERT INTO purchased_accounts(id,supplier,supplier_product_id,purchase_order_id,purchase_price,purchased_at,credentials_ciphertext,credential_fingerprint,procurement_class,status,created_at) VALUES ('b','hstora','1','po',1,1,'{}','reserved-fingerprint','NO_SHADOWBAN','VENDING_RESERVED',1)").run();
  assert.equal((await mf.dispatchFetch('https://test/daily-continue')).status,200);
- assert.deepEqual(messages[0].embeds[0].fields,[{name:'No shadow ban',value:'0個',inline:true},{name:'Top Search',value:'1個',inline:true}]);
+ assert.match(messages[0].content,/①Search Top \+ No shadow ban\*\n現在在庫 : 0個（\+0個）/);
+ assert.match(messages[0].content,/②【Old】Top Search \+ No shadow ban\*\n現在在庫 : 1個（\+1個）/);
+ assert.match(messages[0].content,/^@everyone/);
+ assert.deepEqual(messages[0].allowed_mentions,{parse:['everyone']});
+ assert.deepEqual(messages[0].embeds,[]);
+ await mf.dispatchFetch('https://test/daily-continue');
+ assert.equal(messages.length,1,'retry after successful notification must not send again');
  assert.doesNotMatch(JSON.stringify(messages[0]),/TARGET_NOT_REACHED|budget|恒常在庫未達/);
 });
 
@@ -167,4 +175,22 @@ test('maintenance uses the purchase lock so deposits cannot race budget changes'
   assert.equal((await (await mf.dispatchFetch('https://test/maintenance')).json()).action,'FINANCIAL_RUN_LOCKED');
   assert.equal(calls.some(url=>url.includes('/balance')),false);
  }finally{release();await held;}
+});
+
+for(const mention of ['123456789012345680',''])test('daily arrival mention selection and silent preview: '+(mention||'none'),async()=>{
+ const {mf,db,messages}=await fixture();
+ await mf.dispatchFetch('https://test/daily-init');
+ const updated=await mf.dispatchFetch('https://test/daily-settings',{method:'POST',body:JSON.stringify({notificationMention:mention,notificationMessage:'{mention} 通常 {normal_stock}個 (+{normal_added}) / Old {old_stock}個 (+{old_added})'})});
+ assert.equal(updated.status,200);
+ assert.equal((await updated.json()).config.notification_mention,mention);
+ await mf.dispatchFetch('https://test/daily-panel');
+ assert.deepEqual(messages[0].allowed_mentions,{parse:[]},'installing preview must not ping');
+ await notificationState(mf,db);
+ await mf.dispatchFetch('https://test/daily-continue');
+ assert.equal(messages.length,3);
+ assert.deepEqual(messages[1].allowed_mentions,{parse:[]},'updating tracked panel must not ping');
+ assert.deepEqual(messages[2].allowed_mentions,mention?{roles:[mention]}:{parse:[]});
+ assert.equal(messages[2].content,(mention?'<@&'+mention+'>':'')+' 通常 0個 (+0) / Old 1個 (+1)');
+ await mf.dispatchFetch('https://test/daily-continue');
+ assert.equal(messages.length,3);
 });
