@@ -1522,6 +1522,22 @@ export async function runXProcurement(
   return withFinancialRunLock(env,lease=>runXProcurementLocked(env,lease,options));
 }
 
+// Balance detection and reconciliation continue when purchasing is paused.
+// Share the purchase lock so a deposit cannot race a budget reservation.
+export async function runXMaintenance(env:Env):Promise<XRunResult>{
+  return withFinancialRunLock(env,async assertLease=>{
+    const settings=await loadXSettings(env);
+    await reconcilePendingXOrders(env);
+    const balance=await getHstoraBalance(env);
+    if(String(balance.currency).toUpperCase()!=="USD"){
+      throw new Error("HSTORA_BALANCE_CURRENCY_UNSUPPORTED");
+    }
+    await assertLease();
+    const ok=await checkHstoraBalanceGuard(env,Number(balance.balance),settings);
+    return {action:ok?"HSTORA_BALANCE_SYNCED":"UNEXPECTED_BALANCE_CIRCUIT_BREAKER",dryRun:settings.dry_run};
+  });
+}
+
 async function runXProcurementLocked(
   env:Env,
   assertLease:AssertFinancialLease,

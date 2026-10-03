@@ -14,7 +14,7 @@ import {
 import { getMainCatalog, getMainStock } from "./main-bot";
 import { runAllProducts, runProduct } from "./engine";
 import { handleXAdminApi, xAdminPage } from "./x-admin";
-import { runLtcAutoPurchase, runXProcurement } from "./x-engine";
+import { runLtcAutoPurchase, runXProcurement, runXMaintenance } from "./x-engine";
 import { loadXSettings } from "./x-settings";
 import {
   reconcileInviteCampaignRewards,
@@ -471,6 +471,11 @@ export default {
 
       try{
         const settings=await loadXSettings(env);
+        try{
+          await runXMaintenance(env);
+        }catch(error){
+          console.error("scheduled HStora balance/reconciliation failed",error);
+        }
         if(settings.funding_mode==="binance_auto"&&settings.auto_purchase_enabled){
           try{
             await runLtcAutoPurchase(env);

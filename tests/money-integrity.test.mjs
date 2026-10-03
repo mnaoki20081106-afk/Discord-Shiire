@@ -4,7 +4,7 @@ import {build} from 'esbuild';
 import {Miniflare} from 'miniflare';
 const bundle=await build({stdin:{contents:`
 import {withFinancialRunLock} from './src/x-run-lock';
-import {runXProcurement} from './src/x-engine';
+import {runXProcurement,runXMaintenance} from './src/x-engine';
 import {ensureXSchema,createPurchaseOrderRecord,rebalanceProcurementBudgets,setXSetting} from './src/x-db';
 import {startDailyRestock,continueDailyRestock,handleDailyRestockCron} from './src/x-daily-restock';
 import {saveDailyRestockConfig,saveDailyRestockState,loadDailyRestockState} from './src/x-daily-restock-state';
@@ -16,6 +16,8 @@ export default {async fetch(req,env){
  if(u.pathname==='/init'){await ensureXSchema(env);await ensureShiireVendingSchema(env);await saveXSettings(env,{dry_run:false,auto_procurement_enabled:true});return Response.json({ok:true});}
  if(u.pathname==='/lock')return Response.json(await withFinancialRunLock(env,async check=>{await fetch('https://gate.example');await check();return {action:'RAN',dryRun:false};}));
  if(u.pathname==='/pending'){await createPurchaseOrderRecord(env,{supplier:'hstora',supplierProductId:'1',quantity:1,unitPrice:1,totalAmount:1,currency:'USD',externalOrderId:'pending',idempotencyKey:'pending',dryRun:false});return Response.json({ok:true});}
+ if(u.pathname==='/maintenance')return Response.json(await runXMaintenance(env));
+ if(u.pathname==='/pause'){await saveXSettings(env,{auto_procurement_enabled:false,emergency_stop:u.searchParams.has('stop')});return Response.json({ok:true});}
  if(u.pathname==='/run')return Response.json(await runXProcurement(env));
  if(u.pathname==='/balance-run')return Response.json(await runXProcurement(env,{targetClasses:[]}));
  if(u.pathname==='/budget-init'){await rebalanceProcurementBudgets(env,100,{INVITE_CAMPAIGN:0,NO_SHADOWBAN:50,TOP_SEARCH:50});await setXSetting(env,'x_hstora_balance_guard',{hstoraUsd:100,allowedDecreaseUsd:0,updatedAt:Date.now()});return Response.json({ok:true});}
@@ -146,4 +148,23 @@ test('previous day notification at 18:00 does not skip todays restock',async()=>
  const state=JSON.parse((await db.prepare("SELECT value_json FROM settings WHERE key='x_daily_restock_state'").first()).value_json);
  assert.equal(state.date_key,'2026-10-01');
  assert.equal((await (await mf.dispatchFetch('https://test/daily-cron?time='+(at+120000))).json()).action,'DAILY_RESTOCK_ALREADY_RAN');
+});
+
+for(const stopped of [false,true])test('paused procurement still credits deposits without purchasing; emergency stop='+stopped,async()=>{
+ const {mf,db,calls}=await fixture({balance:110});
+ await mf.dispatchFetch('https://test/budget-init');
+ await mf.dispatchFetch('https://test/pause'+(stopped?'?stop':''));
+ const first=await (await mf.dispatchFetch('https://test/maintenance')).json();
+ assert.equal(first.action,'HSTORA_BALANCE_SYNCED');
+ await mf.dispatchFetch('https://test/maintenance');
+ assert.equal((await db.prepare('SELECT SUM(available_usd) n FROM procurement_budgets').first()).n,110);
+ assert.equal(calls.some(url=>url.includes('/orders')),false);
+});
+test('maintenance uses the purchase lock so deposits cannot race budget changes',async()=>{
+ const {mf,release,entered,calls}=await fixture();
+ const held=mf.dispatchFetch('https://test/lock');await entered;
+ try{
+  assert.equal((await (await mf.dispatchFetch('https://test/maintenance')).json()).action,'FINANCIAL_RUN_LOCKED');
+  assert.equal(calls.some(url=>url.includes('/balance')),false);
+ }finally{release();await held;}
 });
