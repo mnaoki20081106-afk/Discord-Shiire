@@ -8,7 +8,7 @@ export type PanelProduct={id:string;name:string;description:string;emoji:string|
 export function panelSections(machine:PanelMachine,products:PanelProduct[]){
   const sections=[{id:"description",text:machine.panel_description||"購入したい商品を下のボタンから選択してください。"},
     ...products.map(product=>({id:product.id,text:(product.emoji?product.emoji+" ":"")+"**"+product.name+"**\n"+
-      (product.description?product.description+"\n":"")+"PayPay: "+product.price_paypay+"円 / Kyash: "+product.price_kyash+"円 / 在庫: "+product.stock_count+" / 販売: "+product.sales_count}))];
+      (product.description?product.description+"\n":"")+"`PayPay: "+product.price_paypay+"円 / Kyash: "+product.price_kyash+"円 / 在庫: "+product.stock_count+" / 販売: "+product.sales_count+"`"}))];
   if(!products.length) sections.push({id:"empty",text:"現在販売中の商品はありません。"});
   let remaining=4096;
   return sections.map((section,index)=>{
