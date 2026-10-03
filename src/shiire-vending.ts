@@ -1,4 +1,4 @@
-import { panelPayload } from "./shiire-panel-payload";
+import { panelPayload, isPanelColor } from "./shiire-panel-payload";
 import type { Env } from "./types";
 import { hmacHex, sha256Hex } from "./crypto";
 import { loadXSettings, saveXSettings } from "./x-settings";
@@ -2237,6 +2237,7 @@ export async function handleShiireMainBridge(
         roleId?:string|null;
         panelTitle?:string|null;
         panelDescription?:string|null;
+        panelColor?:number;
       }={};
       if(input.name!==undefined){
         const name=String(input.name).trim();
@@ -2263,6 +2264,10 @@ export async function handleShiireMainBridge(
       }
       if(input.panelDescription!==undefined){
         patch.panelDescription=String(input.panelDescription??"").slice(0,3000)||null;
+      }
+      if(input.panelColor!==undefined){
+        if(!isPanelColor(input.panelColor)) throw new ShiireVendingError(400,"INVALID_PANEL_COLOR");
+        patch.panelColor=input.panelColor;
       }
       await updateShiireMachine(env,machine.id,patch);
       await refreshMachinePanels(env,machine.id);

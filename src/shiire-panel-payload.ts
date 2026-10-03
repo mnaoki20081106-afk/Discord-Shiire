@@ -1,5 +1,9 @@
 // Keep this pure payload contract identical in Discord-Shiire and Xaccount-Bot.
-export type PanelMachine={id:string;name:string;panel_title:string|null;panel_description:string|null;panel_image_url:string|null};
+export const DEFAULT_PANEL_COLOR=0x57f287;
+export function isPanelColor(value:unknown):value is number{
+  return typeof value==="number"&&Number.isInteger(value)&&value>=0&&value<=0xffffff;
+}
+export type PanelMachine={id:string;name:string;panel_title:string|null;panel_description:string|null;panel_image_url:string|null;panel_color?:number|null};
 export type PanelProduct={id:string;name:string;description:string;emoji:string|null;price_paypay:number;price_kyash:number;stock_count:number;sales_count:number};
 export function panelSections(machine:PanelMachine,products:PanelProduct[]){
   const sections=[{id:"description",text:machine.panel_description||"購入したい商品を下のボタンから選択してください。"},
@@ -19,7 +23,7 @@ export function machineEmbed(machine:PanelMachine,products:PanelProduct[]){
   return {
     title:(machine.panel_title||machine.name||"仕入れBOT自販機").slice(0,256),
     description,
-    color:5763719,
+    color:isPanelColor(machine.panel_color)?machine.panel_color:DEFAULT_PANEL_COLOR,
     ...(machine.panel_image_url?{image:{url:machine.panel_image_url}}:{})
   };
 }

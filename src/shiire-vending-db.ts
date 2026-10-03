@@ -1,3 +1,4 @@
+import { DEFAULT_PANEL_COLOR, isPanelColor } from "./shiire-panel-payload";
 import type { Env } from "./types";
 import { randomId } from "./crypto";
 import { encryptSensitive, decryptSensitive, type EncryptedSecret } from "./x-crypto";
@@ -15,6 +16,7 @@ export type ShiireVendingMachine={
   panel_title:string|null;
   panel_description:string|null;
   panel_image_url:string|null;
+  panel_color?:number;
   active:number;
   created_at:number;
   updated_at:number;
@@ -61,7 +63,7 @@ export type ShiireVendingOrder={
 let ready=false;
 
 const SCHEMA=[
-  "CREATE TABLE IF NOT EXISTS shiire_vending_machines (id TEXT PRIMARY KEY,guild_id TEXT NOT NULL,name TEXT NOT NULL,public_log_channel_id TEXT,private_log_channel_id TEXT,role_id TEXT,panel_title TEXT,panel_description TEXT,panel_image_url TEXT,panel_image_mime TEXT,panel_image_base64 TEXT,active INTEGER NOT NULL DEFAULT 1,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL)",
+  "CREATE TABLE IF NOT EXISTS shiire_vending_machines (id TEXT PRIMARY KEY,guild_id TEXT NOT NULL,name TEXT NOT NULL,public_log_channel_id TEXT,private_log_channel_id TEXT,role_id TEXT,panel_title TEXT,panel_description TEXT,panel_color INTEGER NOT NULL DEFAULT 5763719,panel_image_url TEXT,panel_image_mime TEXT,panel_image_base64 TEXT,active INTEGER NOT NULL DEFAULT 1,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL)",
   "CREATE INDEX IF NOT EXISTS shiire_vending_machines_guild_idx ON shiire_vending_machines(guild_id,active)",
   "CREATE TABLE IF NOT EXISTS shiire_vending_products (id TEXT PRIMARY KEY,vending_machine_id TEXT NOT NULL,supplier_product_id TEXT NOT NULL,procurement_class TEXT,name TEXT NOT NULL,description TEXT NOT NULL DEFAULT '',price_paypay INTEGER NOT NULL DEFAULT 0,price_kyash INTEGER NOT NULL DEFAULT 0,emoji TEXT,sales_count INTEGER NOT NULL DEFAULT 0,active INTEGER NOT NULL DEFAULT 1,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL)",
   "CREATE INDEX IF NOT EXISTS shiire_vending_products_vm_idx ON shiire_vending_products(vending_machine_id,active)",
@@ -83,6 +85,7 @@ export async function ensureShiireVendingSchema(env:Env){
     "PRAGMA table_info(shiire_vending_machines)"
   ).all<{name:string}>()).results.map(row=>row.name);
   for(const [name,type] of [
+    ["panel_color","INTEGER NOT NULL DEFAULT 5763719"],
     ["panel_image_url","TEXT"],
     ["panel_image_mime","TEXT"],
     ["panel_image_base64","TEXT"]
@@ -153,12 +156,14 @@ export async function updateShiireMachine(
     roleId:string|null;
     panelTitle:string|null;
     panelDescription:string|null;
+    panelColor:number;
   }>
 ){
+  if(input.panelColor!==undefined&&!isPanelColor(input.panelColor)) throw new Error("INVALID_PANEL_COLOR");
   const current=await getShiireMachine(env,id);
   if(!current) return false;
   const result=await env.DB.prepare(
-    "UPDATE shiire_vending_machines SET name=?,public_log_channel_id=?,private_log_channel_id=?,role_id=?,panel_title=?,panel_description=?,updated_at=? WHERE id=? AND active=1"
+    "UPDATE shiire_vending_machines SET name=?,public_log_channel_id=?,private_log_channel_id=?,role_id=?,panel_title=?,panel_description=?,panel_color=?,updated_at=? WHERE id=? AND active=1"
   ).bind(
     input.name??current.name,
     input.publicLogChannelId===undefined?current.public_log_channel_id:input.publicLogChannelId,
@@ -166,6 +171,7 @@ export async function updateShiireMachine(
     input.roleId===undefined?current.role_id:input.roleId,
     input.panelTitle===undefined?current.panel_title:input.panelTitle,
     input.panelDescription===undefined?current.panel_description:input.panelDescription,
+    input.panelColor===undefined?(current.panel_color??DEFAULT_PANEL_COLOR):input.panelColor,
     Date.now(),id
   ).run();
   return Number(result.meta.changes??0)>0;

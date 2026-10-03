@@ -11,21 +11,24 @@ export default {async fetch(request,env){try{
  if(new URL(request.url).pathname==='/stale-reservation')return Response.json(await reserveShiireOrder(env,await request.json()));
  return await handleShiireMainBridge(request,env,new URL(request.url))??new Response('missing',{status:404});
 }catch(error){return Response.json({message:error.message},{status:error.status??500});}}};`,resolveDir:process.cwd(),sourcefile:'vending-default-fixture.ts'},bundle:true,write:false,format:'esm',platform:'browser'});
-async function fixture(t){
- const discordDeletes=[];
+async function fixture(t,legacy=false){
+ const discordDeletes=[],discordUpdates=[];
  const mf=new Miniflare({modules:true,script:bundle.outputFiles[0].text,compatibilityDate:'2026-08-06',compatibilityFlags:['nodejs_compat'],d1Databases:['DB'],bindings:{SHIIRE_BRIDGE_SECRET:secret,DISCORD_BOT_TOKEN:'fixture'},outboundService:async request=>{
   assert.equal(new URL(request.url).hostname,'discord.com');
   if(request.method==='DELETE')discordDeletes.push(request.url);
+  if(request.method==='PATCH')discordUpdates.push(await request.json());
   return request.method==='DELETE'?new Response(null,{status:204}):Response.json({id:'fixture-message'});
  }});t.after(()=>mf.dispose());
+ const db=await mf.getD1Database('DB');
+ if(legacy) await db.prepare('CREATE TABLE shiire_vending_machines (id TEXT PRIMARY KEY,guild_id TEXT NOT NULL,name TEXT NOT NULL,public_log_channel_id TEXT,private_log_channel_id TEXT,role_id TEXT,panel_title TEXT,panel_description TEXT,panel_image_url TEXT,panel_image_mime TEXT,panel_image_base64 TEXT,active INTEGER NOT NULL DEFAULT 1,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL)').run();
  const call=async(suffix,method='GET',payload)=>{
   const path='/bridge/main/guilds/'+guild+suffix,body=payload?JSON.stringify(payload):'',timestamp=String(Date.now()),nonce=randomUUID();
   const signature=createHmac('sha256',secret).update([timestamp,nonce,method,path,body].join('\n')).digest('hex');
   return mf.dispatchFetch('https://fixture.example'+path,{method,body:body||undefined,headers:{'X-Shiire-Timestamp':timestamp,'X-Shiire-Nonce':nonce,'X-Shiire-Signature':signature}});
  };
  const created=await call('/vending','POST',{name:'Fixture vending'});assert.equal(created.status,201,await created.clone().text());
- const machine=await created.json(),db=await mf.getD1Database('DB');
- return {mf,call,machine,db,discordDeletes};
+ const machine=await created.json();
+ return {mf,call,machine,db,discordDeletes,discordUpdates};
 }
 test('new machine has two independent class products and default seeding preserves edited prices',async t=>{
  const {call,machine,db}=await fixture(t);
@@ -70,4 +73,27 @@ for(const status of ['reserving','awaiting_payment','payment_pending','paid','de
  const response=await call('/vending/'+machine.id,'DELETE');assert.equal(response.status,409,await response.clone().text());
  assert.equal((await db.prepare('SELECT active FROM shiire_vending_machines WHERE id=?').bind(machine.id).first()).active,1);
  assert.equal(discordDeletes.length,0);
+});
+
+test('legacy database migrates panel color, persists changes and refreshes tracked Discord messages',async t=>{
+ const {call,machine,db,discordUpdates}=await fixture(t,true);
+ assert.equal(machine.panel_color,5763719);
+ await db.prepare("INSERT INTO shiire_vending_panels(vending_machine_id,guild_id,channel_id,message_id,created_at,updated_at) VALUES (?, ?, 'channel', 'message',1,1)").bind(machine.id,guild).run();
+ for(const color of [0xff3366,0,0xffffff]){
+  const response=await call('/vending/'+machine.id,'PATCH',{panelColor:color});
+  assert.equal(response.status,200,await response.clone().text());
+  assert.equal((await (await call('/vending/'+machine.id)).json()).panel_color,color);
+  assert.equal(discordUpdates.at(-1).embeds[0].color,color);
+ }
+ await call('/vending/'+machine.id,'PATCH',{panelTitle:'Color persists'});
+ assert.equal((await (await call('/vending/'+machine.id)).json()).panel_color,0xffffff);
+ const count=discordUpdates.length;
+ for(const color of [-1,0x1000000,0.5,null,true,'#ff3366']){
+  const response=await call('/vending/'+machine.id,'PATCH',{name:'Must not save',panelColor:color});
+  assert.equal(response.status,400);
+  assert.match(await response.text(),/INVALID_PANEL_COLOR/);
+ }
+ const saved=await (await call('/vending/'+machine.id)).json();
+ assert.equal(saved.panel_color,0xffffff);assert.equal(saved.name,'Fixture vending');
+ assert.equal(discordUpdates.length,count,'invalid colors must not update Discord');
 });

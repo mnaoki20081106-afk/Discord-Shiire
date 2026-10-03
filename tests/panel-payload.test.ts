@@ -17,3 +17,8 @@ test('description truncation matches previous Discord payload for every boundary
  }
  assert.equal(panelPayload({...machine,panel_title:'x'.repeat(300)},[]).embeds[0].title.length,256);
 });
+
+test('custom RGB colors including black survive payload construction; legacy values keep green',()=>{
+ for(const color of [0,0xff3366,0xffffff]) assert.equal(panelPayload({...machine,panel_color:color},[product]).embeds[0].color,color);
+ for(const color of [null,-1,0x1000000,0.5,NaN]) assert.equal(panelPayload({...machine,panel_color:color},[]).embeds[0].color,5763719);
+});
