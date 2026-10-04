@@ -58,18 +58,22 @@ import {
 } from "./providers/hstora";
 import {
   detectSearchVisibility,
+  detectOldAccountEvidence,
+  hasOldSearchNoShadowbanEvidence,
+  hasSearchVisibilityEvidence,
   isXAccountProduct,
   qualifyHstoraProduct,
   type ProcurementClass
 } from "./x-qualification";
 import {
   DUAL_TOP_SPLIT_MODE,
+  HSTORA_X_MAX_UNIT_PRICE_USD,
   PREFERRED_NO_SHADOWBAN_HSTORA_PRODUCT_IDS,
   PREFERRED_TOP_HSTORA_PRODUCT_IDS,
   evenSplitPurchaseQuantity,
-  hasDualTopNoShadowbanEvidence,
+  hstoraPricePriorityTier,
   hstoraProcurementPriorityTier,
-  isTopSearchFallbackEligible,
+  isBlockedHstoraSource,
   isPreferredNoShadowbanHstoraSource,
   isPreferredTopHstoraSource,
   procurementClassOverrideForHstoraProduct
@@ -240,30 +244,6 @@ async function catalogProducts(env:Env,approvedIds:number[]):Promise<HstoraCatal
   return out;
 }
 
-function hasTopSearchEvidence(product:HstoraCatalogItem|HstoraProduct){
-  const labels=detectSearchVisibility(product).labels;
-  return labels.includes("TOP+Latest")||labels.includes("TOP Search");
-}
-
-function catalogBasePriceJpy(
-  product:HstoraCatalogItem,
-  settings:Awaited<ReturnType<typeof loadXSettings>>
-):number|null{
-  const currency=String(product.currency??"").toUpperCase();
-  const price=Number(product.price);
-  if(!Number.isFinite(price)||price<=0) return null;
-  if(currency==="JPY") return price;
-  if(
-    currency==="USD"&&
-    settings.usd_jpy_rate>0&&
-    settings.usd_jpy_rate_updated_at>0&&
-    Date.now()-settings.usd_jpy_rate_updated_at<=settings.max_fx_age_ms
-  ){
-    return price*settings.usd_jpy_rate;
-  }
-  return null;
-}
-
 export async function selectCandidate(
   env:Env,
   quantityLimit:number,
@@ -275,7 +255,7 @@ export async function selectCandidate(
     ...PREFERRED_TOP_HSTORA_PRODUCT_IDS,
     ...PREFERRED_NO_SHADOWBAN_HSTORA_PRODUCT_IDS,
     ...settings.approved_hstora_product_ids
-  ])];
+  ])].filter(id=>!isBlockedHstoraSource(id));
   const approvedIds=
     settings.seller_quality_mode==="manual_product_approval"
       ?trustedApprovedIds
@@ -309,49 +289,31 @@ export async function selectCandidate(
 
   for(const product of products){
     if(!isXAccountProduct(product)) continue;
+    if(isBlockedHstoraSource(product.id)) continue;
 
     const visibility=detectSearchVisibility(product);
-    const hasTop=
-      visibility.labels.includes("TOP+Latest")||
-      visibility.labels.includes("TOP Search");
     const hasNoShadow=visibility.labels.includes("No Shadowban");
-    const dualCapability=hasDualTopNoShadowbanEvidence(
-      visibility.labels
-    );
-    const forceNoShadowban=
-      procurementClassOverrideForHstoraProduct(product.id)==="NO_SHADOWBAN";
-    const baseJpy=catalogBasePriceJpy(product,settings);
+    const hasSearch=hasSearchVisibilityEvidence(visibility.labels);
+    const hasOld=detectOldAccountEvidence(product).old;
     const baseUsd=
       String(product.currency??"").toUpperCase()==="USD"
         ?Number(product.price)
         :null;
 
-    if(targetClass==="TOP_SEARCH"){
-      if(forceNoShadowban) continue;
-      if(!hasTop) continue;
-      if(!isTopSearchFallbackEligible(product.id,visibility.labels)) continue;
-      if(baseJpy===null||baseJpy>settings.max_unit_price_jpy) continue;
-    }else if(targetClass==="NO_SHADOWBAN"){
-      if(hasTop&&!dualCapability&&!forceNoShadowban) continue;
-      if(!hasNoShadow) continue;
-      if(
-        baseUsd===null||
-        !Number.isFinite(baseUsd)||
-        baseUsd>settings.max_no_shadowban_unit_price_usd
-      ){
-        continue;
-      }
-    }else{
-      const topEligible=
-        !forceNoShadowban&&hasTop&&
-        baseJpy!==null&&baseJpy<=settings.max_unit_price_jpy;
-      const noShadowEligible=
-        hasNoShadow&&
-        (!hasTop||dualCapability||forceNoShadowban)&&
-        baseUsd!==null&&Number.isFinite(baseUsd)&&
-        baseUsd<=settings.max_no_shadowban_unit_price_usd;
-      if(!topEligible&&!noShadowEligible) continue;
+    // Normal X-account procurement is fail-closed:
+    // ① No Shadowban evidence is enough.
+    // ② No Shadowban + search-visible + old-account evidence.
+    // Both classes share the same $0.35 hard ceiling.
+    if(
+      !hasNoShadow||
+      baseUsd===null||
+      !Number.isFinite(baseUsd)||
+      baseUsd<=0||
+      baseUsd>HSTORA_X_MAX_UNIT_PRICE_USD
+    ){
+      continue;
     }
+    if(targetClass==="TOP_SEARCH"&&(!hasSearch||!hasOld)) continue;
 
     let full:HstoraProduct;
     try{
@@ -374,10 +336,7 @@ export async function selectCandidate(
       priorPurchases===0
         ?settings.trial_purchase_count
         :quantityLimit;
-    const fullVisibility=detectSearchVisibility(full);
-    const fullDualCapability=hasDualTopNoShadowbanEvidence(
-      fullVisibility.labels
-    );
+    const fullDualCapability=hasOldSearchNoShadowbanEvidence(full);
     const fullForceNoShadowban=
       procurementClassOverrideForHstoraProduct(full.id)==="NO_SHADOWBAN";
     const candidateQuantityLimit=
@@ -395,7 +354,11 @@ export async function selectCandidate(
     if(plannedQuantity<=0) continue;
 
     const classOverride=
-      procurementClassOverrideForHstoraProduct(full.id)??undefined;
+      targetClass==="NO_SHADOWBAN"
+        ?"NO_SHADOWBAN" as const
+        :targetClass==="TOP_SEARCH"
+          ?"TOP_SEARCH" as const
+          :procurementClassOverrideForHstoraProduct(full.id)??undefined;
     const policyQualification=qualifyHstoraProduct(
       full,
       qualificationSettings,
@@ -409,7 +372,7 @@ export async function selectCandidate(
           ...policyQualification,
           evidence:[
             ...policyQualification.evidence,
-            `POLICY_OVERRIDE_HSTORA_${full.id}_NO_SHADOWBAN`
+            `POLICY_TARGET_CLASS_${targetClass}_HSTORA_${full.id}`
           ]
         }
         :policyQualification;
@@ -467,15 +430,9 @@ export async function selectCandidate(
     const supportsTarget=
       targetClass==="INVITE_CAMPAIGN"
         ?Boolean(q.procurement_class)
-        :q.procurement_class===targetClass||
-          (
-            targetClass==="NO_SHADOWBAN"&&
-            q.procurement_class==="TOP_SEARCH"&&
-            hasDualTopNoShadowbanEvidence(q.search_visibility)
-          );
-    const fullTopEligible=targetClass!=="TOP_SEARCH"||
-      (!fullForceNoShadowban&&
-        isTopSearchFallbackEligible(full.id,q.search_visibility));
+        :q.procurement_class===targetClass;
+    const fullTopEligible=
+      targetClass!=="TOP_SEARCH"||hasOldSearchNoShadowbanEvidence(full);
     if(q.qualified&&supportsTarget&&fullTopEligible){
       candidates.push({product:full,q,plannedQuantity,priorPurchases});
     }
@@ -489,10 +446,14 @@ export async function selectCandidate(
       const splitAcrossClasses=
         targetClass!=="INVITE_CAMPAIGN"&&
         !forceNoShadowban&&
-        hasDualTopNoShadowbanEvidence(candidate.q.search_visibility);
+        hasOldSearchNoShadowbanEvidence(candidate.product);
       const step=splitAcrossClasses?2:1;
       const classOverride=
-        procurementClassOverrideForHstoraProduct(candidate.product.id)??undefined;
+        targetClass==="NO_SHADOWBAN"
+          ?"NO_SHADOWBAN" as const
+          :targetClass==="TOP_SEARCH"
+            ?"TOP_SEARCH" as const
+            :procurementClassOverrideForHstoraProduct(candidate.product.id)??undefined;
 
       for(
         let affordableQuantity=candidate.plannedQuantity;
@@ -509,14 +470,7 @@ export async function selectCandidate(
         const supportsTarget=
           targetClass==="INVITE_CAMPAIGN"
             ?Boolean(budgetQualification.procurement_class)
-            :budgetQualification.procurement_class===targetClass||
-              (
-                targetClass==="NO_SHADOWBAN"&&
-                budgetQualification.procurement_class==="TOP_SEARCH"&&
-                hasDualTopNoShadowbanEvidence(
-                  budgetQualification.search_visibility
-                )
-              );
+            :budgetQualification.procurement_class===targetClass;
         if(!budgetQualification.qualified||!supportsTarget) continue;
 
         const unitPriceUsd=Number(budgetQualification.unit_price_source);
@@ -540,15 +494,14 @@ export async function selectCandidate(
   }
 
   candidates.sort((a,b)=>{
-    const aPrice=
-      targetClass==="NO_SHADOWBAN"
-        ?Number(a.q.unit_price_source)
-        :Number(a.q.unit_price_jpy??Infinity);
-    const bPrice=
-      targetClass==="NO_SHADOWBAN"
-        ?Number(b.q.unit_price_source)
-        :Number(b.q.unit_price_jpy??Infinity);
-    const price=aPrice-bPrice;
+    const priceBand=
+      hstoraPricePriorityTier(a.q.unit_price_source)-
+      hstoraPricePriorityTier(b.q.unit_price_source);
+    if(priceBand!==0) return priceBand;
+
+    const price=
+      Number(a.q.unit_price_source)-
+      Number(b.q.unit_price_source);
     if(price!==0) return price;
 
     const tier=
@@ -570,15 +523,8 @@ export async function selectCandidate(
       targetClass,
       scannedCatalogItems:products.length,
       qualifiedCandidates:candidates.length,
-      maxUnitPrice:
-        targetClass==="TOP_SEARCH"
-          ?{currency:"JPY",value:settings.max_unit_price_jpy}
-          :targetClass==="NO_SHADOWBAN"
-            ?{currency:"USD",value:settings.max_no_shadowban_unit_price_usd}
-            :{
-              topSearch:{currency:"JPY",value:settings.max_unit_price_jpy},
-              noShadowban:{currency:"USD",value:settings.max_no_shadowban_unit_price_usd}
-            },
+      maxUnitPrice:{currency:"USD",value:HSTORA_X_MAX_UNIT_PRICE_USD},
+      preferredPriceBand:{currency:"USD",below:0.30},
       strategy:settings.procurement_strategy,
       cheapest:candidates.slice(0,10).map(candidate=>({
         productId:candidate.product.id,
@@ -1838,12 +1784,11 @@ async function runXProcurementLocked(
 
   const fresh=await getHstoraProduct(env,Number(candidate.product.id));
   const prior=await successfulPurchaseCountForProduct(env,String(fresh.id));
-  const freshVisibility=detectSearchVisibility(fresh);
   const freshForceNoShadowban=
     procurementClassOverrideForHstoraProduct(fresh.id)==="NO_SHADOWBAN";
   const splitAcrossClasses=
     !freshForceNoShadowban&&
-    hasDualTopNoShadowbanEvidence(freshVisibility.labels);
+    hasOldSearchNoShadowbanEvidence(fresh);
   const purchaseBatch=
     targetClass!=="INVITE_CAMPAIGN"&&splitAcrossClasses
       ?Math.min(settings.max_batch_purchase,Math.max(2,batch*2))
@@ -1873,13 +1818,17 @@ async function runXProcurementLocked(
     ...PREFERRED_TOP_HSTORA_PRODUCT_IDS,
     ...PREFERRED_NO_SHADOWBAN_HSTORA_PRODUCT_IDS,
     ...settings.approved_hstora_product_ids
-  ])];
+  ])].filter(id=>!isBlockedHstoraSource(id));
   const qualificationSettings=
     settings.seller_quality_mode==="manual_product_approval"
       ?{...settings,approved_hstora_product_ids:trustedApprovedIds}
       :settings;
   const classOverride=
-    procurementClassOverrideForHstoraProduct(fresh.id)??undefined;
+    targetClass==="NO_SHADOWBAN"
+      ?"NO_SHADOWBAN" as const
+      :targetClass==="TOP_SEARCH"
+        ?"TOP_SEARCH" as const
+        :procurementClassOverrideForHstoraProduct(fresh.id)??undefined;
 
   const qualifyForQuantity=(orderQuantity:number)=>{
     const policyQualification=qualifyHstoraProduct(
@@ -1894,7 +1843,7 @@ async function runXProcurementLocked(
         ...policyQualification,
         evidence:[
           ...policyQualification.evidence,
-          `POLICY_OVERRIDE_HSTORA_${fresh.id}_NO_SHADOWBAN`
+          `POLICY_TARGET_CLASS_${targetClass}_HSTORA_${fresh.id}`
         ]
       }
       :policyQualification;
@@ -1938,14 +1887,9 @@ async function runXProcurementLocked(
   const supportsTarget=
     targetClass==="INVITE_CAMPAIGN"
       ?Boolean(q.procurement_class)
-      :q.procurement_class===targetClass||
-        (
-          targetClass==="NO_SHADOWBAN"&&
-          q.procurement_class==="TOP_SEARCH"&&
-          hasDualTopNoShadowbanEvidence(q.search_visibility)
-        );
-  const freshTopEligible=targetClass!=="TOP_SEARCH"||
-    (!freshForceNoShadowban&&isTopSearchFallbackEligible(fresh.id,q.search_visibility));
+      :q.procurement_class===targetClass;
+  const freshTopEligible=
+    targetClass!=="TOP_SEARCH"||hasOldSearchNoShadowbanEvidence(fresh);
   if(!q.qualified||!supportsTarget||!freshTopEligible){
     await setCircuitBreaker(
       env,
