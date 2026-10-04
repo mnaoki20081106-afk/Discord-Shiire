@@ -264,7 +264,7 @@ function catalogBasePriceJpy(
   return null;
 }
 
-async function selectCandidate(
+export async function selectCandidate(
   env:Env,
   quantityLimit:number,
   targetClass:ProcurementTarget,
@@ -285,6 +285,21 @@ async function selectCandidate(
       ?{...settings,approved_hstora_product_ids:trustedApprovedIds}
       :settings;
   const products=await catalogProducts(env,approvedIds);
+  // Keep explicitly selected sources in the scan even if absent from the
+  // paginated catalog. Discovery mode still scans all other listings.
+  if(!approvedIds.length){
+    for(const id of trustedApprovedIds){
+      if(products.some(product=>Number(product.id)===id)) continue;
+      try{products.push(await getHstoraProduct(env,id));}
+      catch(error){
+        await auditX(env,{
+          level:"warn",kind:"HSTORA_APPROVED_PRODUCT_FETCH_FAILED",
+          message:error instanceof Error?error.message:String(error),
+          details:{productId:id,targetClass}
+        });
+      }
+    }
+  }
   const candidates:Array<{
     product:HstoraProduct;
     q:ReturnType<typeof qualifyHstoraProduct>;
@@ -394,7 +409,7 @@ async function selectCandidate(
           ...policyQualification,
           evidence:[
             ...policyQualification.evidence,
-            "POLICY_OVERRIDE_HSTORA_4521_NO_SHADOWBAN"
+            `POLICY_OVERRIDE_HSTORA_${full.id}_NO_SHADOWBAN`
           ]
         }
         :policyQualification;
@@ -408,14 +423,8 @@ async function selectCandidate(
     if(previous&&sameCurrency&&previousPrice>0&&currentPrice>0){
       const jump=Math.abs(currentPrice-previousPrice)/previousPrice*100;
       if(jump>settings.max_price_jump_percent){
-        await setCircuitBreaker(
-          env,
-          "product_price",
-          "OPEN",
-          "HSTORA_PRODUCT_PRICE_JUMP:"+jump.toFixed(2)+"%"
-        );
         await auditX(env,{
-          level:"error",
+          level:"warn",
           kind:"PRODUCT_PRICE_JUMP",
           message:"HStora product price changed beyond configured threshold",
           details:{
@@ -426,7 +435,9 @@ async function selectCandidate(
             targetClass
           }
         });
-        throw new Error("PRODUCT_PRICE_JUMP");
+        // Exclude this volatile source while allowing other stable sources
+        // to compete; a supplier price change must not block the whole scan.
+        continue;
       }
     }
 
@@ -462,17 +473,73 @@ async function selectCandidate(
             q.procurement_class==="TOP_SEARCH"&&
             hasDualTopNoShadowbanEvidence(q.search_visibility)
           );
-    if(q.qualified&&supportsTarget){
+    const fullTopEligible=targetClass!=="TOP_SEARCH"||
+      (!fullForceNoShadowban&&
+        isTopSearchFallbackEligible(full.id,q.search_visibility));
+    if(q.qualified&&supportsTarget&&fullTopEligible){
       candidates.push({product:full,q,plannedQuantity,priorPurchases});
     }
   }
 
-  candidates.sort((a,b)=>{
-    const tier=
-      hstoraProcurementPriorityTier(a.product.id,targetClass)-
-      hstoraProcurementPriorityTier(b.product.id,targetClass);
-    if(tier!==0) return tier;
+  if(budgetAvailable){
+    const affordableCandidates:typeof candidates=[];
+    for(const candidate of candidates){
+      const forceNoShadowban=
+        procurementClassOverrideForHstoraProduct(candidate.product.id)==="NO_SHADOWBAN";
+      const splitAcrossClasses=
+        targetClass!=="INVITE_CAMPAIGN"&&
+        !forceNoShadowban&&
+        hasDualTopNoShadowbanEvidence(candidate.q.search_visibility);
+      const step=splitAcrossClasses?2:1;
+      const classOverride=
+        procurementClassOverrideForHstoraProduct(candidate.product.id)??undefined;
 
+      for(
+        let affordableQuantity=candidate.plannedQuantity;
+        affordableQuantity>=step;
+        affordableQuantity-=step
+      ){
+        const budgetQualification=qualifyHstoraProduct(
+          candidate.product,
+          qualificationSettings,
+          affordableQuantity,
+          Date.now(),
+          classOverride
+        );
+        const supportsTarget=
+          targetClass==="INVITE_CAMPAIGN"
+            ?Boolean(budgetQualification.procurement_class)
+            :budgetQualification.procurement_class===targetClass||
+              (
+                targetClass==="NO_SHADOWBAN"&&
+                budgetQualification.procurement_class==="TOP_SEARCH"&&
+                hasDualTopNoShadowbanEvidence(
+                  budgetQualification.search_visibility
+                )
+              );
+        if(!budgetQualification.qualified||!supportsTarget) continue;
+
+        const unitPriceUsd=Number(budgetQualification.unit_price_source);
+        const maxAffordable=maxAffordableQuantityForBudget(
+          targetClass,
+          splitAcrossClasses,
+          unitPriceUsd,
+          affordableQuantity,
+          budgetAvailable
+        );
+        if(maxAffordable>=affordableQuantity){
+          affordableCandidates.push({
+            ...candidate,q:budgetQualification,plannedQuantity:affordableQuantity
+          });
+          break;
+        }
+      }
+    }
+
+    candidates.splice(0,candidates.length,...affordableCandidates);
+  }
+
+  candidates.sort((a,b)=>{
     const aPrice=
       targetClass==="NO_SHADOWBAN"
         ?Number(a.q.unit_price_source)
@@ -483,6 +550,11 @@ async function selectCandidate(
         :Number(b.q.unit_price_jpy??Infinity);
     const price=aPrice-bPrice;
     if(price!==0) return price;
+
+    const tier=
+      hstoraProcurementPriorityTier(a.product.id,targetClass)-
+      hstoraProcurementPriorityTier(b.product.id,targetClass);
+    if(tier!==0) return tier;
 
     const stock=
       Number(b.product.stock_available??0)-
@@ -520,59 +592,7 @@ async function selectCandidate(
     }
   });
 
-  if(!budgetAvailable) return candidates[0]??null;
-
-  for(const candidate of candidates){
-    const forceNoShadowban=
-      procurementClassOverrideForHstoraProduct(candidate.product.id)==="NO_SHADOWBAN";
-    const splitAcrossClasses=
-      targetClass!=="INVITE_CAMPAIGN"&&
-      !forceNoShadowban&&
-      hasDualTopNoShadowbanEvidence(candidate.q.search_visibility);
-    const step=splitAcrossClasses?2:1;
-    const classOverride=
-      procurementClassOverrideForHstoraProduct(candidate.product.id)??undefined;
-
-    for(
-      let affordableQuantity=candidate.plannedQuantity;
-      affordableQuantity>=step;
-      affordableQuantity-=step
-    ){
-      const budgetQualification=qualifyHstoraProduct(
-        candidate.product,
-        qualificationSettings,
-        affordableQuantity,
-        Date.now(),
-        classOverride
-      );
-      const supportsTarget=
-        targetClass==="INVITE_CAMPAIGN"
-          ?Boolean(budgetQualification.procurement_class)
-          :budgetQualification.procurement_class===targetClass||
-            (
-              targetClass==="NO_SHADOWBAN"&&
-              budgetQualification.procurement_class==="TOP_SEARCH"&&
-              hasDualTopNoShadowbanEvidence(
-                budgetQualification.search_visibility
-              )
-            );
-      if(!budgetQualification.qualified||!supportsTarget) continue;
-
-      const unitPriceUsd=Number(budgetQualification.unit_price_source);
-      const maxAffordable=maxAffordableQuantityForBudget(
-        targetClass,
-        splitAcrossClasses,
-        unitPriceUsd,
-        affordableQuantity,
-        budgetAvailable
-      );
-      if(maxAffordable>=affordableQuantity){
-        return candidate;
-      }
-    }
-  }
-
-  return null;
+  return candidates[0]??null;
 }
 
 async function fundingWindowRemaining(env:Env,limit:number,since:number){
@@ -1874,7 +1894,7 @@ async function runXProcurementLocked(
         ...policyQualification,
         evidence:[
           ...policyQualification.evidence,
-          "POLICY_OVERRIDE_HSTORA_4521_NO_SHADOWBAN"
+          `POLICY_OVERRIDE_HSTORA_${fresh.id}_NO_SHADOWBAN`
         ]
       }
       :policyQualification;
@@ -1924,7 +1944,9 @@ async function runXProcurementLocked(
           q.procurement_class==="TOP_SEARCH"&&
           hasDualTopNoShadowbanEvidence(q.search_visibility)
         );
-  if(!q.qualified||!supportsTarget){
+  const freshTopEligible=targetClass!=="TOP_SEARCH"||
+    (!freshForceNoShadowban&&isTopSearchFallbackEligible(fresh.id,q.search_visibility));
+  if(!q.qualified||!supportsTarget||!freshTopEligible){
     await setCircuitBreaker(
       env,
       "product_price",

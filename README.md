@@ -293,7 +293,7 @@ No Shadowban and Top Search. At 18:00, Discord-Shiire reads the live class inven
 and purchases only the difference between the current count and each configured target.
 
 The daily job uses the existing procurement budget allocation, HStora qualification
-guards, and preferred-product priority rules. If an HStora order remains processing,
+guards, and preferred-product tie-breaking rules. If an HStora order remains processing,
 the 1-minute Cron continues official order reconciliation until delivery is available.
 Per-product vending stock alerts are suppressed while this daily batch is active so
 customers do not receive fragmented alerts for each supplier order.
@@ -681,37 +681,30 @@ Requirements:
 - default ceiling: `0.60 USD / account`
 - the configurable ceiling is restricted to `0.50 - 0.60 USD`
 
-### Preferred TOP sources + verified cheapest fallback
+### Preferred sources with live cheapest-first selection
 
-HStora product IDs `4841` and `5132` are the trusted preferred TOP-search source group.
+HStora products `4841` and `5132` are preferred TOP-search sources. Products
+`4521` and `1609` are preferred **NO_SHADOWBAN-only** sources: neither may enter
+TOP_SEARCH inventory, even if the listing later advertises TOP capability.
 
-Selection order:
+In discovery (`trial_only`) mode, each scan reads the full paginated catalog
+and also fetches any preferred or manually selected products missing from it.
+Candidates must pass the existing live classification, stock, price ceilings,
+FX freshness and seller-quality checks. Generic TOP sources must explicitly
+prove both TOP Search and No Shadowban. `No shadow bans` is recognized too.
+Manual-product-approval mode continues to restrict purchases to approved IDs
+plus these four explicitly selected sources; strict API mode remains fail-closed.
 
-1. Re-fetch and re-qualify products `4841` and `5132`.
-2. If one or both are valid and in stock, select the cheaper effective unit price among the valid preferred products.
-3. Only when neither preferred product is usable, scan the remaining HStora catalog for verified TOP-search products and select the cheapest qualifying fallback.
+Candidates are ranked by the effective unit price for an affordable order,
+including trial quantity limits, volume discounts and class budget restrictions.
+A cheaper eligible alternative wins over a preferred source. At equal price,
+preferred sources win; ties then use stock and product ID. A source exceeding
+the configured price-jump limit is excluded and audited without blocking other
+stable sources. The product is re-fetched and qualified again before ordering.
 
-Every candidate still goes through a fail-closed qualification pass:
-
-- the listing must be an X/Twitter account product
-- `TOP Search`, `TOP+Latest`, or HStora's `TOP Latest` naming must be explicitly present
-- the product slug is also inspected after `-` / `_` normalization, so HStora URLs such as `top-latest` are recognized
-- price alone can never make a listing qualify as TOP-search
-- negated wording such as `No TOP Search`, `No TOP Latest`, `TOP Search unavailable`, or `TOP Latest unavailable` is excluded from positive TOP evidence
-- the live product detail is re-qualified again immediately before an order is created
-
-Products `4841` and `5132` are treated as trusted manual-approved sources when manual-product-approval mode is active, but they still must pass the live TOP/in-stock/price checks.
-
-A listing that explicitly proves **both TOP-search and No Shadowban** is treated as a dual-capability source. Preferred IDs `4841` / `5132` come first; after them, other verified dual-capability TOP listings are preferred over No-Shadowban-only listings.
-
-For every dual-capability source:
-
-- new purchase quantities are forced to an even number
-- delivered credentials are stored **50% as `TOP_SEARCH` and 50% as `NO_SHADOWBAN`**
-- delayed/retried HStora delivery reconciliation continues from the already-stored class counts so the final split does not drift
-- class-backed vending products receive only the stock count actually added to their class
-
-If no qualifying dual-capability listing exists, the existing No-Shadowban-only candidates remain a final fallback rather than causing an unnecessary stock outage.
+Dual-capability purchases still use even quantities and split delivered accounts
+50/50 across TOP_SEARCH and NO_SHADOWBAN. The explicit NO_SHADOWBAN-only sources
+`4521` and `1609` never use that split. Invite campaign inventory remains isolated.
 
 Each class has independent inventory controls:
 
@@ -727,7 +720,9 @@ NO_SHADOWBAN
 
 When both classes are below their reorder points, TOP_SEARCH is replenished first.
 
-Within each class, source priority is applied first and effective price second. Products 4841/5132 form the preferred source group; candidates inside that group are sorted by effective unit price. If the preferred group has no usable candidate, verified fallback candidates are sorted cheapest-first. TOP_SEARCH uses effective JPY unit price and NO_SHADOWBAN uses effective USD unit price. The price tier is recalculated using the quantity that will actually be ordered, including first-product trial limits.
+Within each class, effective price is compared first and preferred-source status
+breaks equal-price ties. TOP_SEARCH uses JPY and NO_SHADOWBAN uses USD. The effective
+price is recalculated for the quantity actually affordable before ranking.
 
 Existing purchased accounts are backfilled into the new procurement classes when their HStora product is re-evaluated. The engine recounts class inventory after this backfill before placing a new order, preventing a migration-time extra batch.
 

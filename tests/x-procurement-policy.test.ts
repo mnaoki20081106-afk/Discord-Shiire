@@ -22,11 +22,13 @@ test("trusted preferred TOP sources are 4841 and 5132",()=>{
 });
 
 test("HStora 4521 is a preferred no-shadowban-only exception",()=>{
-  assert.deepEqual([...PREFERRED_NO_SHADOWBAN_HSTORA_PRODUCT_IDS],[4521]);
+  assert.deepEqual([...PREFERRED_NO_SHADOWBAN_HSTORA_PRODUCT_IDS],[4521,1609]);
   assert.equal(isPreferredNoShadowbanHstoraSource(4521),true);
   assert.equal(isPreferredNoShadowbanHstoraSource("4521"),true);
   assert.equal(isPreferredNoShadowbanHstoraSource(4841),false);
   assert.equal(procurementClassOverrideForHstoraProduct(4521),"NO_SHADOWBAN");
+  assert.equal(procurementClassOverrideForHstoraProduct(1609),"NO_SHADOWBAN");
+  assert.equal(isPreferredNoShadowbanHstoraSource("1609"),true);
   assert.equal(procurementClassOverrideForHstoraProduct(5132),null);
 });
 
@@ -108,8 +110,9 @@ test("generic TOP fallback must also prove No Shadowban",()=>{
 });
 
 
-test("No Shadowban priority is 4521, then 4841/5132, then generic",()=>{
+test("No Shadowban tie priority is 4521/1609, then 4841/5132, then generic",()=>{
   assert.equal(hstoraProcurementPriorityTier(4521,"NO_SHADOWBAN"),0);
+  assert.equal(hstoraProcurementPriorityTier(1609,"NO_SHADOWBAN"),0);
   assert.equal(hstoraProcurementPriorityTier(4841,"NO_SHADOWBAN"),1);
   assert.equal(hstoraProcurementPriorityTier(5132,"NO_SHADOWBAN"),1);
   assert.equal(hstoraProcurementPriorityTier(9999,"NO_SHADOWBAN"),2);
