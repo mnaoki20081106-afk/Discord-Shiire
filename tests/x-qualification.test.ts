@@ -1,6 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { qualifyHstoraProduct } from "../src/x-qualification.ts";
+import {
+  classifyProcurementClass,
+  detectOldAccountEvidence,
+  qualifyHstoraProduct
+} from "../src/x-qualification.ts";
 
 function settings(overrides={}){
   return {
@@ -8,6 +12,7 @@ function settings(overrides={}){
     emergency_stop:false,
     auto_purchase_enabled:false,
     auto_procurement_enabled:false,
+    funding_mode:"manual_hstora",
     reserve_jpy:20_000,
     max_purchase_jpy:10_000,
     daily_purchase_limit_jpy:50_000,
@@ -19,7 +24,7 @@ function settings(overrides={}){
     wallet_target_ltc:0,
     wallet_max_ltc:0,
     max_unit_price_jpy:80,
-    max_no_shadowban_unit_price_usd:0.60,
+    max_no_shadowban_unit_price_usd:0.35,
     procurement_strategy:"cheapest_first",
     search_visibility_requirement:"top",
     reorder_point:10,
@@ -27,6 +32,9 @@ function settings(overrides={}){
     no_shadowban_reorder_point:10,
     no_shadowban_target_stock:50,
     max_batch_purchase:20,
+    invite_campaign_budget_percent:0,
+    no_shadowban_budget_percent:50,
+    top_search_budget_percent:50,
     min_seller_rating:0,
     min_product_reviews:0,
     min_sales_count:0,
@@ -39,21 +47,24 @@ function settings(overrides={}){
     observed_paypay_balance_at:Date.now(),
     max_paypay_balance_age_ms:86_400_000,
     pending_paypay_funding_jpy:0,
+    pending_paypay_jpy_deposit_required_jpy:0,
+    pending_paypay_jpy_credit_required_jpy:0,
+    pending_paypay_direct_ltc_budget_jpy:0,
+    pending_paypay_path_amounts_captured:false,
     pending_paypay_binance_jpy_baseline:0,
+    pending_paypay_binance_ltc_baseline:0,
+    pending_paypay_required_ltc:0,
+    pending_paypay_ltc_baseline_captured:false,
     pending_paypay_requested_at:0,
     usd_jpy_rate:150,
     usd_jpy_rate_updated_at:Date.now(),
     max_fx_age_ms:21_600_000,
-    auto_ltc_withdraw_enabled:false,
-    max_single_withdraw_ltc:0,
+    max_fx_jump_percent:10,
     max_price_jump_percent:25,
     max_ltc_price_jump_percent:15,
-    max_consecutive_failures:3,
     require_bulk_confirmation:true,
     bulk_confirmation_threshold:20,
     bulk_approval_until:0,
-    hstora_ltc_deposit_address:"",
-    hstora_ltc_network:"LTC",
     ...overrides
   };
 }
@@ -61,11 +72,11 @@ function settings(overrides={}){
 function product(overrides={}){
   return {
     id:123,
-    name:"X account TOP+Latest",
-    slug:"x-account",
+    name:"Twitter No Shadowban TOP+Latest 2006-2025",
+    slug:"twitter-no-shadowban-top-latest-2006-2025",
     short_description:"No Shadowban / Search Visible",
-    description:"TOP Search and Latest Search visible.",
-    price:0.50,
+    description:"Old Twitter accounts. Top and latest search visible.",
+    price:0.25,
     currency:"USD",
     delivery_type:"instant",
     stock_available:100,
@@ -77,159 +88,149 @@ function product(overrides={}){
   };
 }
 
-test("X TOP-search product under 80 JPY qualifies in trial-only discovery",()=>{
+test("② requires No Shadowban + search visibility + old-account evidence",()=>{
   const q=qualifyHstoraProduct(product(),settings(),1);
   assert.equal(q.qualified,true);
-  assert.equal(q.unit_price_jpy,75);
-  assert.ok(q.search_visibility.includes("TOP+Latest"));
   assert.equal(q.procurement_class,"TOP_SEARCH");
-  assert.equal(q.seller_quality,"trial_only");
-});
-
-test("HStora TOP Latest naming qualifies as TOP_SEARCH",()=>{
-  const q=qualifyHstoraProduct(
-    product({
-      id:4841,
-      name:"Twitter No Shadowban Top Latest 2FA Token",
-      slug:"4841-twitter-no-shadowban-top-latest-2fa-token",
-      short_description:"No Shadowban",
-      description:"Premium X account.",
-      price:0.29
-    }),
-    settings(),
-    1
-  );
-  assert.equal(q.qualified,true);
-  assert.equal(q.procurement_class,"TOP_SEARCH");
-  assert.ok(q.search_visibility.includes("TOP+Latest"));
+  assert.equal(q.unit_price_source,0.25);
+  assert.equal(q.unit_price_jpy,37.5);
   assert.ok(q.search_visibility.includes("No Shadowban"));
+  assert.ok(q.evidence.some(value=>value.includes("Year range 2006-2025")));
 });
 
-test("negated TOP Latest naming does not qualify as TOP_SEARCH",()=>{
-  const q=qualifyHstoraProduct(
-    product({
-      name:"Twitter No Shadowban",
-      slug:"twitter-no-shadowban",
-      short_description:"No TOP Latest",
-      description:"TOP Latest unavailable. No Shadowban.",
-      price:0.29
-    }),
-    settings(),
-    1
-  );
-  assert.equal(q.procurement_class,"NO_SHADOWBAN");
-  assert.equal(q.search_visibility.includes("TOP+Latest"),false);
-});
-
-test("latest-only X product is rejected because TOP search is required",()=>{
-  const q=qualifyHstoraProduct(
-    product({
-      name:"Twitter X Latest Search",
-      short_description:"Latest Search visible",
-      description:"Latest Search only."
-    }),
-    settings(),
-    1
-  );
-  assert.equal(q.qualified,false);
-  assert.ok(q.reasons.includes("SUPPORTED_X_PRODUCT_CLASS_NOT_CONFIRMED"));
-});
-
-test("non-X product is rejected even if it says TOP Search",()=>{
-  const q=qualifyHstoraProduct(
-    product({
-      name:"Instagram TOP Search account",
-      slug:"instagram-top-search",
-      short_description:"TOP Search",
-      description:"Search visible."
-    }),
-    settings(),
-    1
-  );
-  assert.equal(q.qualified,false);
-  assert.ok(q.reasons.includes("NOT_X_ACCOUNT_PRODUCT"));
-});
-
-test("actual trial quantity must qualify for the tier price",()=>{
-  const tiered=product({
-    price:0.60,
-    price_tiers:[{min_quantity:20,unit_price:0.40}]
+test("① accepts a No Shadowban account even when it is not old",()=>{
+  const p=product({
+    id:4841,
+    name:"Twitter NO SHADOW BAN TOP+latest 2fa/token 10 followers",
+    slug:"twitter-no-shadowban-top-latest",
+    short_description:"No Shadowban",
+    description:"TOP+Latest search.",
+    price:0.27
   });
-  const trial=qualifyHstoraProduct(tiered,settings({usd_jpy_rate:150}),10);
-  const bulk=qualifyHstoraProduct(tiered,settings({usd_jpy_rate:150}),20);
-  assert.equal(trial.unit_price_jpy,90);
-  assert.equal(trial.qualified,false);
-  assert.ok(trial.reasons.includes("TOP_SEARCH_UNIT_PRICE_ABOVE_JPY_LIMIT"));
-  assert.equal(bulk.unit_price_jpy,60);
-  assert.equal(bulk.qualified,true);
+  const q=qualifyHstoraProduct(p,settings(),1);
+  assert.equal(q.qualified,true);
+  assert.equal(q.procurement_class,"NO_SHADOWBAN");
+  assert.ok(q.search_visibility.includes("No Shadowban"));
+  assert.equal(detectOldAccountEvidence(p).old,false);
 });
 
-test("strict seller-quality mode blocks when HStora API has no seller metrics",()=>{
-  const q=qualifyHstoraProduct(product(),settings({seller_quality_mode:"strict_api"}),1);
-  assert.equal(q.qualified,false);
-  assert.ok(q.reasons.includes("SELLER_QUALITY_FIELDS_UNAVAILABLE_IN_HSTORA_API"));
-});
-
-test("stale USDJPY blocks USD product qualification",()=>{
+test("5132 is blocked even if a fixture price falls below 35 cents",()=>{
   const q=qualifyHstoraProduct(
-    product(),
-    settings({usd_jpy_rate_updated_at:1,max_fx_age_ms:60_000}),
-    1,
-    Date.now()
-  );
-  assert.equal(q.qualified,false);
-  assert.ok(q.reasons.includes("USDJPY_RATE_MISSING_OR_STALE"));
-});
-
-test("product above JPY unit price ceiling is rejected",()=>{
-  const q=qualifyHstoraProduct(product({price:1}),settings({usd_jpy_rate:150}),1);
-  assert.equal(q.unit_price_jpy,150);
-  assert.equal(q.qualified,false);
-  assert.ok(q.reasons.includes("TOP_SEARCH_UNIT_PRICE_ABOVE_JPY_LIMIT"));
-});
-
-
-test("TOP+Latest with No Shadowban is classified only as TOP_SEARCH",()=>{
-  const q=qualifyHstoraProduct(
-    product({
-      name:"Twitter X TOP+Latest",
-      short_description:"No Shadowban / TOP Search",
-      description:"Top and latest search visible."
-    }),
+    product({id:5132,price:0.20}),
     settings(),
     1
   );
-  assert.equal(q.qualified,true);
-  assert.equal(q.procurement_class,"TOP_SEARCH");
+  assert.equal(q.qualified,false);
+  assert.ok(q.reasons.includes("HSTORA_PRODUCT_BLOCKED_BY_POLICY"));
 });
 
-test("policy override can force a TOP-labelled product into NO_SHADOWBAN",()=>{
+test("② rejects an old search-visible account without No Shadowban evidence",()=>{
+  const p=product({
+    name:"Twitter TOP+Latest 2006-2025",
+    slug:"twitter-top-latest-2006-2025",
+    short_description:"Search Visible",
+    description:"Old account, visible in search."
+  });
+  assert.equal(classifyProcurementClass(p),null);
+  const q=qualifyHstoraProduct(p,settings(),1,Date.now(),"TOP_SEARCH");
+  assert.equal(q.qualified,false);
+  assert.ok(q.reasons.includes("NO_SHADOWBAN_EVIDENCE_NOT_CONFIRMED"));
+});
+
+test("② rejects search-visible No Shadowban accounts without old evidence",()=>{
   const q=qualifyHstoraProduct(
     product({
-      id:4521,
-      name:"Twitter TOP Search account",
-      short_description:"No Shadowban",
-      description:"TOP Search / No Shadowban",
-      price:0.20
+      name:"Twitter NO SHADOW BAN TOP+latest",
+      slug:"twitter-no-shadowban-top-latest",
+      short_description:"No Shadowban / Search Visible",
+      description:"TOP+Latest search.",
+      price:0.27
     }),
     settings(),
     1,
     Date.now(),
-    "NO_SHADOWBAN"
+    "TOP_SEARCH"
   );
-  assert.equal(q.qualified,true);
-  assert.equal(q.procurement_class,"NO_SHADOWBAN");
-  assert.ok(q.search_visibility.includes("TOP Search"));
-  assert.ok(q.search_visibility.includes("No Shadowban"));
+  assert.equal(q.qualified,false);
+  assert.ok(q.reasons.includes("OLD_ACCOUNT_EVIDENCE_NOT_CONFIRMED"));
 });
 
-test("forced NO_SHADOWBAN still requires No Shadowban evidence",()=>{
+test("② accepts generic Search Visible wording when old and No Shadowban are proven",()=>{
   const q=qualifyHstoraProduct(
     product({
-      id:4521,
-      name:"Twitter TOP Search account",
-      short_description:"TOP Search",
-      description:"TOP Search visible",
+      name:"Twitter Accounts 2007-20",
+      slug:"twitter-accounts-2007-20",
+      short_description:"No Shadowban",
+      description:"Search Visible."
+    }),
+    settings(),
+    1
+  );
+  assert.equal(q.qualified,true);
+  assert.equal(q.procurement_class,"TOP_SEARCH");
+  assert.ok(q.search_visibility.includes("Search Visible"));
+});
+
+test("old-account detection accepts abbreviated year ranges",()=>{
+  const old=detectOldAccountEvidence(product({
+    name:"Twitter 2007-20 No Shadowban",
+    slug:"twitter-2007-20",
+    short_description:"No Shadowban",
+    description:"Search Visible"
+  }),Date.UTC(2026,9,4));
+  assert.equal(old.old,true);
+  assert.ok(old.evidence.some(value=>value.includes("2007-2020")));
+});
+
+test("current-year aged wording is not enough to count as OLD",()=>{
+  const p=product({
+    name:"HQ Aged 2026 Twitter Accounts",
+    slug:"hq-aged-2026-twitter-accounts",
+    short_description:"No Shadowban",
+    description:"Search Visible"
+  });
+  const old=detectOldAccountEvidence(p,Date.UTC(2026,9,4));
+  assert.equal(old.old,false);
+});
+
+test("21+ Days (Aged & Trusted) is not treated as the OLD premium class",()=>{
+  const p=product({
+    id:1609,
+    name:"No shadow bans - Twitter accounts - no bans",
+    slug:"no-shadow-bans-twitter-accounts-no-bans",
+    short_description:"No shadow bans",
+    description:"Account Age: 21+ Days (Aged & Trusted).",
+    price:0.21
+  });
+  const q=qualifyHstoraProduct(p,settings(),1);
+  assert.equal(q.qualified,true);
+  assert.equal(q.procurement_class,"NO_SHADOWBAN");
+  assert.equal(detectOldAccountEvidence(p).old,false);
+});
+
+test("35 cents is allowed and anything above it is rejected",()=>{
+  const atLimit=qualifyHstoraProduct(
+    product({price:0.35}),
+    settings(),
+    1
+  );
+  const overLimit=qualifyHstoraProduct(
+    product({price:0.351}),
+    settings(),
+    1
+  );
+  assert.equal(atLimit.qualified,true);
+  assert.equal(overLimit.qualified,false);
+  assert.ok(overLimit.reasons.includes("HSTORA_X_UNIT_PRICE_ABOVE_USD_LIMIT"));
+});
+
+test("forced ① classification still requires No Shadowban evidence",()=>{
+  const q=qualifyHstoraProduct(
+    product({
+      name:"Twitter 2006-2025 Search Visible",
+      slug:"twitter-2006-2025-search-visible",
+      short_description:"Search Visible",
+      description:"Search Visible",
       price:0.20
     }),
     settings(),
@@ -241,102 +242,38 @@ test("forced NO_SHADOWBAN still requires No Shadowban evidence",()=>{
   assert.ok(q.reasons.includes("NO_SHADOWBAN_EVIDENCE_NOT_CONFIRMED"));
 });
 
-test("forced NO_SHADOWBAN still enforces the USD price ceiling",()=>{
+test("non-X products are rejected even when keywords match",()=>{
   const q=qualifyHstoraProduct(
     product({
-      id:4521,
-      name:"Twitter TOP Search account",
-      short_description:"No Shadowban",
-      description:"TOP Search / No Shadowban",
-      price:0.61
+      name:"Instagram TOP Search 2006-2025",
+      slug:"instagram-top-search-2006-2025",
+      short_description:"No Shadowban / Search Visible",
+      description:"Search Visible."
     }),
     settings(),
+    1
+  );
+  assert.equal(q.qualified,false);
+  assert.ok(q.reasons.includes("NOT_X_ACCOUNT_PRODUCT"));
+});
+
+test("strict seller-quality mode still blocks when HStora API lacks seller metrics",()=>{
+  const q=qualifyHstoraProduct(
+    product(),
+    settings({seller_quality_mode:"strict_api"}),
+    1
+  );
+  assert.equal(q.qualified,false);
+  assert.ok(q.reasons.includes("SELLER_QUALITY_FIELDS_UNAVAILABLE_IN_HSTORA_API"));
+});
+
+test("stale USDJPY still fails closed",()=>{
+  const q=qualifyHstoraProduct(
+    product(),
+    settings({usd_jpy_rate_updated_at:1,max_fx_age_ms:60_000}),
     1,
-    Date.now(),
-    "NO_SHADOWBAN"
+    Date.now()
   );
   assert.equal(q.qualified,false);
-  assert.ok(q.reasons.includes("NO_SHADOWBAN_UNIT_PRICE_ABOVE_USD_LIMIT"));
-});
-
-test("No Shadowban without TOP wording is a separate NO_SHADOWBAN product",()=>{
-  const q=qualifyHstoraProduct(
-    product({
-      name:"Twitter X Accounts",
-      short_description:"No Shadow Ban",
-      description:"Search Visible, no shadow banned accounts.",
-      price:0.58
-    }),
-    settings(),
-    1
-  );
-  assert.equal(q.qualified,true);
-  assert.equal(q.procurement_class,"NO_SHADOWBAN");
-  assert.ok(q.search_visibility.includes("No Shadowban"));
-});
-
-test("No Shadowban product above 0.60 USD is rejected",()=>{
-  const q=qualifyHstoraProduct(
-    product({
-      name:"Twitter X Accounts",
-      short_description:"No Shadowban",
-      description:"No shadow banned.",
-      price:0.61
-    }),
-    settings(),
-    1
-  );
-  assert.equal(q.procurement_class,"NO_SHADOWBAN");
-  assert.equal(q.qualified,false);
-  assert.ok(q.reasons.includes("NO_SHADOWBAN_UNIT_PRICE_ABOVE_USD_LIMIT"));
-});
-
-test("Search Visible without TOP or No Shadowban is not a procurement product class",()=>{
-  const q=qualifyHstoraProduct(
-    product({
-      name:"Twitter X Accounts",
-      short_description:"Search Visible",
-      description:"Visible in search.",
-      price:0.20
-    }),
-    settings(),
-    1
-  );
-  assert.equal(q.procurement_class,null);
-  assert.equal(q.qualified,false);
-  assert.ok(q.reasons.includes("SUPPORTED_X_PRODUCT_CLASS_NOT_CONFIRMED"));
-});
-
-
-test("negated TOP Search wording does not qualify as TOP_SEARCH",()=>{
-  const q=qualifyHstoraProduct(
-    product({
-      name:"Twitter X Accounts",
-      short_description:"No TOP Search / No Shadowban",
-      description:"Search Visible. No TOP Search support.",
-      price:0.58
-    }),
-    settings(),
-    1
-  );
-  assert.equal(q.procurement_class,"NO_SHADOWBAN");
-  assert.equal(q.qualified,true);
-  assert.equal(q.search_visibility.includes("TOP Search"),false);
-  assert.ok(q.search_visibility.includes("No Shadowban"));
-});
-
-test("TOP Search unavailable wording is not positive TOP evidence",()=>{
-  const q=qualifyHstoraProduct(
-    product({
-      name:"Twitter X Accounts",
-      short_description:"No Shadowban",
-      description:"TOP Search unavailable. Search Visible.",
-      price:0.58
-    }),
-    settings(),
-    1
-  );
-  assert.equal(q.procurement_class,"NO_SHADOWBAN");
-  assert.equal(q.qualified,true);
-  assert.equal(q.search_visibility.includes("TOP Search"),false);
+  assert.ok(q.reasons.includes("USDJPY_RATE_MISSING_OR_STALE"));
 });
