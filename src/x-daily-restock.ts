@@ -16,6 +16,7 @@ import {
 import { loadXSettings } from "./x-settings";
 import {
   dailyRestockPauseReason,
+  isDailyRestockFundingWaitAction,
   isDailyRestockScheduleWindow,
   shouldNotifyDailyRestock,
   type DailyRestockPauseReason
@@ -559,6 +560,26 @@ async function continueDailyRestockLocked(env:Env){
 
     if(result.action==="FINANCIAL_RUN_LOCKED"||result.action==="HSTORA_PENDING_ORDER"){
       return {action:"DAILY_RESTOCK_CONTINUES_NEXT_TICK",state};
+    }
+    if(isDailyRestockFundingWaitAction(result.action)){
+      const alreadyWaiting=state.last_action==="WAITING_HSTORA_FUNDING";
+      state.last_action="WAITING_HSTORA_FUNDING";
+      state.error="";
+      await refreshArrivalCounts(env,state);
+      await saveDailyRestockState(env,state);
+      if(!alreadyWaiting){
+        await auditX(env,{
+          level:"info",
+          kind:"DAILY_RESTOCK_WAITING_FOR_FUNDS",
+          message:"Daily restock is waiting for HStora funding and will resume automatically after the balance credit is detected.",
+          details:{dateKey:state.date_key,reason:result.action}
+        });
+      }
+      return {
+        action:"WAITING_HSTORA_FUNDING",
+        result,
+        state
+      };
     }
     if(isPurchaseProgress(result)) continue;
 
