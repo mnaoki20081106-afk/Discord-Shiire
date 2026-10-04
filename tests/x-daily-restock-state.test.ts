@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  dailyRestockPauseReason,
   isDailyRestockScheduleMinute,
   jstDateKey,
   shouldNotifyDailyRestock
@@ -45,5 +46,20 @@ test("daily restock notifies only when at least one stock class actually gained 
   assert.equal(
     shouldNotifyDailyRestock({addedTopSearch:0,addedNoShadowban:3}),
     true
+  );
+});
+
+test("daily restock pause reason distinguishes safe operator states",()=>{
+  assert.equal(
+    dailyRestockPauseReason({dryRun:true,autoProcurementEnabled:true}),
+    "DRY_RUN_ENABLED"
+  );
+  assert.equal(
+    dailyRestockPauseReason({dryRun:false,autoProcurementEnabled:false}),
+    "AUTO_PROCUREMENT_DISABLED"
+  );
+  assert.equal(
+    dailyRestockPauseReason({dryRun:false,autoProcurementEnabled:true}),
+    null
   );
 });
