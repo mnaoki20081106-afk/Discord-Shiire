@@ -101,6 +101,23 @@ test('product edits report partial failure when Discord panel refresh fails',asy
  assert.equal(saved.products.find(p=>p.id===product.id).name,'Updated sale name','DB edit must remain saved');
 });
 
+test('machine edits report partial failure when Discord panel refresh fails',async t=>{
+ const {call,machine,db,setFailDiscordPatch,discordUpdates}=await fixture(t);
+ await db.prepare("INSERT INTO shiire_vending_panels(vending_machine_id,guild_id,channel_id,message_id,created_at,updated_at) VALUES (?, ?, 'channel', 'message',1,1)").bind(machine.id,guild).run();
+ setFailDiscordPatch(true);
+ const response=await call('/vending/'+machine.id,'PATCH',{panelTitle:'Saved but not refreshed'});
+ assert.equal(response.status,502,await response.clone().text());
+ const body=await response.json();
+ assert.equal(body.ok,false);
+ assert.equal(body.saved,true);
+ assert.equal(body.panelRefreshOk,false);
+ assert.equal(body.error,'VENDING_PANEL_REFRESH_FAILED');
+ assert.match(body.message,/保存されましたが.*反映に失敗/);
+ assert.ok(discordUpdates.length>=1,'Discord panel refresh must be attempted');
+ const saved=await (await call('/vending/'+machine.id)).json();
+ assert.equal(saved.panel_title,'Saved but not refreshed','machine edit must remain saved');
+});
+
 test('legacy database migrates panel color, persists changes and refreshes tracked Discord messages',async t=>{
  const {call,machine,db,discordUpdates}=await fixture(t,true);
  assert.equal(machine.panel_color,5763719);
