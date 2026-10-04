@@ -13,6 +13,19 @@ export function isDailyRestockScheduleMinute(scheduledTime:number){
 }
 
 
+export type DailyRestockPauseReason=
+  |"DRY_RUN_ENABLED"
+  |"AUTO_PROCUREMENT_DISABLED";
+
+export function dailyRestockPauseReason(input:{
+  dryRun:boolean;
+  autoProcurementEnabled:boolean;
+}):DailyRestockPauseReason|null{
+  if(input.dryRun) return "DRY_RUN_ENABLED";
+  if(!input.autoProcurementEnabled) return "AUTO_PROCUREMENT_DISABLED";
+  return null;
+}
+
 export function shouldNotifyDailyRestock(input:{
   addedTopSearch:number;
   addedNoShadowban:number;
