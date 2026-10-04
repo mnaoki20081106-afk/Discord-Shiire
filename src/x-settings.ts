@@ -90,7 +90,7 @@ export const DEFAULT_X_SETTINGS:XSettings={
   wallet_max_ltc:0,
 
   max_unit_price_jpy:80,
-  max_no_shadowban_unit_price_usd:0.60,
+  max_no_shadowban_unit_price_usd:0.35,
   procurement_strategy:"cheapest_first",
   search_visibility_requirement:"top",
   reorder_point:10,
@@ -257,6 +257,16 @@ export async function loadXSettings(env:Env):Promise<XSettings>{
     sanitized.seller_quality_mode="trial_only";
   }
 
+  // Existing installations may still have the former $0.50-$0.60
+  // no-shadowban ceiling persisted in D1. Clamp it to the current global
+  // HStora X-account ceiling so the admin UI and runtime policy agree.
+  if(
+    sanitized.max_no_shadowban_unit_price_usd!==undefined&&
+    sanitized.max_no_shadowban_unit_price_usd>0.35
+  ){
+    sanitized.max_no_shadowban_unit_price_usd=0.35;
+  }
+
   return {...DEFAULT_X_SETTINGS,...sanitized};
 }
 
@@ -292,8 +302,8 @@ export async function saveXSettings(env:Env,patch:Partial<XSettings>):Promise<XS
   ) throw new Error("FUNDING_LIMIT_INVALID");
   if(next.max_unit_price_jpy<=0) throw new Error("MAX_UNIT_PRICE_INVALID");
   if(
-    next.max_no_shadowban_unit_price_usd<0.50||
-    next.max_no_shadowban_unit_price_usd>0.60
+    next.max_no_shadowban_unit_price_usd<=0||
+    next.max_no_shadowban_unit_price_usd>0.35
   ){
     throw new Error("NO_SHADOWBAN_USD_LIMIT_OUT_OF_RANGE");
   }
