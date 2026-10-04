@@ -13,10 +13,14 @@ export default {async fetch(request,env){try{
 }catch(error){return Response.json({message:error.message},{status:error.status??500});}}};`,resolveDir:process.cwd(),sourcefile:'vending-default-fixture.ts'},bundle:true,write:false,format:'esm',platform:'browser'});
 async function fixture(t,legacy=false){
  const discordDeletes=[],discordUpdates=[];
+ let failDiscordPatch=false;
  const mf=new Miniflare({modules:true,script:bundle.outputFiles[0].text,compatibilityDate:'2026-08-06',compatibilityFlags:['nodejs_compat'],d1Databases:['DB'],bindings:{SHIIRE_BRIDGE_SECRET:secret,DISCORD_BOT_TOKEN:'fixture'},outboundService:async request=>{
   assert.equal(new URL(request.url).hostname,'discord.com');
   if(request.method==='DELETE')discordDeletes.push(request.url);
-  if(request.method==='PATCH')discordUpdates.push(await request.json());
+  if(request.method==='PATCH'){
+   discordUpdates.push(await request.json());
+   if(failDiscordPatch)return new Response('fixture panel refresh failure',{status:500});
+  }
   return request.method==='DELETE'?new Response(null,{status:204}):Response.json({id:'fixture-message'});
  }});t.after(()=>mf.dispose());
  const db=await mf.getD1Database('DB');
@@ -28,7 +32,10 @@ async function fixture(t,legacy=false){
  };
  const created=await call('/vending','POST',{name:'Fixture vending'});assert.equal(created.status,201,await created.clone().text());
  const machine=await created.json();
- return {mf,call,machine,db,discordDeletes,discordUpdates};
+ return {
+  mf,call,machine,db,discordDeletes,discordUpdates,
+  setFailDiscordPatch(value){failDiscordPatch=Boolean(value);}
+ };
 }
 test('new machine has two independent class products and default seeding preserves edited prices',async t=>{
  const {call,machine,db}=await fixture(t);
@@ -73,6 +80,25 @@ for(const status of ['reserving','awaiting_payment','payment_pending','paid','de
  const response=await call('/vending/'+machine.id,'DELETE');assert.equal(response.status,409,await response.clone().text());
  assert.equal((await db.prepare('SELECT active FROM shiire_vending_machines WHERE id=?').bind(machine.id).first()).active,1);
  assert.equal(discordDeletes.length,0);
+});
+
+test('product edits report partial failure when Discord panel refresh fails',async t=>{
+ const {call,machine,db,setFailDiscordPatch,discordUpdates}=await fixture(t);
+ const data=await (await call('/vending/'+machine.id)).json();
+ const product=data.products[0];
+ await db.prepare("INSERT INTO shiire_vending_panels(vending_machine_id,guild_id,channel_id,message_id,created_at,updated_at) VALUES (?, ?, 'channel', 'message',1,1)").bind(machine.id,guild).run();
+ setFailDiscordPatch(true);
+ const response=await call('/vending/'+machine.id+'/products/'+product.id,'PATCH',{name:'Updated sale name'});
+ assert.equal(response.status,502,await response.clone().text());
+ const body=await response.json();
+ assert.equal(body.ok,false);
+ assert.equal(body.saved,true);
+ assert.equal(body.panelRefreshOk,false);
+ assert.equal(body.error,'VENDING_PANEL_REFRESH_FAILED');
+ assert.match(body.message,/保存されましたが.*反映に失敗/);
+ assert.ok(discordUpdates.length>=1,'Discord panel refresh must be attempted');
+ const saved=await (await call('/vending/'+machine.id)).json();
+ assert.equal(saved.products.find(p=>p.id===product.id).name,'Updated sale name','DB edit must remain saved');
 });
 
 test('legacy database migrates panel color, persists changes and refreshes tracked Discord messages',async t=>{
