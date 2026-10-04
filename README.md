@@ -343,6 +343,8 @@ seller_quality_mode = trial_only
 Turning Dry Run off through the admin API requires an explicit live-mode confirmation.
 Emergency Stop disables both automatic purchase and automatic procurement.
 
+Before the first live procurement, an operator must explicitly set `dry_run=false` and `auto_procurement_enabled=true` from the dashboard. After that one-time activation, the normal `manual_hstora` operation does not require Binance: the recurring manual action is only to send LTC from an external wallet such as Exodus to the HStora Main Wallet. Pausing automatic procurement or enabling Dry Run is an intentional safe state; the 18:00 job records it as skipped rather than as a provider failure, while HStora balance increases continue to be detected and allocated to the configured budget buckets.
+
 The current default funding mode is `manual_hstora`. In this mode Discord-Shiire never calls the Binance market-buy path. When the HStora Main Wallet is short, it sends a rate-limited notice and waits for an LTC top-up made through HStora's Wallet UI. The 1-minute Cron detects the credited HStora balance and allocates the increase to the configured procurement budget buckets. Invite-campaign stock may continue replenishing on the minute loop, while ordinary No Shadowban / Top Search inventory is replenished at 18:00 JST.
 
 The existing Binance purchase code is preserved for later use. Selecting `binance_auto` is rejected unless the Worker environment also has `BINANCE_AUTO_FUNDING_ENABLED=true`. Live Binance market buys perform the same hard server-side check again, so changing D1 settings alone cannot unlock trading.

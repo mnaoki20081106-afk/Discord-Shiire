@@ -359,6 +359,7 @@ async function operationsOverview(env:Env){
       hstoraConfigured:Boolean(env.HSTORA_API_KEY&&env.HSTORA_API_SECRET),
       hstoraWebhookConfigured:Boolean(env.HSTORA_WEBHOOK_SECRET),
       credentialsEncryptionConfigured:Boolean(env.CREDENTIALS_ENCRYPTION_KEY),
+      discordBotConfigured:Boolean(env.DISCORD_BOT_TOKEN&&env.DISCORD_APPLICATION_ID),
       discordNotifyConfigured:Boolean(env.DISCORD_NOTIFY_WEBHOOK_URL),
       dedicatedHotWallet:"disabled"
     }

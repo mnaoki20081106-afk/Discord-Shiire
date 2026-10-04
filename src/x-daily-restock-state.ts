@@ -11,6 +11,7 @@ export type DailyRestockStatus=
   |"running"
   |"completed"
   |"partial"
+  |"skipped"
   |"failed";
 
 export type DailyRestockConfig={
