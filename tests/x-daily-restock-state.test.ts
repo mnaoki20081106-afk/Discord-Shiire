@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   dailyRestockPauseReason,
+  isDailyRestockFundingWaitAction,
   isDailyRestockScheduleMinute,
   jstDateKey,
   shouldNotifyDailyRestock
@@ -62,4 +63,10 @@ test("daily restock pause reason distinguishes safe operator states",()=>{
     dailyRestockPauseReason({dryRun:false,autoProcurementEnabled:true}),
     null
   );
+});
+
+test("daily restock keeps waiting for manual HStora funding",()=>{
+  assert.equal(isDailyRestockFundingWaitAction("PROCUREMENT_BUDGET_EXHAUSTED"),true);
+  assert.equal(isDailyRestockFundingWaitAction("MANUAL_HSTORA_LTC_TOPUP_REQUIRED"),true);
+  assert.equal(isDailyRestockFundingWaitAction("NO_AFFORDABLE_HSTORA_PRODUCT"),false);
 });
