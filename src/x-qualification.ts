@@ -1,5 +1,9 @@
 import type { HstoraProduct } from "./providers/hstora";
 import type { XSettings } from "./x-settings";
+import {
+  HSTORA_X_MAX_UNIT_PRICE_USD,
+  isBlockedHstoraSource
+} from "./x-procurement-policy";
 
 export type ProcurementClass="TOP_SEARCH"|"NO_SHADOWBAN";
 
@@ -75,17 +79,97 @@ export function detectSearchVisibility(product:VisibilityProduct){
   return {labels,evidence,text};
 }
 
+export function hasSearchVisibilityEvidence(labels:readonly string[]):boolean{
+  return (
+    labels.includes("TOP+Latest")||
+    labels.includes("TOP Search")||
+    labels.includes("Latest Search")||
+    labels.includes("Search Visible")
+  );
+}
+
+function normalizeRangeEnd(start:number,rawEnd:string):number{
+  const parsed=Number(rawEnd);
+  if(rawEnd.length===2){
+    const century=Math.floor(start/100)*100;
+    let candidate=century+parsed;
+    if(candidate<start) candidate+=100;
+    return candidate;
+  }
+  return parsed;
+}
+
+export function detectOldAccountEvidence(
+  product:VisibilityProduct,
+  now=Date.now()
+){
+  const text=productText(product);
+  const currentYear=new Date(now).getUTCFullYear();
+  const evidence:string[]=[];
+
+  const range=/\b((?:19|20)\d{2})\s*[-–—]\s*((?:(?:19|20)\d{2})|\d{2})(?:\s*(?:year|years))?\b/gi;
+  for(const match of text.matchAll(range)){
+    const start=Number(match[1]);
+    const end=normalizeRangeEnd(start,match[2]!);
+    if(
+      Number.isInteger(start)&&
+      Number.isInteger(end)&&
+      start>=1990&&
+      start<=end&&
+      end<currentYear
+    ){
+      evidence.push(`Year range ${start}-${end}`);
+    }
+  }
+
+  const agedYearPatterns=[
+    /\b(?:aged|old|created|registered|since)\D{0,12}((?:19|20)\d{2})\b/gi,
+    /\b((?:19|20)\d{2})\D{0,12}(?:aged|old)\b/gi
+  ];
+  for(const pattern of agedYearPatterns){
+    for(const match of text.matchAll(pattern)){
+      const year=Number(match[1]);
+      if(Number.isInteger(year)&&year>=1990&&year<currentYear){
+        evidence.push(`Old-year ${year}`);
+      }
+    }
+  }
+
+  if(/\bold\s+(?:twitter\s*\/?\s*x\s+)?accounts?\b/i.test(text)){
+    evidence.push("Explicit old account");
+  }
+
+  return {
+    old:evidence.length>0,
+    evidence:[...new Set(evidence)]
+  };
+}
+
+export function hasOldSearchNoShadowbanEvidence(
+  product:VisibilityProduct,
+  now=Date.now()
+):boolean{
+  const visibility=detectSearchVisibility(product);
+  return (
+    visibility.labels.includes("No Shadowban")&&
+    hasSearchVisibilityEvidence(visibility.labels)&&
+    detectOldAccountEvidence(product,now).old
+  );
+}
+
 export function classifyProcurementClass(
   product:VisibilityProduct
 ):ProcurementClass|null{
   if(!isXAccountProduct(product)) return null;
   const visibility=detectSearchVisibility(product);
-  const hasTop=
-    visibility.labels.includes("TOP+Latest")||
-    visibility.labels.includes("TOP Search");
-  if(hasTop) return "TOP_SEARCH";
-  if(visibility.labels.includes("No Shadowban")) return "NO_SHADOWBAN";
-  return null;
+  if(!visibility.labels.includes("No Shadowban")) return null;
+  if(
+    hasSearchVisibilityEvidence(visibility.labels)&&
+    detectOldAccountEvidence(product).old
+  ){
+    return "TOP_SEARCH";
+  }
+  return "NO_SHADOWBAN";
 }
 
 export function tierUnitPrice(product:HstoraProduct,quantity:number):number{
@@ -111,6 +195,7 @@ export function qualifyHstoraProduct(
 ):ProductQualification{
   const reasons:string[]=[];
   const visibility=detectSearchVisibility(product);
+  const oldEvidence=detectOldAccountEvidence(product,now);
   const detectedProcurementClass=classifyProcurementClass(product);
   const procurementClass=
     procurementClassOverride??detectedProcurementClass;
@@ -131,33 +216,41 @@ export function qualifyHstoraProduct(
     reasons.push("UNSUPPORTED_CURRENCY_"+currency);
   }
 
+  if(isBlockedHstoraSource(product.id)){
+    reasons.push("HSTORA_PRODUCT_BLOCKED_BY_POLICY");
+  }
   if(!isXAccountProduct(product)) reasons.push("NOT_X_ACCOUNT_PRODUCT");
   if(!procurementClass){
     reasons.push("SUPPORTED_X_PRODUCT_CLASS_NOT_CONFIRMED");
   }
+
   if(
-    procurementClass==="NO_SHADOWBAN"&&
+    procurementClass&&
     !visibility.labels.includes("No Shadowban")
   ){
     reasons.push("NO_SHADOWBAN_EVIDENCE_NOT_CONFIRMED");
   }
-  if(product.stock_available<settings.minimum_stock) reasons.push("STOCK_BELOW_MINIMUM");
 
   if(procurementClass==="TOP_SEARCH"){
-    if(unitJpy===null||!Number.isFinite(unitJpy)||unitJpy<=0){
-      reasons.push("UNIT_PRICE_JPY_UNAVAILABLE");
-    }else if(unitJpy>settings.max_unit_price_jpy){
-      reasons.push("TOP_SEARCH_UNIT_PRICE_ABOVE_JPY_LIMIT");
+    if(!hasSearchVisibilityEvidence(visibility.labels)){
+      reasons.push("SEARCH_VISIBILITY_EVIDENCE_NOT_CONFIRMED");
     }
-  }else if(procurementClass==="NO_SHADOWBAN"){
+    if(!oldEvidence.old){
+      reasons.push("OLD_ACCOUNT_EVIDENCE_NOT_CONFIRMED");
+    }
+  }
+
+  if(product.stock_available<settings.minimum_stock) reasons.push("STOCK_BELOW_MINIMUM");
+
+  if(procurementClass){
     if(currency!=="USD"){
-      reasons.push("NO_SHADOWBAN_REQUIRES_USD_PRICE");
+      reasons.push("HSTORA_X_REQUIRES_USD_PRICE");
     }else if(
       !Number.isFinite(unitSource)||
       unitSource<=0||
-      unitSource>settings.max_no_shadowban_unit_price_usd
+      unitSource>HSTORA_X_MAX_UNIT_PRICE_USD
     ){
-      reasons.push("NO_SHADOWBAN_UNIT_PRICE_ABOVE_USD_LIMIT");
+      reasons.push("HSTORA_X_UNIT_PRICE_ABOVE_USD_LIMIT");
     }
   }
 
@@ -181,6 +274,9 @@ export function qualifyHstoraProduct(
     search_visibility:visibility.labels,
     seller_quality:sellerQuality,
     reasons,
-    evidence:visibility.evidence
+    evidence:[
+      ...visibility.evidence,
+      ...oldEvidence.evidence
+    ]
   };
 }
