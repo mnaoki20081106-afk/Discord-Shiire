@@ -1784,12 +1784,11 @@ async function runXProcurementLocked(
 
   const fresh=await getHstoraProduct(env,Number(candidate.product.id));
   const prior=await successfulPurchaseCountForProduct(env,String(fresh.id));
-  const freshVisibility=detectSearchVisibility(fresh);
   const freshForceNoShadowban=
     procurementClassOverrideForHstoraProduct(fresh.id)==="NO_SHADOWBAN";
   const splitAcrossClasses=
     !freshForceNoShadowban&&
-    hasDualTopNoShadowbanEvidence(freshVisibility.labels);
+    hasOldSearchNoShadowbanEvidence(fresh);
   const purchaseBatch=
     targetClass!=="INVITE_CAMPAIGN"&&splitAcrossClasses
       ?Math.min(settings.max_batch_purchase,Math.max(2,batch*2))
@@ -1819,13 +1818,17 @@ async function runXProcurementLocked(
     ...PREFERRED_TOP_HSTORA_PRODUCT_IDS,
     ...PREFERRED_NO_SHADOWBAN_HSTORA_PRODUCT_IDS,
     ...settings.approved_hstora_product_ids
-  ])];
+  ])].filter(id=>!isBlockedHstoraSource(id));
   const qualificationSettings=
     settings.seller_quality_mode==="manual_product_approval"
       ?{...settings,approved_hstora_product_ids:trustedApprovedIds}
       :settings;
   const classOverride=
-    procurementClassOverrideForHstoraProduct(fresh.id)??undefined;
+    targetClass==="NO_SHADOWBAN"
+      ?"NO_SHADOWBAN" as const
+      :targetClass==="TOP_SEARCH"
+        ?"TOP_SEARCH" as const
+        :procurementClassOverrideForHstoraProduct(fresh.id)??undefined;
 
   const qualifyForQuantity=(orderQuantity:number)=>{
     const policyQualification=qualifyHstoraProduct(
@@ -1840,7 +1843,7 @@ async function runXProcurementLocked(
         ...policyQualification,
         evidence:[
           ...policyQualification.evidence,
-          `POLICY_OVERRIDE_HSTORA_${fresh.id}_NO_SHADOWBAN`
+          `POLICY_TARGET_CLASS_${targetClass}_HSTORA_${fresh.id}`
         ]
       }
       :policyQualification;
@@ -1884,14 +1887,9 @@ async function runXProcurementLocked(
   const supportsTarget=
     targetClass==="INVITE_CAMPAIGN"
       ?Boolean(q.procurement_class)
-      :q.procurement_class===targetClass||
-        (
-          targetClass==="NO_SHADOWBAN"&&
-          q.procurement_class==="TOP_SEARCH"&&
-          hasDualTopNoShadowbanEvidence(q.search_visibility)
-        );
-  const freshTopEligible=targetClass!=="TOP_SEARCH"||
-    (!freshForceNoShadowban&&isTopSearchFallbackEligible(fresh.id,q.search_visibility));
+      :q.procurement_class===targetClass;
+  const freshTopEligible=
+    targetClass!=="TOP_SEARCH"||hasOldSearchNoShadowbanEvidence(fresh);
   if(!q.qualified||!supportsTarget||!freshTopEligible){
     await setCircuitBreaker(
       env,
