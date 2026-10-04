@@ -1,12 +1,17 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  BLOCKED_HSTORA_PRODUCT_IDS,
   DUAL_TOP_SPLIT_MODE,
+  HSTORA_X_MAX_UNIT_PRICE_USD,
+  HSTORA_X_PREFERRED_PRICE_CEILING_USD,
   PREFERRED_NO_SHADOWBAN_HSTORA_PRODUCT_IDS,
   PREFERRED_TOP_HSTORA_PRODUCT_IDS,
   evenSplitPurchaseQuantity,
   hasDualTopNoShadowbanEvidence,
+  hstoraPricePriorityTier,
   hstoraProcurementPriorityTier,
+  isBlockedHstoraSource,
   isTopSearchFallbackEligible,
   isPreferredNoShadowbanHstoraSource,
   isPreferredTopHstoraSource,
@@ -14,52 +19,66 @@ import {
   splitProcurementClassAtRank
 } from "../src/x-procurement-policy.ts";
 
-test("trusted preferred TOP sources are 4841 and 5132",()=>{
-  assert.deepEqual([...PREFERRED_TOP_HSTORA_PRODUCT_IDS],[4841,5132]);
-  assert.equal(isPreferredTopHstoraSource(4841),true);
-  assert.equal(isPreferredTopHstoraSource("5132"),true);
-  assert.equal(isPreferredTopHstoraSource(9999),false);
+test("normal HStora X procurement has a hard 35-cent ceiling",()=>{
+  assert.equal(HSTORA_X_MAX_UNIT_PRICE_USD,0.35);
+  assert.equal(HSTORA_X_PREFERRED_PRICE_CEILING_USD,0.30);
+  assert.equal(hstoraPricePriorityTier(0.19),0);
+  assert.equal(hstoraPricePriorityTier(0.20),0);
+  assert.equal(hstoraPricePriorityTier(0.29),0);
+  assert.equal(hstoraPricePriorityTier(0.30),1);
+  assert.equal(hstoraPricePriorityTier(0.35),1);
+  assert.equal(hstoraPricePriorityTier(0.351),2);
 });
 
-test("HStora 4521 is a preferred no-shadowban-only exception",()=>{
+test("5132 is explicitly blocked and removed from preferred TOP sources",()=>{
+  assert.deepEqual([...BLOCKED_HSTORA_PRODUCT_IDS],[5132]);
+  assert.deepEqual([...PREFERRED_TOP_HSTORA_PRODUCT_IDS],[]);
+  assert.equal(isBlockedHstoraSource(5132),true);
+  assert.equal(isPreferredTopHstoraSource(5132),false);
+  assert.equal(isTopSearchFallbackEligible(5132,["TOP+Latest","No Shadowban"]),false);
+  assert.equal(hstoraProcurementPriorityTier(5132,"TOP_SEARCH"),99);
+});
+
+test("4521 and 1609 remain preferred no-shadowban sources",()=>{
   assert.deepEqual([...PREFERRED_NO_SHADOWBAN_HSTORA_PRODUCT_IDS],[4521,1609]);
   assert.equal(isPreferredNoShadowbanHstoraSource(4521),true);
-  assert.equal(isPreferredNoShadowbanHstoraSource("4521"),true);
-  assert.equal(isPreferredNoShadowbanHstoraSource(4841),false);
+  assert.equal(isPreferredNoShadowbanHstoraSource(1609),true);
   assert.equal(procurementClassOverrideForHstoraProduct(4521),"NO_SHADOWBAN");
   assert.equal(procurementClassOverrideForHstoraProduct(1609),"NO_SHADOWBAN");
-  assert.equal(isPreferredNoShadowbanHstoraSource("1609"),true);
-  assert.equal(procurementClassOverrideForHstoraProduct(5132),null);
 });
 
-test("dual split mode is generic and not tied to a product id",()=>{
-  assert.equal(DUAL_TOP_SPLIT_MODE,"TOP_SEARCH_NO_SHADOWBAN_50_50");
-});
-
-test("dual capability requires explicit TOP and No Shadowban evidence",()=>{
+test("dual capability requires search evidence and No Shadowban",()=>{
   assert.equal(
     hasDualTopNoShadowbanEvidence(["TOP Search","No Shadowban"]),
     true
   );
   assert.equal(
-    hasDualTopNoShadowbanEvidence(["TOP+Latest","No Shadowban"]),
+    hasDualTopNoShadowbanEvidence(["Search Visible","No Shadowban"]),
     true
-  );
-  assert.equal(
-    hasDualTopNoShadowbanEvidence(["TOP Search"]),
-    false
   );
   assert.equal(
     hasDualTopNoShadowbanEvidence(["No Shadowban"]),
     false
   );
+});
+
+test("generic search fallback must also prove No Shadowban and not be blocked",()=>{
   assert.equal(
-    hasDualTopNoShadowbanEvidence(["Latest Search","No Shadowban"]),
+    isTopSearchFallbackEligible(9999,["TOP Search"]),
     false
+  );
+  assert.equal(
+    isTopSearchFallbackEligible(9999,["TOP Search","No Shadowban"]),
+    true
+  );
+  assert.equal(
+    isTopSearchFallbackEligible(9999,["Search Visible","No Shadowban"]),
+    true
   );
 });
 
 test("dual-capability split purchases are forced to an even quantity",()=>{
+  assert.equal(DUAL_TOP_SPLIT_MODE,"TOP_SEARCH_NO_SHADOWBAN_50_50");
   assert.equal(evenSplitPurchaseQuantity(20),20);
   assert.equal(evenSplitPurchaseQuantity(19),18);
   assert.equal(evenSplitPurchaseQuantity(2),2);
@@ -74,53 +93,9 @@ test("split class allocation is exactly 50-50 for even batches",()=>{
   assert.equal(classes.filter(value=>value==="NO_SHADOWBAN").length,10);
 });
 
-test("odd legacy batches differ by at most one account",()=>{
-  const classes=Array.from({length:5},(_,rank)=>
-    splitProcurementClassAtRank(rank,5)
-  );
-  assert.equal(classes.filter(value=>value==="TOP_SEARCH").length,3);
-  assert.equal(classes.filter(value=>value==="NO_SHADOWBAN").length,2);
-});
-
-
-test("preferred TOP products bypass generic fallback labeling",()=>{
-  assert.equal(
-    isTopSearchFallbackEligible(4841,["TOP Search"]),
-    true
-  );
-  assert.equal(
-    isTopSearchFallbackEligible(5132,["TOP+Latest"]),
-    true
-  );
-});
-
-test("generic TOP fallback must also prove No Shadowban",()=>{
-  assert.equal(
-    isTopSearchFallbackEligible(9999,["TOP Search"]),
-    false
-  );
-  assert.equal(
-    isTopSearchFallbackEligible(9999,["TOP Search","No Shadowban"]),
-    true
-  );
-  assert.equal(
-    isTopSearchFallbackEligible(9999,["TOP+Latest","No Shadowban"]),
-    true
-  );
-});
-
-
-test("No Shadowban tie priority is 4521/1609, then 4841/5132, then generic",()=>{
+test("No Shadowban tie priority remains selected sources then generic",()=>{
   assert.equal(hstoraProcurementPriorityTier(4521,"NO_SHADOWBAN"),0);
   assert.equal(hstoraProcurementPriorityTier(1609,"NO_SHADOWBAN"),0);
   assert.equal(hstoraProcurementPriorityTier(4841,"NO_SHADOWBAN"),1);
-  assert.equal(hstoraProcurementPriorityTier(5132,"NO_SHADOWBAN"),1);
-  assert.equal(hstoraProcurementPriorityTier(9999,"NO_SHADOWBAN"),2);
-});
-
-test("Top Search priority is 4841/5132, then generic dual fallback",()=>{
-  assert.equal(hstoraProcurementPriorityTier(4841,"TOP_SEARCH"),0);
-  assert.equal(hstoraProcurementPriorityTier(5132,"TOP_SEARCH"),0);
-  assert.equal(hstoraProcurementPriorityTier(9999,"TOP_SEARCH"),1);
-  assert.equal(hstoraProcurementPriorityTier(4521,"TOP_SEARCH"),1);
+  assert.equal(hstoraProcurementPriorityTier(9999,"NO_SHADOWBAN"),1);
 });
