@@ -15,8 +15,10 @@ import {
 } from "./x-engine";
 import { loadXSettings } from "./x-settings";
 import {
+  dailyRestockPauseReason,
   isDailyRestockScheduleWindow,
-  shouldNotifyDailyRestock
+  shouldNotifyDailyRestock,
+  type DailyRestockPauseReason
 } from "./x-daily-restock-policy";
 import {
   jstDateKey,
@@ -100,6 +102,29 @@ async function refreshArrivalCounts(
   state.final_no_shadowban=stocks.noShadow;
   state.added_top_search=arrivals.TOP_SEARCH;
   state.added_no_shadowban=arrivals.NO_SHADOWBAN;
+  return state;
+}
+
+async function skipDailyRestock(
+  env:Env,
+  state:DailyRestockState,
+  reason:DailyRestockPauseReason
+){
+  state.status="skipped";
+  state.completed_at=Date.now();
+  state.last_action=reason;
+  state.error="";
+  state.notification_skipped_reason=reason;
+  await refreshArrivalCounts(env,state);
+  await saveDailyRestockState(env,state);
+  await auditX(env,{
+    level:"info",
+    kind:"DAILY_RESTOCK_SKIPPED",
+    message:reason==="DRY_RUN_ENABLED"
+      ?"Daily 18:00 restock was skipped because Dry Run is enabled."
+      :"Daily 18:00 restock was skipped because automatic procurement is paused.",
+    details:{dateKey:state.date_key,reason}
+  });
   return state;
 }
 
@@ -468,22 +493,13 @@ async function continueDailyRestockLocked(env:Env){
     return {action:"DAILY_RESTOCK_NOT_RUNNING",state};
   }
 
-  if(!xSettings.auto_procurement_enabled||xSettings.dry_run){
-    state.status="failed";
-    state.completed_at=Date.now();
-    state.last_action=xSettings.dry_run
-      ?"DRY_RUN_ENABLED"
-      :"AUTO_PROCUREMENT_DISABLED";
-    state.error=state.last_action;
-    await refreshArrivalCounts(env,state);
-    await saveDailyRestockState(env,state);
-    await auditX(env,{
-      level:"warn",
-      kind:"DAILY_RESTOCK_FAILED",
-      message:"Daily restock did not run because live automatic procurement is disabled.",
-      details:{dateKey:state.date_key,reason:state.error}
-    });
-    return {action:state.error,state};
+  const pauseReason=dailyRestockPauseReason({
+    dryRun:xSettings.dry_run,
+    autoProcurementEnabled:xSettings.auto_procurement_enabled
+  });
+  if(pauseReason){
+    const skipped=await skipDailyRestock(env,state,pauseReason);
+    return {action:pauseReason,state:skipped};
   }
 
   for(let step=0;step<MAX_STEPS_PER_TICK;step++){
@@ -584,9 +600,18 @@ async function startDailyRestockLocked(env:Env,now:number,force:boolean){
   const dateKey=jstDateKey(now);
   const existing=await loadDailyRestockState(env);
   if(existing?.status==="running") return continueDailyRestockLocked(env);
+  const pauseReason=dailyRestockPauseReason({
+    dryRun:xSettings.dry_run,
+    autoProcurementEnabled:xSettings.auto_procurement_enabled
+  });
+  const canResumeSkippedToday=
+    existing?.status==="skipped"&&
+    existing.date_key===dateKey&&
+    pauseReason===null;
   if(
     !force&&
-    existing?.date_key===dateKey
+    existing?.date_key===dateKey&&
+    !canResumeSkippedToday
   ){
     return {action:"DAILY_RESTOCK_ALREADY_RAN",state:existing};
   }
@@ -610,6 +635,11 @@ async function startDailyRestockLocked(env:Env,now:number,force:boolean){
     last_action:"STARTED",
     error:""
   };
+  if(pauseReason){
+    const skipped=await skipDailyRestock(env,state,pauseReason);
+    return {action:pauseReason,state:skipped};
+  }
+
   await saveDailyRestockState(env,state);
   await auditX(env,{
     kind:"DAILY_RESTOCK_STARTED",
