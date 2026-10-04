@@ -2390,8 +2390,27 @@ export async function handleShiireMainBridge(
           panelRepost:await repostMachinePanels(env,machine.id)
         });
       }
-      await refreshMachinePanels(env,machine.id);
-      return responseJson({ok:true});
+      const panelRefreshOk=await refreshMachinePanels(env,machine.id);
+      if(!panelRefreshOk){
+        await auditX(env,{
+          level:"warn",
+          kind:"SHIIRE_VENDING_PANEL_REFRESH_FAILED",
+          message:"Product changes were saved, but one or more Discord vending panels could not be refreshed.",
+          details:{
+            guildId,
+            machineId:machine.id,
+            productId:product.id
+          }
+        }).catch(()=>undefined);
+        return responseJson({
+          ok:false,
+          saved:true,
+          panelRefreshOk:false,
+          error:"VENDING_PANEL_REFRESH_FAILED",
+          message:"商品情報は保存されましたが、Discord自販機パネルへの反映に失敗しました。再投稿してください。"
+        },502);
+      }
+      return responseJson({ok:true,saved:true,panelRefreshOk:true});
     }
     if(request.method==="DELETE"){
       const ok=await deleteShiireProduct(env,product.id);
