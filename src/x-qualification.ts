@@ -3,7 +3,7 @@ import type { XSettings } from "./x-settings";
 import {
   HSTORA_X_MAX_UNIT_PRICE_USD,
   isBlockedHstoraSource
-} from "./x-procurement-policy";
+} from "./x-procurement-policy.ts";
 
 export type ProcurementClass="TOP_SEARCH"|"NO_SHADOWBAN";
 
