@@ -26,6 +26,13 @@ export function dailyRestockPauseReason(input:{
   return null;
 }
 
+export function isDailyRestockFundingWaitAction(action:string){
+  return (
+    action==="PROCUREMENT_BUDGET_EXHAUSTED"||
+    action==="MANUAL_HSTORA_LTC_TOPUP_REQUIRED"
+  );
+}
+
 export function shouldNotifyDailyRestock(input:{
   addedTopSearch:number;
   addedNoShadowban:number;
