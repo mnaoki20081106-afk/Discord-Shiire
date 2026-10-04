@@ -528,6 +528,7 @@ async function continueDailyRestockLocked(env:Env){
       };
     }
 
+    const previousAction=state.last_action;
     const result=await runXProcurement(env,{
       targetClasses:["TOP_SEARCH","NO_SHADOWBAN"],
       targetStockOverride:{
@@ -562,7 +563,7 @@ async function continueDailyRestockLocked(env:Env){
       return {action:"DAILY_RESTOCK_CONTINUES_NEXT_TICK",state};
     }
     if(isDailyRestockFundingWaitAction(result.action)){
-      const alreadyWaiting=state.last_action==="WAITING_HSTORA_FUNDING";
+      const alreadyWaiting=previousAction==="WAITING_HSTORA_FUNDING";
       state.last_action="WAITING_HSTORA_FUNDING";
       state.error="";
       await refreshArrivalCounts(env,state);
