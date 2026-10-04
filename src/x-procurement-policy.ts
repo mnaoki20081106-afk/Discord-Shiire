@@ -2,7 +2,7 @@ import type { ProcurementClass } from "./x-qualification";
 
 export const DUAL_TOP_SPLIT_MODE="TOP_SEARCH_NO_SHADOWBAN_50_50" as const;
 export const PREFERRED_TOP_HSTORA_PRODUCT_IDS=[4841,5132] as const;
-export const PREFERRED_NO_SHADOWBAN_HSTORA_PRODUCT_IDS=[4521] as const;
+export const PREFERRED_NO_SHADOWBAN_HSTORA_PRODUCT_IDS=[4521,1609] as const;
 
 export function isPreferredTopHstoraSource(productId:unknown):boolean{
   const id=Number(productId);

@@ -19,7 +19,7 @@ const VISIBILITY_RULES:Array<{label:string;patterns:RegExp[]}>= [
   {label:"TOP+Latest",patterns:[/\btop\s*\+\s*latest\b/i,/\btop\s*(?:and|&)\s*latest\b/i,/\btop\s+latest\b/i]},
   {label:"TOP Search",patterns:[/\btop\s+search\b/i,/\btop\s+searchable\b/i]},
   {label:"Latest Search",patterns:[/\blatest\s+search\b/i,/\blatest\s+searchable\b/i]},
-  {label:"No Shadowban",patterns:[/\bno\s+shadow\s*ban\b/i,/\bnot\s+shadow\s*banned\b/i]},
+  {label:"No Shadowban",patterns:[/\bno\s+shadow\s*bans?\b/i,/\bnot\s+shadow\s*banned\b/i]},
   {label:"Search Visible",patterns:[/\bsearch\s+visible\b/i,/\bvisible\s+in\s+search\b/i]}
 ];
 
