@@ -2271,8 +2271,26 @@ export async function handleShiireMainBridge(
         patch.panelColor=input.panelColor;
       }
       await updateShiireMachine(env,machine.id,patch);
-      await refreshMachinePanels(env,machine.id);
-      return responseJson({ok:true});
+      const panelRefreshOk=await refreshMachinePanels(env,machine.id);
+      if(!panelRefreshOk){
+        await auditX(env,{
+          level:"warn",
+          kind:"SHIIRE_VENDING_PANEL_REFRESH_FAILED",
+          message:"Vending machine changes were saved, but one or more Discord panels could not be refreshed.",
+          details:{
+            guildId,
+            machineId:machine.id
+          }
+        }).catch(()=>undefined);
+        return responseJson({
+          ok:false,
+          saved:true,
+          panelRefreshOk:false,
+          error:"VENDING_PANEL_REFRESH_FAILED",
+          message:"自販機設定は保存されましたが、Discord自販機パネルへの反映に失敗しました。再試行してください。"
+        },502);
+      }
+      return responseJson({ok:true,saved:true,panelRefreshOk:true});
     }
     if(request.method==="DELETE"){
       await cleanShiireVendingExpired(env);
