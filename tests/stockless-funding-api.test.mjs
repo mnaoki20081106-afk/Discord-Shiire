@@ -11,7 +11,7 @@ test('preparation API never calls providers or mutates database, and rejects liv
   const prefix='https://fixture/api/x/funding/stockless/';
   const readiness=await (await mf.dispatchFetch(prefix+'readiness')).json();
   assert.equal(readiness.liveReady,false);
-  const input={orderId:'order_1',quantity:5,reservedQuantity:2,saleAmountJpy:1500,confirmedPayPayMoneyJpy:1500,requiredFundingJpy:1000,fundingFeeJpy:110,minimumFundingJpy:1000};
+  const input={orderId:'order_1',quantity:5,reservedQuantity:2,saleAmountJpy:1500,confirmedPayPayMoneyJpy:1500,directPurchaseJpy:1000,minimumPurchaseJpy:1000};
   const run=async body=>mf.dispatchFetch(prefix+'simulation',{method:'POST',body:JSON.stringify(body)});
   const response=await run(input);assert.equal(response.status,200);
   assert.equal((await response.json()).draft.next,'complete');
