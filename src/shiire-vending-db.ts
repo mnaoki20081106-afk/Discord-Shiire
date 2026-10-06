@@ -32,6 +32,7 @@ export type ShiireVendingProduct={
   price_paypay:number;
   price_kyash:number;
   emoji:string|null;
+  stockless_enabled:number;
   sales_count:number;
   active:number;
   created_at:number;
@@ -49,6 +50,7 @@ export type ShiireVendingOrder={
   unit_price:number;
   discount_each:number;
   total_amount:number;
+  stockless:number;
   status:string;
   payment_link_ciphertext:string|null;
   reserved_until:number|null;
@@ -65,12 +67,12 @@ let ready=false;
 const SCHEMA=[
   "CREATE TABLE IF NOT EXISTS shiire_vending_machines (id TEXT PRIMARY KEY,guild_id TEXT NOT NULL,name TEXT NOT NULL,public_log_channel_id TEXT,private_log_channel_id TEXT,role_id TEXT,panel_title TEXT,panel_description TEXT,panel_color INTEGER NOT NULL DEFAULT 5763719,panel_image_url TEXT,panel_image_mime TEXT,panel_image_base64 TEXT,active INTEGER NOT NULL DEFAULT 1,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL)",
   "CREATE INDEX IF NOT EXISTS shiire_vending_machines_guild_idx ON shiire_vending_machines(guild_id,active)",
-  "CREATE TABLE IF NOT EXISTS shiire_vending_products (id TEXT PRIMARY KEY,vending_machine_id TEXT NOT NULL,supplier_product_id TEXT NOT NULL,procurement_class TEXT,name TEXT NOT NULL,description TEXT NOT NULL DEFAULT '',price_paypay INTEGER NOT NULL DEFAULT 0,price_kyash INTEGER NOT NULL DEFAULT 0,emoji TEXT,sales_count INTEGER NOT NULL DEFAULT 0,active INTEGER NOT NULL DEFAULT 1,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL)",
+  "CREATE TABLE IF NOT EXISTS shiire_vending_products (id TEXT PRIMARY KEY,vending_machine_id TEXT NOT NULL,supplier_product_id TEXT NOT NULL,procurement_class TEXT,name TEXT NOT NULL,description TEXT NOT NULL DEFAULT '',price_paypay INTEGER NOT NULL DEFAULT 0,price_kyash INTEGER NOT NULL DEFAULT 0,emoji TEXT,stockless_enabled INTEGER NOT NULL DEFAULT 0,sales_count INTEGER NOT NULL DEFAULT 0,active INTEGER NOT NULL DEFAULT 1,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL)",
   "CREATE INDEX IF NOT EXISTS shiire_vending_products_vm_idx ON shiire_vending_products(vending_machine_id,active)",
   "CREATE INDEX IF NOT EXISTS shiire_vending_products_supplier_idx ON shiire_vending_products(supplier_product_id,active)",
   "CREATE TABLE IF NOT EXISTS shiire_vending_coupons (code TEXT NOT NULL,vending_machine_id TEXT NOT NULL,discount INTEGER NOT NULL,active INTEGER NOT NULL DEFAULT 1,created_at INTEGER NOT NULL,PRIMARY KEY(vending_machine_id,code))",
   "CREATE TABLE IF NOT EXISTS shiire_vending_stock_notifications (vending_machine_id TEXT PRIMARY KEY,guild_id TEXT NOT NULL,channel_id TEXT NOT NULL,role_id TEXT NOT NULL,enabled INTEGER NOT NULL DEFAULT 0,updated_at INTEGER NOT NULL)",
-  "CREATE TABLE IF NOT EXISTS shiire_vending_orders (id TEXT PRIMARY KEY,vending_machine_id TEXT NOT NULL,product_id TEXT NOT NULL,guild_id TEXT NOT NULL,user_id TEXT NOT NULL,payment_method TEXT NOT NULL,quantity INTEGER NOT NULL,unit_price INTEGER NOT NULL,discount_each INTEGER NOT NULL DEFAULT 0,total_amount INTEGER NOT NULL,status TEXT NOT NULL,payment_link_ciphertext TEXT,reserved_until INTEGER,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL,paid_at INTEGER,delivered_at INTEGER,delivery_channel_id TEXT,delivery_message_id TEXT)",
+  "CREATE TABLE IF NOT EXISTS shiire_vending_orders (id TEXT PRIMARY KEY,vending_machine_id TEXT NOT NULL,product_id TEXT NOT NULL,guild_id TEXT NOT NULL,user_id TEXT NOT NULL,payment_method TEXT NOT NULL,quantity INTEGER NOT NULL,unit_price INTEGER NOT NULL,discount_each INTEGER NOT NULL DEFAULT 0,total_amount INTEGER NOT NULL,stockless INTEGER NOT NULL DEFAULT 0,status TEXT NOT NULL,payment_link_ciphertext TEXT,reserved_until INTEGER,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL,paid_at INTEGER,delivered_at INTEGER,delivery_channel_id TEXT,delivery_message_id TEXT)",
   "CREATE INDEX IF NOT EXISTS shiire_vending_orders_status_idx ON shiire_vending_orders(status,reserved_until,created_at)",
   "CREATE TABLE IF NOT EXISTS shiire_vending_reservations (account_id TEXT PRIMARY KEY,order_id TEXT NOT NULL,product_id TEXT NOT NULL,reserved_at INTEGER NOT NULL)",
   "CREATE INDEX IF NOT EXISTS shiire_vending_reservations_order_idx ON shiire_vending_reservations(order_id)",
@@ -105,13 +107,23 @@ export async function ensureShiireVendingSchema(env:Env){
       "ALTER TABLE shiire_vending_products ADD COLUMN procurement_class TEXT"
     ).run();
   }
+  if(!productColumns.includes("stockless_enabled")){
+    await env.DB.prepare(
+      "ALTER TABLE shiire_vending_products ADD COLUMN stockless_enabled INTEGER NOT NULL DEFAULT 0"
+    ).run();
+    await env.DB.prepare(
+      "UPDATE shiire_vending_products SET stockless_enabled=1 "+
+      "WHERE active=1 AND procurement_class IN ('TOP_SEARCH','NO_SHADOWBAN')"
+    ).run();
+  }
 
   const orderColumns=(await env.DB.prepare(
     "PRAGMA table_info(shiire_vending_orders)"
   ).all<{name:string}>()).results.map(row=>row.name);
   for(const [name,type] of [
     ["delivery_channel_id","TEXT"],
-    ["delivery_message_id","TEXT"]
+    ["delivery_message_id","TEXT"],
+    ["stockless","INTEGER NOT NULL DEFAULT 0"]
   ] as const){
     if(!orderColumns.includes(name)){
       await env.DB.prepare(
@@ -211,8 +223,8 @@ export async function ensureShiireDefaultProducts(env:Env,machineId:string){
   const now=Date.now();
   const results=await env.DB.batch(Object.entries(SHIIRE_VENDING_SALES_COPY).map(([procurementClass,preset])=>
     env.DB.prepare(
-      "INSERT OR IGNORE INTO shiire_vending_products(id,vending_machine_id,supplier_product_id,procurement_class,name,description,price_paypay,price_kyash,active,created_at,updated_at) "+
-      "SELECT ?,?,'',?,?,?,?,?,1,?,? WHERE EXISTS (SELECT 1 FROM shiire_vending_machines WHERE id=? AND active=1) "+
+      "INSERT OR IGNORE INTO shiire_vending_products(id,vending_machine_id,supplier_product_id,procurement_class,name,description,price_paypay,price_kyash,stockless_enabled,active,created_at,updated_at) "+
+      "SELECT ?,?,'',?,?,?,?,?,1,1,?,? WHERE EXISTS (SELECT 1 FROM shiire_vending_machines WHERE id=? AND active=1) "+
       "AND NOT EXISTS (SELECT 1 FROM shiire_vending_products WHERE vending_machine_id=? AND procurement_class=?)"
     ).bind("default:"+machineId+":"+procurementClass,machineId,procurementClass,preset.name,preset.description,preset.priceJpy,preset.priceJpy,now,now,machineId,machineId,procurementClass)
   ));
@@ -224,7 +236,7 @@ export async function deleteShiireMachine(env:Env,id:string){
   await ensureShiireVendingSchema(env);
   const result=await env.DB.prepare(
     "UPDATE shiire_vending_machines SET active=0,updated_at=? WHERE id=? AND active=1 "+
-    "AND NOT EXISTS (SELECT 1 FROM shiire_vending_orders WHERE vending_machine_id=? AND status IN ('reserving','awaiting_payment','payment_pending','paid','delivering','delivery_sent'))"
+    "AND NOT EXISTS (SELECT 1 FROM shiire_vending_orders WHERE vending_machine_id=? AND status IN ('reserving','awaiting_payment','payment_pending','procurement_pending','paid','delivering','delivery_sent'))"
   ).bind(Date.now(),id,id).run();
   if(Number(result.meta.changes??0)>0) return true;
   if(await getShiireMachine(env,id)) throw new Error("SHIIRE_MACHINE_HAS_OPEN_ORDERS");
@@ -297,6 +309,7 @@ export async function createShiireProduct(
     pricePayPay:number;
     priceKyash:number;
     emoji:string|null;
+    stocklessEnabled?:boolean;
   }
 ){
   await ensureShiireVendingSchema(env);
@@ -311,14 +324,15 @@ export async function createShiireProduct(
   }else{
     if(!supplierProductId) throw new Error("SUPPLIER_PRODUCT_REQUIRED");
     await requireSourceProduct(env,supplierProductId);
+    if(input.stocklessEnabled) throw new Error("STOCKLESS_REQUIRES_PROCUREMENT_CLASS");
   }
 
   const id=randomId(),now=Date.now();
   await env.DB.prepare(
     "INSERT INTO shiire_vending_products("+
     "id,vending_machine_id,supplier_product_id,procurement_class,name,description,"+
-    "price_paypay,price_kyash,emoji,sales_count,active,created_at,updated_at"+
-    ") VALUES (?,?,?,?,?,?,?,?,?,0,1,?,?)"
+    "price_paypay,price_kyash,emoji,stockless_enabled,sales_count,active,created_at,updated_at"+
+    ") VALUES (?,?,?,?,?,?,?,?,?,?,0,1,?,?)"
   ).bind(
     id,
     machineId,
@@ -329,6 +343,7 @@ export async function createShiireProduct(
     input.pricePayPay,
     input.priceKyash,
     input.emoji,
+    input.stocklessEnabled?1:0,
     now,
     now
   ).run();
@@ -346,6 +361,7 @@ export async function updateShiireProduct(
     pricePayPay:number;
     priceKyash:number;
     emoji:string|null;
+    stocklessEnabled:boolean;
   }>
 ){
   const current=await getShiireProduct(env,id);
@@ -369,10 +385,14 @@ export async function updateShiireProduct(
     nextClass=null;
   }
   if(!nextClass&&!nextSupplier) throw new Error("VENDING_SOURCE_REQUIRED");
+  const nextStockless=input.stocklessEnabled===undefined
+    ?Boolean(current.stockless_enabled)
+    :input.stocklessEnabled;
+  if(nextStockless&&!nextClass) throw new Error("STOCKLESS_REQUIRES_PROCUREMENT_CLASS");
 
   const result=await env.DB.prepare(
     "UPDATE shiire_vending_products SET supplier_product_id=?,procurement_class=?,"+
-    "name=?,description=?,price_paypay=?,price_kyash=?,emoji=?,updated_at=? "+
+    "name=?,description=?,price_paypay=?,price_kyash=?,emoji=?,stockless_enabled=?,updated_at=? "+
     "WHERE id=? AND active=1"
   ).bind(
     nextSupplier,
@@ -382,6 +402,7 @@ export async function updateShiireProduct(
     input.pricePayPay??current.price_paypay,
     input.priceKyash??current.price_kyash,
     input.emoji===undefined?current.emoji:input.emoji,
+    nextStockless?1:0,
     Date.now(),
     id
   ).run();
@@ -480,7 +501,7 @@ async function reserveAccounts(
     for(const row of rows){
       const results=await env.DB.batch([
         env.DB.prepare(
-          "UPDATE purchased_accounts SET status='VENDING_RESERVED' WHERE id=? AND status='READY_FOR_DELIVERY' AND EXISTS (SELECT 1 FROM shiire_vending_orders WHERE id=? AND status='reserving')"
+          "UPDATE purchased_accounts SET status='VENDING_RESERVED' WHERE id=? AND status='READY_FOR_DELIVERY' AND EXISTS (SELECT 1 FROM shiire_vending_orders WHERE id=? AND status IN ('reserving','procurement_pending'))"
         ).bind(row.id,orderId),
         env.DB.prepare(
           "INSERT INTO shiire_vending_reservations(account_id,order_id,product_id,reserved_at) SELECT ?,?,?,? WHERE changes()=1"
@@ -491,7 +512,14 @@ async function reserveAccounts(
     }
     return reserved;
   }catch(error){
-    await releaseShiireOrder(env,orderId);
+    await env.DB.batch([
+      env.DB.prepare(
+        "UPDATE purchased_accounts SET status='READY_FOR_DELIVERY' WHERE status='VENDING_RESERVED' AND id IN (SELECT account_id FROM shiire_vending_reservations WHERE order_id=?)"
+      ).bind(orderId),
+      env.DB.prepare(
+        "DELETE FROM shiire_vending_reservations WHERE order_id=?"
+      ).bind(orderId)
+    ]);
     throw error;
   }
 }
@@ -514,25 +542,34 @@ export async function reserveShiireOrder(
   if(unit<1) throw new Error("PAYMENT_METHOD_DISABLED_FOR_PRODUCT");
   const discount=Math.max(0,Math.floor(input.discount));
   const total=Math.max(0,(unit-discount)*quantity);
+  const available=await availableShiireAccounts(env,input.product);
+  const stockless=
+    available===0&&
+    Boolean(input.product.stockless_enabled);
+  if(stockless&&input.method!=="paypay") throw new Error("STOCKLESS_PAYPAY_ONLY");
+  if(stockless&&!input.product.procurement_class) throw new Error("STOCKLESS_REQUIRES_PROCUREMENT_CLASS");
+  if(stockless&&total<1) throw new Error("STOCKLESS_PAYMENT_REQUIRED");
   const now=Date.now(),orderId=randomId(),until=now+10*60_000;
 
   const inserted=await env.DB.prepare(
-    "INSERT INTO shiire_vending_orders(id,vending_machine_id,product_id,guild_id,user_id,payment_method,quantity,unit_price,discount_each,total_amount,status,reserved_until,created_at,updated_at,paid_at) "+
-    "SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,?,? WHERE EXISTS (SELECT 1 FROM shiire_vending_machines WHERE id=? AND active=1)"
+    "INSERT INTO shiire_vending_orders(id,vending_machine_id,product_id,guild_id,user_id,payment_method,quantity,unit_price,discount_each,total_amount,stockless,status,reserved_until,created_at,updated_at,paid_at) "+
+    "SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,? WHERE EXISTS (SELECT 1 FROM shiire_vending_machines WHERE id=? AND active=1)"
   ).bind(
     orderId,input.machine.id,input.product.id,input.guildId,input.userId,
-    total===0?"free":input.method,quantity,unit,discount,total,
+    total===0?"free":input.method,quantity,unit,discount,total,stockless?1:0,
     "reserving",until,now,now,total===0?now:null,input.machine.id
   ).run();
   if(Number(inserted.meta.changes??0)!==1) throw new Error("VENDING_MACHINE_NOT_AVAILABLE");
 
-  try{
-    await reserveAccounts(env,orderId,input.product,quantity);
-  }catch(error){
-    await env.DB.prepare(
-      "UPDATE shiire_vending_orders SET status='failed',updated_at=? WHERE id=?"
-    ).bind(Date.now(),orderId).run();
-    throw error;
+  if(!stockless){
+    try{
+      await reserveAccounts(env,orderId,input.product,quantity);
+    }catch(error){
+      await env.DB.prepare(
+        "UPDATE shiire_vending_orders SET status='failed',updated_at=? WHERE id=?"
+      ).bind(Date.now(),orderId).run();
+      throw error;
+    }
   }
 
   const finalized=await env.DB.prepare(
@@ -583,8 +620,46 @@ export async function readShiirePaymentLink(
 export async function markShiirePaid(env:Env,orderId:string){
   const now=Date.now();
   await env.DB.prepare(
-    "UPDATE shiire_vending_orders SET status='paid',paid_at=?,reserved_until=NULL,updated_at=? WHERE id=? AND status IN ('awaiting_payment','payment_pending')"
+    "UPDATE shiire_vending_orders SET status=CASE WHEN stockless=1 THEN 'procurement_pending' ELSE 'paid' END,paid_at=?,reserved_until=NULL,updated_at=? WHERE id=? AND status IN ('awaiting_payment','payment_pending')"
   ).bind(now,now,orderId).run();
+}
+
+export async function tryReserveStocklessOrder(env:Env,orderId:string){
+  await ensureShiireVendingSchema(env);
+  const order=await getShiireOrder(env,orderId);
+  if(!order||order.stockless!==1||order.status!=="procurement_pending") return false;
+  const product=await getShiireProduct(env,order.product_id);
+  if(!product) throw new Error("PRODUCT_NOT_FOUND");
+  try{
+    await reserveAccounts(env,order.id,product,order.quantity);
+  }catch(error){
+    if(error instanceof Error&&(error.message==="OUT_OF_STOCK"||error.message==="STOCK_RACE")){
+      return false;
+    }
+    throw error;
+  }
+  const updated=await env.DB.prepare(
+    "UPDATE shiire_vending_orders SET status='paid',updated_at=? WHERE id=? AND status='procurement_pending' AND stockless=1"
+  ).bind(Date.now(),order.id).run();
+  if(Number(updated.meta.changes??0)===1) return true;
+
+  await env.DB.batch([
+    env.DB.prepare(
+      "UPDATE purchased_accounts SET status='READY_FOR_DELIVERY' WHERE status='VENDING_RESERVED' AND id IN (SELECT account_id FROM shiire_vending_reservations WHERE order_id=?)"
+    ).bind(order.id),
+    env.DB.prepare(
+      "DELETE FROM shiire_vending_reservations WHERE order_id=?"
+    ).bind(order.id)
+  ]);
+  return false;
+}
+
+export async function listPendingStocklessOrders(env:Env,limit=50){
+  await ensureShiireVendingSchema(env);
+  const safe=Math.max(1,Math.min(100,Math.floor(limit)));
+  return (await env.DB.prepare(
+    "SELECT * FROM shiire_vending_orders WHERE stockless=1 AND status IN ('procurement_pending','paid') ORDER BY paid_at ASC,created_at ASC LIMIT ?"
+  ).bind(safe).all<ShiireVendingOrder>()).results;
 }
 
 export async function claimShiireDelivery(env:Env,orderId:string){
@@ -628,20 +703,25 @@ export async function listShiireDeliverySent(env:Env,limit=20){
 export async function reservedShiireAccounts(env:Env,orderId:string){
   await ensureShiireVendingSchema(env);
   return (await env.DB.prepare(
-    "SELECT a.id,a.credentials_ciphertext,a.supplier_product_id FROM shiire_vending_reservations r JOIN purchased_accounts a ON a.id=r.account_id WHERE r.order_id=? AND a.status='VENDING_RESERVED' ORDER BY r.reserved_at ASC,a.id ASC"
+    "SELECT a.id,a.supplier,a.credentials_ciphertext,a.supplier_product_id FROM shiire_vending_reservations r JOIN purchased_accounts a ON a.id=r.account_id WHERE r.order_id=? AND a.status='VENDING_RESERVED' ORDER BY r.reserved_at ASC,a.id ASC"
   ).bind(orderId).all<{
-    id:string;credentials_ciphertext:string;supplier_product_id:string;
+    id:string;supplier:string;credentials_ciphertext:string;supplier_product_id:string;
   }>()).results;
 }
 
 export async function decryptReservedShiireAccounts(env:Env,orderId:string){
   const rows=await reservedShiireAccounts(env,orderId);
-  const output:Array<{id:string;content:string}>= [];
+  const output:Array<{id:string;supplier:string;supplierProductId:string;content:string}>= [];
   for(const row of rows){
     let encrypted:EncryptedSecret;
     try{encrypted=JSON.parse(row.credentials_ciphertext) as EncryptedSecret;}
     catch{throw new Error("CREDENTIAL_CIPHERTEXT_INVALID");}
-    output.push({id:row.id,content:await decryptSensitive(env,encrypted)});
+    output.push({
+      id:row.id,
+      supplier:row.supplier,
+      supplierProductId:row.supplier_product_id,
+      content:await decryptSensitive(env,encrypted)
+    });
   }
   return output;
 }

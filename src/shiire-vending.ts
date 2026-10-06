@@ -2,6 +2,11 @@ import { panelPayload, isPanelColor, PANEL_FORMAT_VERSION } from "./shiire-panel
 import type { Env } from "./types";
 import { hmacHex, sha256Hex } from "./crypto";
 import { loadXSettings, saveXSettings } from "./x-settings";
+import { runXProcurement } from "./x-engine";
+import {
+  DeliveryFormatError,
+  normalizeHstoraDeliveryForVending
+} from "./shiire-delivery-format";
 import { fundingModeLabel, isBinanceAutoFundingServerEnabled } from "./x-funding-mode";
 import {
   confirmPendingDirectLtcFunding,
@@ -70,6 +75,7 @@ import {
   listShiireSourceProducts,
   listShiireProducts,
   getShiireProduct,
+  availableShiireAccounts,
   createShiireProduct,
   updateShiireProduct,
   deleteShiireProduct,
@@ -86,6 +92,8 @@ import {
   clearShiirePaymentLink,
   readShiirePaymentLink,
   markShiirePaid,
+  tryReserveStocklessOrder,
+  listPendingStocklessOrders,
   claimShiireDelivery,
   resetShiireDelivery,
   markShiireDeliverySent,
@@ -784,7 +792,24 @@ async function deliverOrder(env:Env,order:ShiireVendingOrder):Promise<boolean>{
     if(!machine||!product) throw new Error("ORDER_DATA_MISSING");
     const items=await decryptReservedShiireAccounts(env,order.id);
     if(items.length!==order.quantity) throw new Error("RESERVED_STOCK_MISSING");
-    const deliveryText=items.map(item=>item.content).join("\n");
+    let deliveryText:string;
+    try{
+      deliveryText=items.map(item=>
+        item.supplier==="hstora"
+          ?normalizeHstoraDeliveryForVending(item.content,item.supplierProductId)
+          :item.content
+      ).join("\n");
+    }catch(error){
+      if(error instanceof DeliveryFormatError){
+        await auditX(env,{
+          level:"error",
+          kind:"SHIIRE_VENDING_DELIVERY_FORMAT_BLOCKED",
+          message:"HStora delivery did not match the verified X-Utility format catalogue; delivery was blocked instead of sending supplier-formatted credentials.",
+          details:{orderId:order.id,code:error.code}
+        }).catch(()=>undefined);
+      }
+      throw error;
+    }
     const dm=await discordJson<{id:string}>(
       env,
       "/users/@me/channels",
@@ -875,16 +900,25 @@ async function processPaymentLink(
     method:order.payment_method,
     link,
     amount:order.total_amount,
-    idempotencyKey:await paymentIdempotencyKey(order,link)
+    idempotencyKey:await paymentIdempotencyKey(order,link),
+    requirePayPayMoney:order.stockless===1
   });
   if(result.status==="completed"||result.ok){
     if(!result.ok||result.status!=="completed"||!Number.isSafeInteger(result.amount)||result.amount<order.total_amount){
       throw new Error("PAYMENT_COMPLETION_AMOUNT_MISMATCH");
     }
     await markShiirePaid(env,order.id);
+    if(order.stockless===1) await tryReserveStocklessOrder(env,order.id);
     const paid=await getShiireOrder(env,order.id);
     if(!paid) throw new Error("PAID_ORDER_NOT_FOUND");
-    return {status:"completed",delivered:await deliverOrder(env,paid)};
+    if(paid.status==="procurement_pending"){
+      return {status:"completed",delivered:false,procurementPending:true};
+    }
+    return {
+      status:"completed",
+      delivered:await deliverOrder(env,paid),
+      procurementPending:false
+    };
   }
   if(result.status==="pending"){
     return {status:"pending",delivered:false};
@@ -915,19 +949,44 @@ function interactionUserId(interaction:any){
   return String(interaction?.member?.user?.id??interaction?.user?.id??"");
 }
 
+function stocklessAvailable(
+  product:ShiireVendingProduct&{stock_count:number},
+  method:"paypay"|"kyash"
+){
+  return (
+    method==="paypay"&&
+    product.stock_count===0&&
+    product.stockless_enabled===1&&
+    Boolean(product.procurement_class)&&
+    paymentMethodEnabled(product,"paypay")
+  );
+}
+
+function productAvailableForMethod(
+  product:ShiireVendingProduct&{stock_count:number},
+  method:"paypay"|"kyash"
+){
+  return (
+    (product.stock_count>0&&paymentMethodEnabled(product,method))||
+    stocklessAvailable(product,method)
+  );
+}
+
 function selectOptions(
   products:Array<ShiireVendingProduct&{stock_count:number}>,
   method:"paypay"|"kyash"
 ){
   return products
-    .filter(product=>product.stock_count>0&&paymentMethodEnabled(product,method))
+    .filter(product=>productAvailableForMethod(product,method))
     .slice(0,25)
     .map(product=>({
       label:product.name.slice(0,100),
       value:product.id,
       description:(
-        paymentPrice(product,method)+
-        "円 / 在庫 "+product.stock_count
+        paymentPrice(product,method)+"円 / "+
+        (stocklessAvailable(product,method)
+          ?"無在庫販売（PayPayマネーのみ）"
+          :"在庫 "+product.stock_count)
       ).slice(0,100),
       ...(product.emoji?{emoji:{name:product.emoji}}:{})
     }));
@@ -951,19 +1010,19 @@ export async function handleShiireVendingInteraction(
       const options=[];
       if(
         payment.paypay&&
-        products.some(product=>product.stock_count>0&&paymentMethodEnabled(product,"paypay"))
+        products.some(product=>productAvailableForMethod(product,"paypay"))
       ){
         options.push({label:"PayPay",value:"paypay",emoji:{name:"💴"}});
       }
       if(
         payment.kyash&&
-        products.some(product=>product.stock_count>0&&paymentMethodEnabled(product,"kyash"))
+        products.some(product=>productAvailableForMethod(product,"kyash"))
       ){
         options.push({label:"Kyash",value:"kyash",emoji:{name:"💳"}});
       }
       if(!options.length){
         return interactionResponse(ephemeral(
-          products.some(product=>product.stock_count>0)
+          products.some(product=>product.stock_count>0||product.stockless_enabled===1)
             ?"現在利用できる決済方法がありません。商品価格と販売者の決済設定を確認してください。"
             :"現在購入できる在庫がありません。"
         ));
@@ -987,7 +1046,11 @@ export async function handleShiireVendingInteraction(
         color:5793266,
         fields:products.slice(0,25).map(product=>({
           name:product.name,
-          value:"在庫: "+product.stock_count+"\n販売数: "+product.sales_count,
+          value:"在庫: "+product.stock_count+
+            (product.stock_count===0&&product.stockless_enabled===1
+              ?"（無在庫販売: ON）"
+              :"")+
+            "\n販売数: "+product.sales_count,
           inline:false
         }))
       }]));
@@ -1120,6 +1183,14 @@ export async function handleShiireVendingInteraction(
       if(!paymentMethodEnabled(product,method)){
         return interactionResponse(ephemeral("この商品では選択した決済方法は利用できません。"));
       }
+      const currentStock=await availableShiireAccounts(env,product);
+      if(
+        currentStock===0&&
+        product.stockless_enabled===1&&
+        method!=="paypay"
+      ){
+        return interactionResponse(ephemeral("無在庫販売ではPayPayマネーのみ利用できます。"));
+      }
       if(String(interaction.guild_id??"")!==machine.guild_id){
         return interactionResponse(ephemeral("このサーバーの自販機ではありません。"));
       }
@@ -1148,9 +1219,13 @@ export async function handleShiireVendingInteraction(
         });
       }catch(error){
         return interactionResponse(ephemeral(
-          error instanceof Error&&error.message.includes("OUT_OF_STOCK")
-            ?"在庫が不足しています。"
-            :"在庫確保に失敗しました。"
+          error instanceof Error&&error.message.includes("STOCKLESS_PAYPAY_ONLY")
+            ?"無在庫販売ではPayPayマネーのみ利用できます。"
+            :error instanceof Error&&error.message.includes("STOCKLESS_PAYMENT_REQUIRED")
+              ?"無在庫販売では0円注文を利用できません。"
+              :error instanceof Error&&error.message.includes("OUT_OF_STOCK")
+                ?"在庫が不足しています。"
+                :"在庫確保に失敗しました。"
         ));
       }
       if(!order) return interactionResponse(ephemeral("注文作成に失敗しました。"));
@@ -1180,6 +1255,10 @@ export async function handleShiireVendingInteraction(
       return interactionResponse(ephemeral(
         "**"+product.name+"** × "+order.quantity+
         "\n支払額: **"+order.total_amount+"円**"+
+        (order.stockless===1
+          ?"\n**無在庫販売：PayPayマネーのみ対応です。PayPayマネーライトを含むリンクは受取前に拒否します。**"+
+           "\n決済確認後にHSTORA仕入れ・入荷確認・納品を自動で進めます。"
+          :"")+
         "\n10分以内に送金リンクを入力してください。",
         [{type:1,components:[{
           type:2,
@@ -1205,11 +1284,14 @@ export async function handleShiireVendingInteraction(
       await attachShiirePaymentLink(env,order.id,link);
       const result=await processPaymentLink(env,order,link);
       if(result.status==="completed"){
+        const procurementPending=Boolean(result.procurementPending);
         return interactionResponse(ephemeral(
           result.delivered
             ?"決済と納品が完了しました。DMを確認してください。"
-            :"決済は完了しました。納品を再試行してください。",
-          result.delivered?undefined:[{type:1,components:[{
+            :procurementPending
+              ?"決済が完了しました。現在HSTORAから仕入れ・入荷確認中です。入荷後に自動でDM納品します。"
+              :"決済は完了しました。納品を再試行してください。",
+          result.delivered||procurementPending?undefined:[{type:1,components:[{
             type:2,style:1,label:"納品を再試行",custom_id:"svm:retry:"+order.id
           }]}]
         ));
@@ -1220,7 +1302,11 @@ export async function handleShiireVendingInteraction(
         ));
       }
       return interactionResponse(ephemeral(
-        "決済を確認できませんでした。別の有効な送金リンクを入力してください。"
+        result.reason==="PAYPAY_MONEY_LIGHT_NOT_ALLOWED"
+          ?"PayPayマネーライトを含む送金リンクは無在庫販売では利用できません。PayPayマネーのみのリンクを入力してください。"
+          :result.reason==="PAYPAY_BALANCE_TYPE_UNKNOWN"
+            ?"PayPay残高の種類を確認できないため受け取りませんでした。PayPayマネーのみのリンクを入力してください。"
+            :"決済を確認できませんでした。別の有効な送金リンクを入力してください。"
       ));
     }
   }
@@ -2353,7 +2439,8 @@ export async function handleShiireMainBridge(
         description:String(input.description??"").slice(0,500),
         pricePayPay,
         priceKyash,
-        emoji:input.emoji?String(input.emoji).slice(0,64):null
+        emoji:input.emoji?String(input.emoji).slice(0,64):null,
+        stocklessEnabled:input.stocklessEnabled===true
       });
       await refreshMachinePanels(env,machine.id);
       return responseJson(product,201);
@@ -2402,6 +2489,7 @@ export async function handleShiireMainBridge(
         }
       }
       if(input.emoji!==undefined) patch.emoji=input.emoji?String(input.emoji).slice(0,64):null;
+      if(input.stocklessEnabled!==undefined) patch.stocklessEnabled=input.stocklessEnabled===true;
       await updateShiireProduct(env,product.id,patch);
       if(input.repostPanels===true){
         return responseJson({
@@ -2599,6 +2687,84 @@ export async function notifyShiireVendingStockArrival(
   }
 }
 
+async function processStocklessOrders(env:Env){
+  let open=await listPendingStocklessOrders(env,50);
+  const blockedClasses=new Set<"TOP_SEARCH"|"NO_SHADOWBAN">();
+
+  for(const order of open){
+    try{
+      if(order.status==="procurement_pending"){
+        const product=await getShiireProduct(env,order.product_id);
+        const cls=product?.procurement_class;
+        if(cls&&!blockedClasses.has(cls)){
+          const reserved=await tryReserveStocklessOrder(env,order.id);
+          if(!reserved) blockedClasses.add(cls);
+        }
+      }
+      const current=await getShiireOrder(env,order.id);
+      if(current?.status==="paid"){
+        await deliverOrder(env,current);
+      }
+    }catch(error){
+      console.error("stockless reservation/delivery failed",order.id,error);
+    }
+  }
+
+  open=(await listPendingStocklessOrders(env,50))
+    .filter(order=>order.status==="procurement_pending");
+  const demand=new Map<"TOP_SEARCH"|"NO_SHADOWBAN",number>();
+  const representative=new Map<"TOP_SEARCH"|"NO_SHADOWBAN",ShiireVendingProduct>();
+
+  for(const order of open){
+    const product=await getShiireProduct(env,order.product_id);
+    if(!product?.procurement_class) continue;
+    const cls=product.procurement_class;
+    demand.set(cls,(demand.get(cls)??0)+order.quantity);
+    if(!representative.has(cls)) representative.set(cls,product);
+  }
+
+  for(const cls of ["TOP_SEARCH","NO_SHADOWBAN"] as const){
+    const required=demand.get(cls)??0;
+    const product=representative.get(cls);
+    if(required<=0||!product) continue;
+    const ready=await availableShiireAccounts(env,product);
+    try{
+      const result=await runXProcurement(env,{
+        targetClasses:[cls],
+        targetStockOverride:{[cls]:required},
+        allowAutoFunding:false
+      });
+      await auditX(env,{
+        kind:"SHIIRE_STOCKLESS_PROCUREMENT",
+        message:"Stockless vending demand was sent to the existing HStora procurement engine.",
+        details:{procurementClass:cls,required,ready,action:result.action}
+      }).catch(()=>undefined);
+    }catch(error){
+      console.error("stockless HStora procurement failed",cls,error);
+    }
+  }
+
+  const postBlockedClasses=new Set<"TOP_SEARCH"|"NO_SHADOWBAN">();
+  for(const order of await listPendingStocklessOrders(env,50)){
+    try{
+      if(order.status==="procurement_pending"){
+        const product=await getShiireProduct(env,order.product_id);
+        const cls=product?.procurement_class;
+        if(cls&&!postBlockedClasses.has(cls)){
+          const reserved=await tryReserveStocklessOrder(env,order.id);
+          if(!reserved) postBlockedClasses.add(cls);
+        }
+      }
+      const current=await getShiireOrder(env,order.id);
+      if(current?.status==="paid"){
+        await deliverOrder(env,current);
+      }
+    }catch(error){
+      console.error("stockless post-procurement delivery failed",order.id,error);
+    }
+  }
+}
+
 export async function shiireVendingSweep(env:Env){
   await cleanShiireVendingExpired(env);
 
@@ -2614,6 +2780,8 @@ export async function shiireVendingSweep(env:Env){
       console.error("shiire vending payment sweep failed",order.id,error);
     }
   }
+
+  await processStocklessOrders(env);
 
   for(const order of await listShiireDeliverySent(env,20)){
     try{
