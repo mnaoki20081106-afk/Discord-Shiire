@@ -98,6 +98,7 @@ import {
   listPendingStocklessOrders,
   claimShiireDelivery,
   resetShiireDelivery,
+  setShiireDeliveryChannel,
   markShiireDeliverySent,
   decryptReservedShiireAccounts,
   finishShiireDelivery,
@@ -726,13 +727,15 @@ async function sendDeliveryMessage(
 ){
   const nonce=deliveryNonce(order.id);
   if(content.length<=1800){
-    return sendJsonMessage(env,channelId,{
+    const message=await sendJsonMessage(env,channelId,{
       content,
       embeds:[embed],
       allowed_mentions:{parse:[]},
       nonce,
       enforce_nonce:true
     });
+    if(typeof message.id!=="string"||!/^\d{1,30}$/.test(message.id)) throw new Error("DELIVERY_MESSAGE_ID_MISSING");
+    return message;
   }
 
   const form=new FormData();
@@ -755,7 +758,9 @@ async function sendDeliveryMessage(
     "/channels/"+channelId+"/messages",
     {method:"POST",body:form}
   );
-  return response.json() as Promise<{id:string}>;
+  const message=await response.json() as {id?:unknown};
+  if(typeof message.id!=="string"||!/^\d{1,30}$/.test(message.id)) throw new Error("DELIVERY_MESSAGE_ID_MISSING");
+  return {id:message.id};
 }
 
 async function persistDeliverySent(
@@ -788,6 +793,7 @@ async function deliverOrder(env:Env,order:ShiireVendingOrder):Promise<boolean>{
   if(!(await claimShiireDelivery(env,order.id))) return false;
 
   let sent=false;
+  let deliveryAttempted=false;
   try{
     const machine=await getShiireMachine(env,order.vending_machine_id);
     const product=await getShiireProduct(env,order.product_id);
@@ -828,6 +834,8 @@ async function deliverOrder(env:Env,order:ShiireVendingOrder):Promise<boolean>{
       ],
       timestamp:new Date().toISOString()
     };
+    await setShiireDeliveryChannel(env,order.id,dm.id);
+    deliveryAttempted=true;
     const message=await sendDeliveryMessage(env,dm.id,order,deliveryText,embed);
     sent=true;
     await persistDeliverySent(env,order.id,dm.id,message.id);
@@ -878,8 +886,19 @@ async function deliverOrder(env:Env,order:ShiireVendingOrder):Promise<boolean>{
     await refreshMachinePanels(env,machine.id);
     return true;
   }catch(error){
-    if(!sent){
+    const discordStatus=error instanceof ShiireVendingError
+      ?Number(/^DISCORD_(\d+):/.exec(error.message)?.[1]??0):0;
+    const rejected=discordStatus>=400&&discordStatus<500&&discordStatus!==408&&discordStatus!==429;
+    if(!sent&&(!deliveryAttempted||rejected)){
       await resetShiireDelivery(env,order.id).catch(()=>undefined);
+    }else if(!sent){
+      // A network/read error after POST does not prove Discord rejected the DM.
+      // Keep credentials reserved and do not automatically resend them later.
+      await auditX(env,{
+        level:"error",kind:"SHIIRE_VENDING_DELIVERY_RESULT_UNKNOWN",
+        message:"Discord delivery was attempted but its result could not be confirmed; automatic resend was blocked.",
+        details:{orderId:order.id}
+      }).catch(()=>undefined);
     }
     throw error;
   }
@@ -888,6 +907,32 @@ async function deliverOrder(env:Env,order:ShiireVendingOrder):Promise<boolean>{
 async function paymentIdempotencyKey(order:ShiireVendingOrder,link:string){
   const hash=await sha256Hex(link);
   return "shiire-pay:"+order.id+":"+hash.slice(0,16);
+}
+
+// Read back an existing DM; never resend credentials to resolve an unknown POST.
+export async function reconcileShiireDelivery(env:Env,orderId:string,messageId:string){
+  if(!/^[A-Za-z0-9_-]{1,80}$/.test(orderId)||!/^\d{1,30}$/.test(messageId)){
+    throw new ShiireVendingError(400,"INVALID_DELIVERY_REFERENCE");
+  }
+  const order=await getShiireOrder(env,orderId);
+  if(!order) throw new ShiireVendingError(404,"ORDER_NOT_FOUND");
+  if(order.status==="delivered"&&order.delivery_message_id===messageId) return {ok:true,alreadyDelivered:true};
+  if(order.status!=="delivering"&&order.status!=="delivery_sent") throw new ShiireVendingError(409,"DELIVERY_NOT_AWAITING_CONFIRMATION");
+  const channel=order.delivery_channel_id;
+  if(!channel||!/^\d{1,30}$/.test(channel)) throw new ShiireVendingError(409,"DELIVERY_CHANNEL_UNKNOWN");
+  const [message,bot]=await Promise.all([
+    discordJson<{id:string;channel_id:string;nonce?:string|number;author?:{id:string};webhook_id?:string}>(env,"/channels/"+channel+"/messages/"+messageId),
+    discordJson<{id:string}>(env,"/users/@me")
+  ]);
+  if(message.id!==messageId||message.channel_id!==channel||!bot.id||message.author?.id!==bot.id||message.webhook_id||String(message.nonce??"")!==deliveryNonce(orderId)){
+    throw new ShiireVendingError(409,"DELIVERY_MESSAGE_REFERENCE_MISMATCH");
+  }
+  if(order.status==="delivering") await persistDeliverySent(env,orderId,channel,messageId);
+  const current=await getShiireOrder(env,orderId);
+  if(!current) throw new ShiireVendingError(404,"ORDER_NOT_FOUND");
+  if(current.status!=="delivered") await finishShiireDelivery(env,current);
+  await auditX(env,{kind:"SHIIRE_VENDING_DELIVERY_RECONCILED",message:"Existing Discord delivery was verified without resending credentials.",details:{orderId,messageId}}).catch(()=>undefined);
+  return {ok:true,alreadyDelivered:false};
 }
 
 async function processPaymentLink(

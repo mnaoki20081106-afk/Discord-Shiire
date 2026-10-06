@@ -23,6 +23,9 @@ export type FundingEvidence={
   providerReference:string;
   spentJpy?:number;
   acquiredLtcAtomic?:number;
+  transferredLtcAtomic?:number;
+  feeLtcAtomic?:number;
+  creditedUsdMicros?:number;
   quantity?:number;
 };
 export type FundingDraftInput={
@@ -75,12 +78,21 @@ export function advanceFundingDraft(
   const old=draft.receipts[step];
   if(old){
     if(old.operationKey!==evidence.operationKey||old.providerReference!==evidence.providerReference||
-      old.spentJpy!==evidence.spentJpy||old.acquiredLtcAtomic!==evidence.acquiredLtcAtomic||old.quantity!==evidence.quantity){
+      old.spentJpy!==evidence.spentJpy||old.acquiredLtcAtomic!==evidence.acquiredLtcAtomic||
+      old.transferredLtcAtomic!==evidence.transferredLtcAtomic||old.feeLtcAtomic!==evidence.feeLtcAtomic||
+      old.creditedUsdMicros!==evidence.creditedUsdMicros||old.quantity!==evidence.quantity){
       throw new Error('FUNDING_REPLAY_CONFLICT');
     }
     return draft;
   }
   if(draft.next!==step) throw new Error('FUNDING_STAGE_MISMATCH');
+  if(step==='transfer'){
+    const sent=integer(evidence.transferredLtcAtomic??-1,1);
+    const fee=integer(evidence.feeLtcAtomic??-1);
+    const acquired=draft.receipts.direct_purchase?.acquiredLtcAtomic??0;
+    if(fee>acquired||sent>acquired-fee) throw new Error('TRANSFER_EXCEEDS_PURCHASED_LTC');
+  }
+  if(step==='supplier_credit') integer(evidence.creditedUsdMicros??-1,1);
   if(step==='direct_purchase'){
     const spend=integer(evidence.spentJpy??-1,1);
     if(spend>draft.saleAmountJpy) throw new Error('SALE_PROCEEDS_LIMIT_EXCEEDED');
@@ -107,6 +119,8 @@ export function simulateStocklessFunding(input:FundingDraftInput){
       providerReference:`simulation:${draft.orderId}:${step}:receipt`,
       // Fixture units only; not a rate quote or a real LTC receipt.
       ...(step==='direct_purchase'?{spentJpy:draft.directPurchaseJpy,acquiredLtcAtomic:1}:{}),
+      ...(step==='transfer'?{transferredLtcAtomic:1,feeLtcAtomic:0}:{}),
+      ...(step==='supplier_credit'?{creditedUsdMicros:1}:{}),
       ...(step==='procurement'?{quantity:draft.missingQuantity}:{}),
       ...(step==='delivery'?{quantity:draft.quantity}:{})
     };
@@ -121,6 +135,7 @@ export function stocklessFundingReadiness(env:Env){
     mode:'preparation',route:'paypay_direct_ltc',requiresJpyDeposit:false,liveReady:false,liveExecutionImplemented:false,
     accountConnectionAloneIsSufficient:false,
     capabilities:{
+      durableFundingJournal:{implemented:true,mode:'simulation',productionOrdersConnected:false},
       paypayMoneyReceipt:{existingAdapter:true,configured:Boolean(env.XACCOUNT_BOT_BASE_URL&&env.SHIIRE_BRIDGE_SECRET)},
       paypayDirectLtcPurchase:{implemented:false,reason:'PAYPAY_DIRECT_LTC_PURCHASE_API_UNVERIFIED'},
       binanceLtcWithdrawal:{existingAdapter:true,configured:Boolean(env.BINANCE_WITHDRAW_API_KEY&&env.BINANCE_WITHDRAW_API_SECRET)},
@@ -130,7 +145,8 @@ export function stocklessFundingReadiness(env:Env){
     },
     blockers:['LTC_PAYPAY_ELIGIBILITY_UNVERIFIED','PAYPAY_DIRECT_LTC_PURCHASE_API_UNVERIFIED','HSTORA_DEPOSIT_DESTINATION_UNVERIFIED','LIVE_ORDER_FUNDING_ORCHESTRATION_NOT_CONNECTED'],
     sources:{
-      paypayDirectPurchase:'https://www.binance.com/ja/support/faq/detail/a9151f8deb9643c8ab215525670686a8'
+      paypayDirectPurchase:'https://www.binance.com/ja/support/faq/detail/a9151f8deb9643c8ab215525670686a8',
+      hstoraApi:'https://hstora.com/en/api-doc'
     }
   };
 }

@@ -645,6 +645,13 @@ export async function resetShiireDelivery(env:Env,orderId:string){
   ).bind(Date.now(),orderId).run();
 }
 
+export async function setShiireDeliveryChannel(env:Env,orderId:string,channelId:string){
+  const result=await env.DB.prepare(
+    "UPDATE shiire_vending_orders SET delivery_channel_id=?,updated_at=? WHERE id=? AND status='delivering' AND delivered_at IS NULL"
+  ).bind(channelId,Date.now(),orderId).run();
+  if(Number(result.meta.changes??0)!==1) throw new Error("DELIVERY_CLAIM_LOST");
+}
+
 export async function markShiireDeliverySent(
   env:Env,
   orderId:string,

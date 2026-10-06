@@ -875,6 +875,51 @@ LTCをHStoraへ送付 → HStora入金確認 → 不足分仕入れ → 既存�
 `live=true` / `dryRun=false` / `mode=live` を送っても実行できません。
 シミュレーション完了は実際の決済・入金・納品完了を意味しません。
 
+#### 途中再開・結果不明の復旧検証
+
+一回完結の `/simulation` に加えて、工程ごとの進行状態をD1へ保存する検証APIがあります。
+すべて既存の管理者認証が必要で、専用の `stockless_funding_rehearsals` テーブルだけを更新します。
+本番注文・在庫・支払い・送金には接続せず、Cronからも実行しません。
+
+- `POST /api/x/funding/stockless/rehearsals`: 上の入力例で作成。同じ注文IDと同じ入力は既存状態を返し、変更した入力は409。
+- `GET /api/x/funding/stockless/rehearsals/{orderId}`: 保存済みの工程、revision、試行ID、照合待ち状態を取得。
+- `POST /api/x/funding/stockless/rehearsals/{orderId}`: 下の操作で工程を更新。
+
+各操作には取得済みの `revision` が必要です。`claim` 成功時に返る `attemptId` を
+確認操作に使います。同じrevisionで同時に操作しても1件しか成功しません。
+
+| action | 追加フィールド | 結果 |
+| --- | --- | --- |
+| `claim` | なし | 現在工程を実行中にする。プロバイダーは呼ばない |
+| `uncertain` | `attemptId` | 通信結果不明を模擬し、照合待ちにする |
+| `rejected` | `attemptId` | 確実に拒否された場合を模擬する |
+| `retry` | なし | 拒否が確定した工程だけ再試行可能にする |
+| `confirm` | `attemptId`, `step`, `evidence` | 模擬結果を確認し、次の工程へ進める |
+
+例：`{"action":"claim","revision":0}`。確認の `evidence` には
+`operationKey: simulation:{orderId}:{step}` と `providerReference: simulation:...` が必要です。
+工程別の追加値は、直接購入が `spentJpy` / `acquiredLtcAtomic`、送金が
+`transferredLtcAtomic` / `feeLtcAtomic`、入金が `creditedUsdMicros`、仕入れ・納品が `quantity`。
+LTC数量は最小単位の整数、USDは百万分の一単位の整数で、架空のテスト値です。
+送金数量と手数料の合計がこの注文で購入したLTCを超える確認は拒否します。
+
+実行中の期限切れは失敗とは扱いません。次の `claim` は照合待ちへ移すだけで、
+新しい購入・送金は開始しません。照合待ちからの無条件の `retry` も拒否します。
+同一確認は再送可能ですが、別試行・別注文・異なる金額・数量の確認は拒否します。
+
+#### Discord納品の応答が失われた場合
+
+納品POST後の通信エラー・5xx・メッセージID欠落は、注文を `delivering` に保持して
+自動再送を停止します。送信前にDMチャンネルIDを保存するため、管理者が
+`POST /api/x/vending/delivery/reconcile` に `{"orderId":"...","messageId":"..."}` を送ると、
+Discordの既存メッセージを読み取り、チャンネル・送信BOT・注文nonceの一致を確認して
+在庫の消込と納品確定だけを行います。認証は既存のADMIN_TOKENです。
+nonce欠落や照合不一致は拒否し、再送しません。送信前の失敗や明確な4xx拒否では
+通常の納品再試行を維持します（408・429は結果不明として扱います）。
+
+Funding管理画面にはPayPay直接購入の接続状況を表示し、既存のJPY現物購入機能と
+混同しないようにしています。
+
 **口座情報を追加するだけで本番開始できる状態ではありません。**
 Binance公式FAQはPayPay残高による暗号資産の直接購入を案内していますが、
 その個人向け購入操作を自動実行するAPI仕様とLTCの適格性は未確認です。

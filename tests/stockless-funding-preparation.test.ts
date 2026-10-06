@@ -63,3 +63,13 @@ test('invalid quantities and noninteger yen are rejected',()=>{
     assert.throws(()=>prepareStocklessFunding({...base,...patch} as FundingDraftInput));
   }
 });
+test('transfer cannot use unrelated LTC and supplier credit must be positive',()=>{
+  let draft=prepareStocklessFunding(base);
+  draft=advanceFundingDraft(draft,'direct_purchase',{operationKey:fundingOperationKey(base.orderId,'direct_purchase'),providerReference:'simulation:buy:1',spentJpy:1000,acquiredLtcAtomic:100});
+  const transfer={operationKey:fundingOperationKey(base.orderId,'transfer'),providerReference:'simulation:send:1',transferredLtcAtomic:90,feeLtcAtomic:10};
+  assert.throws(()=>advanceFundingDraft(draft,'transfer',{...transfer,transferredLtcAtomic:91}),/TRANSFER_EXCEEDS_PURCHASED_LTC/);
+  assert.throws(()=>advanceFundingDraft(draft,'transfer',{...transfer,feeLtcAtomic:-1}),/INVALID_FUNDING_INPUT/);
+  draft=advanceFundingDraft(draft,'transfer',transfer);
+  const credit={operationKey:fundingOperationKey(base.orderId,'supplier_credit'),providerReference:'simulation:credit:1',creditedUsdMicros:0};
+  assert.throws(()=>advanceFundingDraft(draft,'supplier_credit',credit),/INVALID_FUNDING_INPUT/);
+});
