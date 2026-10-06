@@ -512,7 +512,14 @@ async function reserveAccounts(
     }
     return reserved;
   }catch(error){
-    await releaseShiireOrder(env,orderId);
+    await env.DB.batch([
+      env.DB.prepare(
+        "UPDATE purchased_accounts SET status='READY_FOR_DELIVERY' WHERE status='VENDING_RESERVED' AND id IN (SELECT account_id FROM shiire_vending_reservations WHERE order_id=?)"
+      ).bind(orderId),
+      env.DB.prepare(
+        "DELETE FROM shiire_vending_reservations WHERE order_id=?"
+      ).bind(orderId)
+    ]);
     throw error;
   }
 }
@@ -696,20 +703,25 @@ export async function listShiireDeliverySent(env:Env,limit=20){
 export async function reservedShiireAccounts(env:Env,orderId:string){
   await ensureShiireVendingSchema(env);
   return (await env.DB.prepare(
-    "SELECT a.id,a.credentials_ciphertext,a.supplier_product_id FROM shiire_vending_reservations r JOIN purchased_accounts a ON a.id=r.account_id WHERE r.order_id=? AND a.status='VENDING_RESERVED' ORDER BY r.reserved_at ASC,a.id ASC"
+    "SELECT a.id,a.supplier,a.credentials_ciphertext,a.supplier_product_id FROM shiire_vending_reservations r JOIN purchased_accounts a ON a.id=r.account_id WHERE r.order_id=? AND a.status='VENDING_RESERVED' ORDER BY r.reserved_at ASC,a.id ASC"
   ).bind(orderId).all<{
-    id:string;credentials_ciphertext:string;supplier_product_id:string;
+    id:string;supplier:string;credentials_ciphertext:string;supplier_product_id:string;
   }>()).results;
 }
 
 export async function decryptReservedShiireAccounts(env:Env,orderId:string){
   const rows=await reservedShiireAccounts(env,orderId);
-  const output:Array<{id:string;content:string}>= [];
+  const output:Array<{id:string;supplier:string;supplierProductId:string;content:string}>= [];
   for(const row of rows){
     let encrypted:EncryptedSecret;
     try{encrypted=JSON.parse(row.credentials_ciphertext) as EncryptedSecret;}
     catch{throw new Error("CREDENTIAL_CIPHERTEXT_INVALID");}
-    output.push({id:row.id,content:await decryptSensitive(env,encrypted)});
+    output.push({
+      id:row.id,
+      supplier:row.supplier,
+      supplierProductId:row.supplier_product_id,
+      content:await decryptSensitive(env,encrypted)
+    });
   }
   return output;
 }
