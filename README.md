@@ -818,3 +818,116 @@ Binance出金用APIキー・固定送信元IP確認・Travel Rule JSONは現在�
 - PayPayでLTCを直接購入した場合は、BinanceのLTC総残高（free + locked）の増加をBOTが検知しても自動確定しません。通常ユーザー向け公開APIで「そのLTC増加がPayPay販売所購入由来」と確定照合できる仕様を確認できないため、Main BOT管理画面の「このLTC購入を確認して再開」を管理者が押した時だけ確定します。
 - 確認ボタンを押した時点でもBinance LTC総残高を再取得し、保留開始時より増えていなければ確定を拒否します。
 - 保留開始後にPayPay残高の観測値を手動更新した場合、その新しい観測値を優先し、購入額を二重に差し引きません。
+
+
+### 不足分だけの無在庫販売
+
+`stockless_enabled=1` のクラス商品は、購入数が販売可能在庫を超える場合
+（在庫ゼロを含む）だけ無在庫注文になります。在庫で足りる注文は通常販売です。
+
+- 無在庫注文全体の支払いはPayPayマネーのみ。Kyash、PayPayマネーライト混在、
+  残高種別不明のリンクは受取前に拒否します。
+- 注文時に残っている在庫を予約し、入金後は不足数だけHStoraへ仕入れ要求します。
+- 通常注文の予約在庫を差し引いた不足数を計算します。無在庫注文向け仕入れは
+  対象クラスだけへ割り当て、通常補充の50/50分割は適用しません。
+- 入荷が分割されても予約を維持し、全数がそろってから一括DM納品します。
+  既存の納品フォーマット変換（`:`区切り）を通します。
+- 未入金注文の期限切れでは、予約した既存在庫を解放します。
+- 既存のHStora残高・カテゴリ予算・仕入れ上限・停止設定が必要です。
+  資金不足なら入金済み注文は納品待ちになり、即納は保証できません。
+
+PayPay受取残高からBinanceへの自動入金・LTC換金・HStora入金は接続していません。
+この無在庫仕入れは `allowAutoFunding:false` を維持し、HStora残高を使用します。
+
+
+### 売上資金フローの運用前準備（PayPay直接購入・シミュレーション専用）
+
+想定する経路は、購入者からのPayPayマネー受取 → PayPay残高でLTCを直接購入 →
+LTCをHStoraへ送付 → HStora入金確認 → 不足分仕入れ → 既存在庫と一括納品です。
+銀行送金、BinanceへのJPY事前入金、JPY残高による現物注文はこの経路に含めません。
+110円のJPY入金手数料も計算しません。既存の独立したJPY現物購入機能とは別です。
+
+次の管理APIは既存のADMIN_TOKEN認証が必要です。
+
+- `GET /api/x/funding/stockless/readiness`: 直接購入経路の実装有無と未接続箇所。
+- `POST /api/x/funding/stockless/simulation`: 架空の注文・見積を使った直接購入フロー検証。
+
+例（数値はテスト入力であり、市場価格・実際の見積ではありません）:
+
+```json
+{
+  "orderId": "simulation_order_1",
+  "quantity": 5,
+  "reservedQuantity": 2,
+  "saleAmountJpy": 1500,
+  "confirmedPayPayMoneyJpy": 1500,
+  "directPurchaseJpy": 1000,
+  "minimumPurchaseJpy": 1000
+}
+```
+
+各工程は注文IDと操作キーに紐付き、同一確認の再送は重複処理せず、
+内容が変わった再送や別注文の確認は拒否します。その注文の代金を超える購入、
+最低購入額未満、見積と異なるPayPay支出、不足数以上の仕入れも拒否します。
+シミュレーションのLTC取得数量は固定の架空値で、相場や実際の取得数量ではありません。
+
+このモジュールはネットワーク通信・口座アクセス・決済・D1注文更新を行いません。
+`live=true` / `dryRun=false` / `mode=live` を送っても実行できません。
+シミュレーション完了は実際の決済・入金・納品完了を意味しません。
+
+#### 途中再開・結果不明の復旧検証
+
+一回完結の `/simulation` に加えて、工程ごとの進行状態をD1へ保存する検証APIがあります。
+すべて既存の管理者認証が必要で、専用の `stockless_funding_rehearsals` テーブルだけを更新します。
+本番注文・在庫・支払い・送金には接続せず、Cronからも実行しません。
+
+- `POST /api/x/funding/stockless/rehearsals`: 上の入力例で作成。同じ注文IDと同じ入力は既存状態を返し、変更した入力は409。
+- `GET /api/x/funding/stockless/rehearsals/{orderId}`: 保存済みの工程、revision、試行ID、照合待ち状態を取得。
+- `POST /api/x/funding/stockless/rehearsals/{orderId}`: 下の操作で工程を更新。
+
+各操作には取得済みの `revision` が必要です。`claim` 成功時に返る `attemptId` を
+確認操作に使います。同じrevisionで同時に操作しても1件しか成功しません。
+
+| action | 追加フィールド | 結果 |
+| --- | --- | --- |
+| `claim` | なし | 現在工程を実行中にする。プロバイダーは呼ばない |
+| `uncertain` | `attemptId` | 通信結果不明を模擬し、照合待ちにする |
+| `rejected` | `attemptId` | 確実に拒否された場合を模擬する |
+| `retry` | なし | 拒否が確定した工程だけ再試行可能にする |
+| `confirm` | `attemptId`, `step`, `evidence` | 模擬結果を確認し、次の工程へ進める |
+
+例：`{"action":"claim","revision":0}`。確認の `evidence` には
+`operationKey: simulation:{orderId}:{step}` と `providerReference: simulation:...` が必要です。
+工程別の追加値は、直接購入が `spentJpy` / `acquiredLtcAtomic`、送金が
+`transferredLtcAtomic` / `feeLtcAtomic`、入金が `creditedUsdMicros`、仕入れ・納品が `quantity`。
+LTC数量は最小単位の整数、USDは百万分の一単位の整数で、架空のテスト値です。
+送金数量と手数料の合計がこの注文で購入したLTCを超える確認は拒否します。
+
+実行中の期限切れは失敗とは扱いません。次の `claim` は照合待ちへ移すだけで、
+新しい購入・送金は開始しません。照合待ちからの無条件の `retry` も拒否します。
+同一確認は再送可能ですが、別試行・別注文・異なる金額・数量の確認は拒否します。
+
+#### Discord納品の応答が失われた場合
+
+納品POST後の通信エラー・5xx・メッセージID欠落は、注文を `delivering` に保持して
+自動再送を停止します。送信前にDMチャンネルIDを保存するため、管理者が
+`POST /api/x/vending/delivery/reconcile` に `{"orderId":"...","messageId":"..."}` を送ると、
+Discordの既存メッセージを読み取り、チャンネル・送信BOT・注文nonceの一致を確認して
+在庫の消込と納品確定だけを行います。認証は既存のADMIN_TOKENです。
+nonce欠落や照合不一致は拒否し、再送しません。送信前の失敗や明確な4xx拒否では
+通常の納品再試行を維持します（408・429は結果不明として扱います）。
+
+Funding管理画面にはPayPay直接購入の接続状況を表示し、既存のJPY現物購入機能と
+混同しないようにしています。
+
+**口座情報を追加するだけで本番開始できる状態ではありません。**
+Binance公式FAQはPayPay残高による暗号資産の直接購入を案内していますが、
+その個人向け購入操作を自動実行するAPI仕様とLTCの適格性は未確認です。
+PayPay OPAの加盟店向け決済APIを、この購入APIとして代用してはいけません。
+HStora入金先の確定・実入金照合、注文単位の本番処理も未接続です。
+準備APIは常に `liveReady:false` を返します。
+
+確認資料:
+
+- [Binance PayPay直接購入FAQ](https://www.binance.com/ja/support/faq/detail/a9151f8deb9643c8ab215525670686a8)
+- [PayPay加盟店向けDirect Debit API](https://www.paypay.ne.jp/opa/doc/jp/v1.0/direct_debit)

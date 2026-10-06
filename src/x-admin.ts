@@ -1,3 +1,6 @@
+import {stocklessFundingReadiness,simulateStocklessFunding,type FundingDraftInput} from "./stockless-funding-preparation";
+import {handleFundingRehearsalApi} from "./stockless-funding-journal";
+import {reconcileShiireDelivery,ShiireVendingError} from "./shiire-vending";
 import { withNamedRunLock } from "./x-run-lock";
 import type { Env } from "./types";
 import { loadXSettings, saveXSettings, type XSettings } from "./x-settings";
@@ -146,7 +149,34 @@ export async function handleXAdminApi(
 }
 
 async function handleXAdminApiUnlocked(request:Request,env:Env,url:URL):Promise<Response|null>{
+  const rehearsal=await handleFundingRehearsalApi(request,env,url);
+  if(rehearsal) return rehearsal;
+  if(url.pathname==="/api/x/funding/stockless/readiness"&&request.method==="GET"){
+    return json(stocklessFundingReadiness(env));
+  }
+  if(url.pathname==="/api/x/funding/stockless/simulation"&&request.method==="POST"){
+    const input=await requestJson(request);
+    if(!input) return json({error:"INVALID_JSON"},400);
+    if(input.live===true||input.dryRun===false||input.mode==="live"){
+      return json({error:"LIVE_FUNDING_NOT_IMPLEMENTED"},409);
+    }
+    try{
+      return json(simulateStocklessFunding(input as unknown as FundingDraftInput));
+    }catch(error){
+      return json({error:error instanceof Error?error.message:String(error)},400);
+    }
+  }
+
   await ensureXSchema(env);
+
+  if(url.pathname==="/api/x/vending/delivery/reconcile"&&request.method==="POST"){
+    const input=await requestJson(request);
+    if(!input||typeof input.orderId!=="string"||typeof input.messageId!=="string") return json({error:"INVALID_DELIVERY_REFERENCE"},400);
+    try{return json(await reconcileShiireDelivery(env,input.orderId,input.messageId));}
+    catch(error){
+      return json({error:error instanceof Error?error.message:"DELIVERY_RECONCILIATION_FAILED"},error instanceof ShiireVendingError?error.status:409);
+    }
+  }
 
   if(url.pathname==="/api/x/invite-campaign"&&request.method==="GET"){
     return json(await getInviteCampaignDashboard(env));
@@ -1025,7 +1055,12 @@ async function load(){
       '<section class="card"><strong>USD/JPY（手動観測）</strong>'+
       '<p class="hint">HStoraのUSD建て商品をJPY上限と比較するための換算値です。</p>'+
       '<div class="formrow"><input id="usdJpy" inputmode="decimal" type="number" min="0" step="0.001" value="'+esc(s.usd_jpy_rate??0)+'"><button id="saveFx">換算値を保存</button></div></section>';
-    main.innerHTML=metrics(data)+modeCard+budgetCard+(manual?manualCard:binanceCards)+fxCard+
+    const stocklessStatus=await api("/api/x/funding/stockless/readiness");
+    const stocklessCard='<section class="card"><strong>無在庫販売のPayPay直接購入</strong>'+
+      '<p class="hint">PayPayマネー受取 → 残高でLTC購入 → HStora入金 → 不足分仕入れ → 一括納品。本人確認後に購入・入金の接続を検証します。</p>'+
+      '<p class="status warn">'+(stocklessStatus.liveReady?'接続検証済み':'準備中・実購入API未接続')+'</p>'+
+      '<p class="hint">注文単位の途中再開・同時実行・結果不明時の照合を模擬検証できます。通常の仕入れ設定とは別に管理します。</p></section>';
+    main.innerHTML=metrics(data)+stocklessCard+modeCard+budgetCard+(manual?manualCard:binanceCards)+fxCard+
       (!manual&&data.funding?.data?.pendingManualFunding
         ?'<section class="card"><strong>PayPay手動操作待ち</strong><p class="hint">最大予約額: '+esc(data.funding.data.pendingManualFunding.amountJpy)+'円。残高増加を確認後に再開します。</p><button id="cancelPending" class="danger">この要求を取消</button></section>'
         :'')+

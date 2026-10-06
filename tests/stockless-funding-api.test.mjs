@@ -1,0 +1,23 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {build} from 'esbuild';
+import {Miniflare} from 'miniflare';
+const bundle=await build({stdin:{contents:`import {handleXAdminApi} from './src/x-admin';
+export default {async fetch(req,env){return await handleXAdminApi(req,env,new URL(req.url))??new Response('missing',{status:404});}};`,resolveDir:process.cwd(),sourcefile:'funding-preview-fixture.ts'},bundle:true,write:false,format:'esm',platform:'browser'});
+test('preparation API never calls providers or mutates database, and rejects live requests',async t=>{
+  const calls=[];
+  const mf=new Miniflare({modules:true,script:bundle.outputFiles[0].text,compatibilityDate:'2026-08-06',compatibilityFlags:['nodejs_compat'],d1Databases:['DB'],bindings:{BINANCE_API_KEY:'fixture',BINANCE_API_SECRET:'fixture'},outboundService:async req=>{calls.push(req.url);throw new Error('Unexpected provider call');}});
+  t.after(()=>mf.dispose());
+  const prefix='https://fixture/api/x/funding/stockless/';
+  const readiness=await (await mf.dispatchFetch(prefix+'readiness')).json();
+  assert.equal(readiness.liveReady,false);
+  const input={orderId:'order_1',quantity:5,reservedQuantity:2,saleAmountJpy:1500,confirmedPayPayMoneyJpy:1500,directPurchaseJpy:1000,minimumPurchaseJpy:1000};
+  const run=async body=>mf.dispatchFetch(prefix+'simulation',{method:'POST',body:JSON.stringify(body)});
+  const response=await run(input);assert.equal(response.status,200);
+  assert.equal((await response.json()).draft.next,'complete');
+  for(const flag of [{live:true},{dryRun:false},{mode:'live'}])assert.equal((await run({...input,...flag})).status,409);
+  assert.deepEqual(calls,[]);
+  const db=await mf.getD1Database('DB');
+  const tables=await db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '_cf_%'").all();
+  assert.deepEqual(tables.results,[]);
+});
