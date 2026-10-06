@@ -105,6 +105,7 @@ export type ProcurementTarget=ProcurementClass|"INVITE_CAMPAIGN";
 export type XProcurementRunOptions={
   targetClasses?:readonly ProcurementTarget[];
   targetStockOverride?:Partial<Record<ProcurementTarget,number>>;
+  allowAutoFunding?:boolean;
 };
 
 function procurementBudgetPercentages(
@@ -1963,6 +1964,22 @@ async function runXProcurementLocked(
   }
 
   if(supplierBalance.balance<totalSource){
+    if(options.allowAutoFunding===false){
+      return {
+        action:"HSTORA_FUNDING_REQUIRED",
+        dryRun:settings.dry_run,
+        inventory,
+        requested:quantity,
+        productId:Number(fresh.id),
+        unitPriceJpy:q.unit_price_jpy,
+        details:{
+          requiredUsd:totalSource,
+          availableUsd:Number(supplierBalance.balance),
+          shortfallUsd:Math.max(0,totalSource-Number(supplierBalance.balance)),
+          targetClass
+        }
+      };
+    }
     return handleHstoraFundingNeed(env,assertLease,totalSource-supplierBalance.balance);
   }
 
