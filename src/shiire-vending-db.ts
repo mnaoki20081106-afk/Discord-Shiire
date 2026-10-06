@@ -658,7 +658,7 @@ export async function listPendingStocklessOrders(env:Env,limit=50){
   await ensureShiireVendingSchema(env);
   const safe=Math.max(1,Math.min(100,Math.floor(limit)));
   return (await env.DB.prepare(
-    "SELECT * FROM shiire_vending_orders WHERE stockless=1 AND status='procurement_pending' ORDER BY paid_at ASC,created_at ASC LIMIT ?"
+    "SELECT * FROM shiire_vending_orders WHERE stockless=1 AND status IN ('procurement_pending','paid') ORDER BY paid_at ASC,created_at ASC LIMIT ?"
   ).bind(safe).all<ShiireVendingOrder>()).results;
 }
 
