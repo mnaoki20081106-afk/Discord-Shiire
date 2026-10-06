@@ -480,48 +480,38 @@ async function reserveAccounts(
   env:Env,
   orderId:string,
   product:ShiireVendingProduct,
-  quantity:number
+  quantity:number,
+  partial=false
 ){
-  const rows=product.procurement_class
-    ?(await env.DB.prepare(
-      "SELECT id FROM purchased_accounts "+
-      "WHERE procurement_class=? AND status='READY_FOR_DELIVERY' "+
-      "ORDER BY purchased_at ASC,id ASC LIMIT ?"
-    ).bind(product.procurement_class,quantity).all<{id:string}>()).results
-    :(await env.DB.prepare(
-      "SELECT id FROM purchased_accounts "+
-      "WHERE supplier_product_id=? AND status='READY_FOR_DELIVERY' "+
-      "AND COALESCE(procurement_class,'')<>'INVITE_CAMPAIGN' "+
-      "ORDER BY purchased_at ASC,id ASC LIMIT ?"
-    ).bind(product.supplier_product_id,quantity).all<{id:string}>()).results;
-  if(rows.length<quantity) throw new Error("OUT_OF_STOCK");
-
-  const reserved:string[]=[];
-  try{
-    for(const row of rows){
-      const results=await env.DB.batch([
-        env.DB.prepare(
-          "UPDATE purchased_accounts SET status='VENDING_RESERVED' WHERE id=? AND status='READY_FOR_DELIVERY' AND EXISTS (SELECT 1 FROM shiire_vending_orders WHERE id=? AND status IN ('reserving','procurement_pending'))"
-        ).bind(row.id,orderId),
-        env.DB.prepare(
-          "INSERT INTO shiire_vending_reservations(account_id,order_id,product_id,reserved_at) SELECT ?,?,?,? WHERE changes()=1"
-        ).bind(row.id,orderId,product.id,Date.now())
-      ]);
-      if(Number(results[0]?.meta.changes??0)!==1) throw new Error("STOCK_RACE");
-      reserved.push(row.id);
-    }
-    return reserved;
-  }catch(error){
-    await env.DB.batch([
-      env.DB.prepare(
-        "UPDATE purchased_accounts SET status='READY_FOR_DELIVERY' WHERE status='VENDING_RESERVED' AND id IN (SELECT account_id FROM shiire_vending_reservations WHERE order_id=?)"
-      ).bind(orderId),
-      env.DB.prepare(
-        "DELETE FROM shiire_vending_reservations WHERE order_id=?"
-      ).bind(orderId)
-    ]);
-    throw error;
-  }
+  const scope=product.procurement_class
+    ?"a.procurement_class=?"
+    :"a.supplier_product_id=? AND COALESCE(a.procurement_class,'')<>'INVITE_CAMPAIGN'";
+  const source=product.procurement_class??product.supplier_product_id;
+  // Claim and ownership insertion share one D1 transaction. Repeated/overlapping
+  // runs can only fill the remaining slots, and never release a previous claim.
+  const availabilityGuard=partial?"":" AND (SELECT COUNT(*) FROM purchased_accounts a WHERE "+scope+" AND a.status='READY_FOR_DELIVERY')>=?";
+  const bindings:unknown[]=[orderId,product.id,Date.now(),source,orderId];
+  if(!partial) bindings.push(source,quantity);
+  bindings.push(quantity,orderId);
+  await env.DB.batch([
+    env.DB.prepare(
+      "INSERT INTO shiire_vending_reservations(account_id,order_id,product_id,reserved_at) "+
+      "SELECT a.id,?,?,? FROM purchased_accounts a WHERE "+scope+
+      " AND a.status='READY_FOR_DELIVERY' "+
+      "AND EXISTS (SELECT 1 FROM shiire_vending_orders WHERE id=? AND status IN ('reserving','procurement_pending'))"+
+      availabilityGuard+
+      " ORDER BY a.purchased_at ASC,a.id ASC LIMIT MIN(?,MAX(0,(SELECT quantity FROM shiire_vending_orders WHERE id=?)-(SELECT COUNT(*) FROM shiire_vending_reservations WHERE order_id=?)))"
+    ).bind(...bindings,orderId),
+    env.DB.prepare(
+      "UPDATE purchased_accounts SET status='VENDING_RESERVED' WHERE status='READY_FOR_DELIVERY' AND id IN (SELECT account_id FROM shiire_vending_reservations WHERE order_id=?)"
+    ).bind(orderId),
+    env.DB.prepare(
+      "UPDATE shiire_vending_orders SET status='paid',updated_at=? WHERE id=? AND status='procurement_pending' AND stockless=1 AND quantity=(SELECT COUNT(*) FROM shiire_vending_reservations WHERE order_id=?)"
+    ).bind(Date.now(),orderId,orderId)
+  ]);
+  const rows=await reservedShiireAccounts(env,orderId);
+  if(!partial&&rows.length<quantity) throw new Error("OUT_OF_STOCK");
+  return rows;
 }
 
 export async function reserveShiireOrder(
@@ -544,7 +534,7 @@ export async function reserveShiireOrder(
   const total=Math.max(0,(unit-discount)*quantity);
   const available=await availableShiireAccounts(env,input.product);
   const stockless=
-    available===0&&
+    available<quantity&&
     Boolean(input.product.stockless_enabled);
   if(stockless&&input.method!=="paypay") throw new Error("STOCKLESS_PAYPAY_ONLY");
   if(stockless&&!input.product.procurement_class) throw new Error("STOCKLESS_REQUIRES_PROCUREMENT_CLASS");
@@ -561,9 +551,9 @@ export async function reserveShiireOrder(
   ).run();
   if(Number(inserted.meta.changes??0)!==1) throw new Error("VENDING_MACHINE_NOT_AVAILABLE");
 
-  if(!stockless){
+  {
     try{
-      await reserveAccounts(env,orderId,input.product,quantity);
+      await reserveAccounts(env,orderId,input.product,quantity,stockless);
     }catch(error){
       await env.DB.prepare(
         "UPDATE shiire_vending_orders SET status='failed',updated_at=? WHERE id=?"
@@ -630,28 +620,8 @@ export async function tryReserveStocklessOrder(env:Env,orderId:string){
   if(!order||order.stockless!==1||order.status!=="procurement_pending") return false;
   const product=await getShiireProduct(env,order.product_id);
   if(!product) throw new Error("PRODUCT_NOT_FOUND");
-  try{
-    await reserveAccounts(env,order.id,product,order.quantity);
-  }catch(error){
-    if(error instanceof Error&&(error.message==="OUT_OF_STOCK"||error.message==="STOCK_RACE")){
-      return false;
-    }
-    throw error;
-  }
-  const updated=await env.DB.prepare(
-    "UPDATE shiire_vending_orders SET status='paid',updated_at=? WHERE id=? AND status='procurement_pending' AND stockless=1"
-  ).bind(Date.now(),order.id).run();
-  if(Number(updated.meta.changes??0)===1) return true;
-
-  await env.DB.batch([
-    env.DB.prepare(
-      "UPDATE purchased_accounts SET status='READY_FOR_DELIVERY' WHERE status='VENDING_RESERVED' AND id IN (SELECT account_id FROM shiire_vending_reservations WHERE order_id=?)"
-    ).bind(order.id),
-    env.DB.prepare(
-      "DELETE FROM shiire_vending_reservations WHERE order_id=?"
-    ).bind(order.id)
-  ]);
-  return false;
+  await reserveAccounts(env,order.id,product,order.quantity,true);
+  return (await getShiireOrder(env,order.id))?.status==="paid";
 }
 
 export async function listPendingStocklessOrders(env:Env,limit=50){

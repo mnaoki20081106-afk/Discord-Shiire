@@ -15,7 +15,7 @@ export default {async fetch(request,env){
     trial_purchase_count:10,
     max_no_shadowban_unit_price_usd:0.35
   });
-  return Response.json(await selectCandidate(env,10,input.target,input.budget));
+  return Response.json(await selectCandidate(env,input.quantity??10,input.target,input.budget,input.allocateTargetOnly));
 }};`,resolveDir:process.cwd(),sourcefile:'candidate-fixture.ts'},bundle:true,write:false,format:'esm',platform:'browser'});
 
 function product(id,price,{search=false,old=false,noShadow=true,...overrides}={}){
@@ -87,6 +87,16 @@ test('candidate selection enforces the new normal procurement policy',async t=>{
   async function clear(){
     await db.prepare('DELETE FROM supplier_products').run();
   }
+
+  await t.test('stockless odd shortfall buys only its own class without requiring the other budget',async()=>{
+    const result=await choose([product(9001,0.25,{search:true,old:true})],{
+      target:'TOP_SEARCH',quantity:3,allocateTargetOnly:true,
+      budget:{INVITE_CAMPAIGN:0,TOP_SEARCH:10,NO_SHADOWBAN:0}
+    });
+    assert.equal(result.product.id,9001);
+    assert.equal(result.plannedQuantity,3);
+    await clear();
+  });
 
   await t.test('① accepts any No Shadowban source under the ceiling',async()=>{
     const result=await choose([product(4841,0.27,{search:true,old:false})]);

@@ -106,6 +106,9 @@ export type XProcurementRunOptions={
   targetClasses?:readonly ProcurementTarget[];
   targetStockOverride?:Partial<Record<ProcurementTarget,number>>;
   allowAutoFunding?:boolean;
+  // Checkout demand belongs entirely to the requested class. Daily restocks
+  // retain the existing 50/50 allocation for dual-capability suppliers.
+  allocateTargetOnly?:boolean;
 };
 
 function procurementBudgetPercentages(
@@ -249,7 +252,8 @@ export async function selectCandidate(
   env:Env,
   quantityLimit:number,
   targetClass:ProcurementTarget,
-  budgetAvailable?:ProcurementBudgetAmounts
+  budgetAvailable?:ProcurementBudgetAmounts,
+  allocateTargetOnly=false
 ){
   const settings=await loadXSettings(env);
   const trustedApprovedIds=[...new Set([
@@ -341,7 +345,7 @@ export async function selectCandidate(
     const fullForceNoShadowban=
       procurementClassOverrideForHstoraProduct(full.id)==="NO_SHADOWBAN";
     const candidateQuantityLimit=
-      targetClass!=="INVITE_CAMPAIGN"&&fullDualCapability&&!fullForceNoShadowban
+      !allocateTargetOnly&&targetClass!=="INVITE_CAMPAIGN"&&fullDualCapability&&!fullForceNoShadowban
         ?Math.min(settings.max_batch_purchase,Math.max(2,quantityLimit*2))
         :quantityLimit;
     let plannedQuantity=Math.min(
@@ -349,7 +353,7 @@ export async function selectCandidate(
       Math.max(1,trialCap),
       Math.max(0,Number(full.stock_available??0))
     );
-    if(targetClass!=="INVITE_CAMPAIGN"&&fullDualCapability&&!fullForceNoShadowban){
+    if(!allocateTargetOnly&&targetClass!=="INVITE_CAMPAIGN"&&fullDualCapability&&!fullForceNoShadowban){
       plannedQuantity=evenSplitPurchaseQuantity(plannedQuantity);
     }
     if(plannedQuantity<=0) continue;
@@ -445,7 +449,7 @@ export async function selectCandidate(
       const forceNoShadowban=
         procurementClassOverrideForHstoraProduct(candidate.product.id)==="NO_SHADOWBAN";
       const splitAcrossClasses=
-        targetClass!=="INVITE_CAMPAIGN"&&
+        !allocateTargetOnly&&targetClass!=="INVITE_CAMPAIGN"&&
         !forceNoShadowban&&
         hasOldSearchNoShadowbanEvidence(candidate.product);
       const step=splitAcrossClasses?2:1;
@@ -1681,7 +1685,8 @@ async function runXProcurementLocked(
         env,
         plannedBatch,
         option.targetClass,
-        budgetSnapshot.available
+        budgetSnapshot.available,
+        options.allocateTargetOnly
       );
     }catch(error){
       const message=error instanceof Error?error.message:String(error);
@@ -1788,6 +1793,7 @@ async function runXProcurementLocked(
   const freshForceNoShadowban=
     procurementClassOverrideForHstoraProduct(fresh.id)==="NO_SHADOWBAN";
   const splitAcrossClasses=
+    !options.allocateTargetOnly&&
     !freshForceNoShadowban&&
     hasOldSearchNoShadowbanEvidence(fresh);
   const purchaseBatch=

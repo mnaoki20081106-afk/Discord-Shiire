@@ -39,6 +39,7 @@ import {
   recentFundingEvents,
   recentCryptoTransactions,
   auditX,
+  readyInventoryCountByClass,
   setCircuitBreaker,
   getProcurementBudgets,
   rebalanceProcurementBudgets,
@@ -92,6 +93,7 @@ import {
   clearShiirePaymentLink,
   readShiirePaymentLink,
   markShiirePaid,
+  reservedShiireAccounts,
   tryReserveStocklessOrder,
   listPendingStocklessOrders,
   claimShiireDelivery,
@@ -1202,6 +1204,9 @@ export async function handleShiireVendingInteraction(
       if(!Number.isInteger(quantity)||quantity<1||quantity>100){
         return interactionResponse(ephemeral("購入数が不正です。"));
       }
+      if(quantity>currentStock&&product.stockless_enabled===1&&method!=="paypay"){
+        return interactionResponse(ephemeral("在庫不足分の仕入れが必要な注文はPayPayマネーのみ利用できます。"));
+      }
       const coupon=couponCode?await getShiireCoupon(env,machine.id,couponCode):null;
       if(couponCode&&!coupon){
         return interactionResponse(ephemeral("無効なクーポンコードです。"));
@@ -1257,7 +1262,7 @@ export async function handleShiireVendingInteraction(
         "\n支払額: **"+order.total_amount+"円**"+
         (order.stockless===1
           ?"\n**無在庫販売：PayPayマネーのみ対応です。PayPayマネーライトを含むリンクは受取前に拒否します。**"+
-           "\n決済確認後にHSTORA仕入れ・入荷確認・納品を自動で進めます。"
+           "\n決済確認後に不足分を仕入れ、確保済みの在庫とまとめて納品します。"
           :"")+
         "\n10分以内に送金リンクを入力してください。",
         [{type:1,components:[{
@@ -2719,7 +2724,8 @@ async function processStocklessOrders(env:Env){
     const product=await getShiireProduct(env,order.product_id);
     if(!product?.procurement_class) continue;
     const cls=product.procurement_class;
-    demand.set(cls,(demand.get(cls)??0)+order.quantity);
+    const reserved=await reservedShiireAccounts(env,order.id);
+    demand.set(cls,(demand.get(cls)??0)+Math.max(0,order.quantity-reserved.length));
     if(!representative.has(cls)) representative.set(cls,product);
   }
 
@@ -2728,11 +2734,15 @@ async function processStocklessOrders(env:Env){
     const product=representative.get(cls);
     if(required<=0||!product) continue;
     const ready=await availableShiireAccounts(env,product);
+    // Procurement counts all reservations as inventory, including ordinary
+    // checkouts. Add those held units to the missing-unit target.
+    const held=Math.max(0,(await readyInventoryCountByClass(env,cls))-ready);
     try{
       const result=await runXProcurement(env,{
         targetClasses:[cls],
-        targetStockOverride:{[cls]:required},
-        allowAutoFunding:false
+        targetStockOverride:{[cls]:held+required},
+        allowAutoFunding:false,
+        allocateTargetOnly:true
       });
       await auditX(env,{
         kind:"SHIIRE_STOCKLESS_PROCUREMENT",
