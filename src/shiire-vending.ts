@@ -2689,11 +2689,17 @@ export async function notifyShiireVendingStockArrival(
 
 async function processStocklessOrders(env:Env){
   let open=await listPendingStocklessOrders(env,50);
+  const blockedClasses=new Set<"TOP_SEARCH"|"NO_SHADOWBAN">();
 
   for(const order of open){
     try{
       if(order.status==="procurement_pending"){
-        await tryReserveStocklessOrder(env,order.id);
+        const product=await getShiireProduct(env,order.product_id);
+        const cls=product?.procurement_class;
+        if(cls&&!blockedClasses.has(cls)){
+          const reserved=await tryReserveStocklessOrder(env,order.id);
+          if(!reserved) blockedClasses.add(cls);
+        }
       }
       const current=await getShiireOrder(env,order.id);
       if(current?.status==="paid"){
@@ -2725,7 +2731,7 @@ async function processStocklessOrders(env:Env){
     try{
       const result=await runXProcurement(env,{
         targetClasses:[cls],
-        targetStockOverride:{[cls]:ready+required},
+        targetStockOverride:{[cls]:required},
         allowAutoFunding:false
       });
       await auditX(env,{
@@ -2738,10 +2744,16 @@ async function processStocklessOrders(env:Env){
     }
   }
 
+  const postBlockedClasses=new Set<"TOP_SEARCH"|"NO_SHADOWBAN">();
   for(const order of await listPendingStocklessOrders(env,50)){
     try{
       if(order.status==="procurement_pending"){
-        await tryReserveStocklessOrder(env,order.id);
+        const product=await getShiireProduct(env,order.product_id);
+        const cls=product?.procurement_class;
+        if(cls&&!postBlockedClasses.has(cls)){
+          const reserved=await tryReserveStocklessOrder(env,order.id);
+          if(!reserved) postBlockedClasses.add(cls);
+        }
       }
       const current=await getShiireOrder(env,order.id);
       if(current?.status==="paid"){
