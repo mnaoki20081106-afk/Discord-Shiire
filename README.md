@@ -838,3 +838,47 @@ Binance出金用APIキー・固定送信元IP確認・Travel Rule JSONは現在�
 
 PayPay受取残高からBinanceへの自動入金・LTC換金・HStora入金は接続していません。
 この無在庫仕入れは `allowAutoFunding:false` を維持し、HStora残高を使用します。
+
+
+### 売上資金フローの運用前準備（シミュレーション専用）
+
+次の管理APIを追加しています。既存のADMIN_TOKEN認証が必要です。
+
+- `GET /api/x/funding/stockless/readiness`: 各接続の実装有無と未接続箇所。
+- `POST /api/x/funding/stockless/simulation`: 架空の注文・見積を使った資金フロー検証。
+
+例（数値はテスト入力であり、市場価格・実際の見積ではありません）:
+
+```json
+{
+  "orderId": "simulation_order_1",
+  "quantity": 5,
+  "reservedQuantity": 2,
+  "saleAmountJpy": 1500,
+  "confirmedPayPayMoneyJpy": 1500,
+  "requiredFundingJpy": 1000,
+  "fundingFeeJpy": 110,
+  "minimumFundingJpy": 1000
+}
+```
+
+受取済みPayPayマネーを前提に、入金→換金→送金→HStora入金確認→不足分仕入れ→
+全数納品を模擬します。各工程は注文IDと操作キーに紐付き、同一確認の再送は重複処理せず、
+内容が変わった再送や別注文の確認は拒否します。その注文の代金を超える資金要求、
+最低購入額未満、手数料控除後の資金を超える換金、不足数以上の仕入れも拒否します。
+
+このモジュールはネットワーク通信・口座アクセス・決済・D1注文更新を行いません。
+`live=true` / `dryRun=false` / `mode=live` を送っても実行できません。
+シミュレーション完了は実際の決済・入金・納品完了を意味しません。
+
+**口座情報を追加するだけで本番開始できる状態ではありません。**
+現在のBinance公式 `POST /sapi/v1/fiat/deposit` はBRL/PIXのみ対応し、
+JPY/PayPayへの対応は確認できません。HStora入金先の確定・実入金照合、
+注文単位の本番資金オーケストレーションも未接続です。実際の接続仕様と利用条件を
+満たした口座での検証が完了するまで、準備APIは常に `liveReady:false` を返します。
+
+確認資料:
+
+- [Binance Fiat REST API](https://developers.binance.com/en/docs/catalog/investment-and-services-fiat/api/rest-api/~)
+- [Binance Japan PayPayマネー入金手順](https://www.binance.com/ja/support/faq/detail/cc74057cc86f4b569d23b3de3d82edd4)
+- [Binance公式JavaScript SDK](https://github.com/binance/binance-connector-js)

@@ -1,3 +1,4 @@
+import {stocklessFundingReadiness,simulateStocklessFunding,type FundingDraftInput} from "./stockless-funding-preparation";
 import { withNamedRunLock } from "./x-run-lock";
 import type { Env } from "./types";
 import { loadXSettings, saveXSettings, type XSettings } from "./x-settings";
@@ -146,6 +147,22 @@ export async function handleXAdminApi(
 }
 
 async function handleXAdminApiUnlocked(request:Request,env:Env,url:URL):Promise<Response|null>{
+  if(url.pathname==="/api/x/funding/stockless/readiness"&&request.method==="GET"){
+    return json(stocklessFundingReadiness(env));
+  }
+  if(url.pathname==="/api/x/funding/stockless/simulation"&&request.method==="POST"){
+    const input=await requestJson(request);
+    if(!input) return json({error:"INVALID_JSON"},400);
+    if(input.live===true||input.dryRun===false||input.mode==="live"){
+      return json({error:"LIVE_FUNDING_NOT_IMPLEMENTED"},409);
+    }
+    try{
+      return json(simulateStocklessFunding(input as unknown as FundingDraftInput));
+    }catch(error){
+      return json({error:error instanceof Error?error.message:String(error)},400);
+    }
+  }
+
   await ensureXSchema(env);
 
   if(url.pathname==="/api/x/invite-campaign"&&request.method==="GET"){
