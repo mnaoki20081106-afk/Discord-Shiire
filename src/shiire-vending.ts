@@ -2439,7 +2439,8 @@ export async function handleShiireMainBridge(
         description:String(input.description??"").slice(0,500),
         pricePayPay,
         priceKyash,
-        emoji:input.emoji?String(input.emoji).slice(0,64):null
+        emoji:input.emoji?String(input.emoji).slice(0,64):null,
+        stocklessEnabled:input.stocklessEnabled===true
       });
       await refreshMachinePanels(env,machine.id);
       return responseJson(product,201);
@@ -2488,6 +2489,7 @@ export async function handleShiireMainBridge(
         }
       }
       if(input.emoji!==undefined) patch.emoji=input.emoji?String(input.emoji).slice(0,64):null;
+      if(input.stocklessEnabled!==undefined) patch.stocklessEnabled=input.stocklessEnabled===true;
       await updateShiireProduct(env,product.id,patch);
       if(input.repostPanels===true){
         return responseJson({
@@ -2685,6 +2687,72 @@ export async function notifyShiireVendingStockArrival(
   }
 }
 
+async function processStocklessOrders(env:Env){
+  let open=await listPendingStocklessOrders(env,50);
+
+  for(const order of open){
+    try{
+      if(order.status==="procurement_pending"){
+        await tryReserveStocklessOrder(env,order.id);
+      }
+      const current=await getShiireOrder(env,order.id);
+      if(current?.status==="paid"){
+        await deliverOrder(env,current);
+      }
+    }catch(error){
+      console.error("stockless reservation/delivery failed",order.id,error);
+    }
+  }
+
+  open=(await listPendingStocklessOrders(env,50))
+    .filter(order=>order.status==="procurement_pending");
+  const demand=new Map<"TOP_SEARCH"|"NO_SHADOWBAN",number>();
+  const representative=new Map<"TOP_SEARCH"|"NO_SHADOWBAN",ShiireVendingProduct>();
+
+  for(const order of open){
+    const product=await getShiireProduct(env,order.product_id);
+    if(!product?.procurement_class) continue;
+    const cls=product.procurement_class;
+    demand.set(cls,(demand.get(cls)??0)+order.quantity);
+    if(!representative.has(cls)) representative.set(cls,product);
+  }
+
+  for(const cls of ["TOP_SEARCH","NO_SHADOWBAN"] as const){
+    const required=demand.get(cls)??0;
+    const product=representative.get(cls);
+    if(required<=0||!product) continue;
+    const ready=await availableShiireAccounts(env,product);
+    try{
+      const result=await runXProcurement(env,{
+        targetClasses:[cls],
+        targetStockOverride:{[cls]:ready+required},
+        allowAutoFunding:false
+      });
+      await auditX(env,{
+        kind:"SHIIRE_STOCKLESS_PROCUREMENT",
+        message:"Stockless vending demand was sent to the existing HStora procurement engine.",
+        details:{procurementClass:cls,required,ready,action:result.action}
+      }).catch(()=>undefined);
+    }catch(error){
+      console.error("stockless HStora procurement failed",cls,error);
+    }
+  }
+
+  for(const order of await listPendingStocklessOrders(env,50)){
+    try{
+      if(order.status==="procurement_pending"){
+        await tryReserveStocklessOrder(env,order.id);
+      }
+      const current=await getShiireOrder(env,order.id);
+      if(current?.status==="paid"){
+        await deliverOrder(env,current);
+      }
+    }catch(error){
+      console.error("stockless post-procurement delivery failed",order.id,error);
+    }
+  }
+}
+
 export async function shiireVendingSweep(env:Env){
   await cleanShiireVendingExpired(env);
 
@@ -2700,6 +2768,8 @@ export async function shiireVendingSweep(env:Env){
       console.error("shiire vending payment sweep failed",order.id,error);
     }
   }
+
+  await processStocklessOrders(env);
 
   for(const order of await listShiireDeliverySent(env,20)){
     try{
