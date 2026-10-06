@@ -153,6 +153,7 @@ export async function receiveMainPayment(
     link:string;
     amount:number;
     idempotencyKey:string;
+    requirePayPayMoney?:boolean;
   }
 ){
   const body=JSON.stringify(input);
