@@ -818,3 +818,53 @@ Binance出金用APIキー・固定送信元IP確認・Travel Rule JSONは現在�
 - PayPayでLTCを直接購入した場合は、BinanceのLTC総残高（free + locked）の増加をBOTが検知しても自動確定しません。通常ユーザー向け公開APIで「そのLTC増加がPayPay販売所購入由来」と確定照合できる仕様を確認できないため、Main BOT管理画面の「このLTC購入を確認して再開」を管理者が押した時だけ確定します。
 - 確認ボタンを押した時点でもBinance LTC総残高を再取得し、保留開始時より増えていなければ確定を拒否します。
 - 保留開始後にPayPay残高の観測値を手動更新した場合、その新しい観測値を優先し、購入額を二重に差し引きません。
+
+
+## フォロ爆 (SMM) 販売 / LuckyPanel
+
+[LuckyPanel](https://luckypanel.jp/) の公式API (`/api/v2`) から無在庫で仕入れ、PayPayで受け取った代金の一部で自動発注するフォロ爆自販機です。Xアカウント仕入れ(HStora)とは完全に別系統です。
+
+```text
+購入者 ─ Discordパネル ─ 注文(URL・数量) ─ PayPay送金リンク
+                                              │ Xaccount-Bot の受取処理(PayPayマネーのみ)
+                                              ▼
+                                      入金確認 → LuckyPanel API: add
+                                              ▼
+                              1分Cronで status 追跡 → 完了/一部/キャンセルをDM通知
+```
+
+### セットアップ
+
+1. Worker Secret `LUCKYPANEL_API_KEY` を設定(Bot Factoryの入力欄、またはWrangler)。任意で `LUCKYPANEL_API_URL`(https のみ)。
+2. LuckyPanelの残高を円でチャージしておく(チャージは手動です。APIでは行えません)。
+3. Xaccount-Bot管理サイトの **フォロ爆** タブで、サービスから商品を作り、パネルを設置し、受付をONにする。
+
+初期状態は **受付停止** です。
+
+### 安全設計
+
+- 二重発注防止: `paid → placing` を条件付きUPDATEで1回だけ取得してからAPIを呼ぶ。
+- 発注が通ったか不明な失敗(タイムアウト、5xx、注文ID無しの2xx)は **自動再送せず** `hold` にして管理者へ通知。LuckyPanelに注文APIの冪等キーが無いため。
+- 明確な拒否は即失敗+返金対象。残高不足だけは5分間隔で最大12回再試行。
+- 発注直前に最新レートで再計算し、支払額に対して最低利益率を割る場合は発注せず `hold`。
+- 注文受付時に LuckyPanel の残高(JPYのみ)を確認。残高不足・通貨不一致・API障害では注文を受け付けない。
+- 1ユーザーあたりの進行中注文数に上限。商品は同時に25件まで(Discordセレクトの上限)。
+- 返金はPayPayの手動対応です。`返金待ち` として管理画面とログチャンネルに出ます。一部完了は残数量に比例した金額を算出します。
+- 対応サービスタイプは数量指定の `Default` のみ。コメント・サブスクリプション等のタイプは商品化できません。
+
+### 管理API
+
+`/bridge/main/guilds/:guildId/smm/*`(Shiire署名付き。Xaccount-Botの `/api/guilds/:guildId/shiire/smm/*` から中継)
+
+```text
+GET    /smm                      概要(残高・設定・商品・集計)
+POST   /smm/settings             設定保存
+GET    /smm/services[?refresh=1] LuckyPanelのサービス一覧
+POST   /smm/products             商品作成
+PATCH  /smm/products/:id         商品更新
+DELETE /smm/products/:id         商品削除
+GET    /smm/orders[?status=]     注文一覧
+POST   /smm/orders/:id/action    retry | link_supplier | cancel_supplier | fail_refund | refund_done
+POST   /smm/panel                パネル設置
+POST   /smm/panel/refresh        設置済みパネル更新
+```

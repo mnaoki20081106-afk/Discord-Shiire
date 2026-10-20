@@ -23,6 +23,10 @@ export interface Env {
   HSTORA_WEBHOOK_SECRET?: string;
   CREDENTIALS_ENCRYPTION_KEY?: string;
   DISCORD_NOTIFY_WEBHOOK_URL?: string;
+
+  // フォロ爆(SMM)販売。LuckyPanelのAPIキーはWorker Secretとして保存する。
+  LUCKYPANEL_API_KEY?: string;
+  LUCKYPANEL_API_URL?: string;
 }
 
 export type SupplierKind = "pool" | "http_json";

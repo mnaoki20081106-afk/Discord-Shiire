@@ -21,6 +21,8 @@ import {
   retryInviteCampaignRewards
 } from "./invite-campaign-rewards";
 import { ensureInviteCampaignGateway, InviteGateway } from "./invite-gateway";
+import { handleSmmInteraction } from "./smm-vending";
+import { smmSweep } from "./smm-orders";
 import { isBinanceAutoFundingServerEnabled } from "./x-funding-mode";
 import { handleHstoraWebhook } from "./x-webhooks";
 import { handleDailyRestockCron } from "./x-daily-restock";
@@ -162,6 +164,8 @@ async function handleInteraction(
   const interaction=JSON.parse(raw);
   if(interaction.type===1) return json({type:1});
   if(interaction.type===3||interaction.type===5){
+    const smm=await handleSmmInteraction(interaction,env,ctx);
+    if(smm) return smm;
     const vending=await handleShiireVendingInteraction(interaction,env);
     if(vending) return vending;
     return interactionResponse("未対応の操作です。");
@@ -514,6 +518,12 @@ export default {
         await shiireVendingSweep(env);
       }catch(error){
         console.error("scheduled Shiire vending sweep failed",error);
+      }
+
+      try{
+        await smmSweep(env);
+      }catch(error){
+        console.error("scheduled SMM sweep failed",error);
       }
     })());
   }

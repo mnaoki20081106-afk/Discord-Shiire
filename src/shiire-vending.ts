@@ -111,6 +111,7 @@ import {
   type ShiireVendingProduct,
   type ShiireVendingOrder
 } from "./shiire-vending-db";
+import { handleSmmBridge } from "./smm-bridge";
 import {
   SHIIRE_VENDING_SALES_COPY_VERSION,
   shiireSalesCopyForClass
@@ -1386,6 +1387,10 @@ export async function handleShiireMainBridge(
   const suffix=root[2]??"";
   const rawBody=["GET","HEAD"].includes(request.method)?"":await request.text();
   await verifyMainBridgeRequest(request,env,url,rawBody);
+
+  if(suffix==="/smm"||suffix.startsWith("/smm/")){
+    return handleSmmBridge(env,request.method,guildId,suffix.slice(4),url,rawBody);
+  }
 
   if(suffix==="/status"&&request.method==="GET"){
     let guild:null|{id:string;name:string;icon?:string|null}=null;

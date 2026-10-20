@@ -139,6 +139,23 @@
         "help": "任意。未設定でも1分Cronの注文照合は動作します。Webhookを使う場合だけ設定してください。"
       },
       {
+        "key": "LUCKYPANEL_API_KEY",
+        "label": "LuckyPanel APIキー(フォロ爆の仕入れ)",
+        "type": "secret",
+        "required": false,
+        "help": "フォロ爆(SMM)販売で使います。LuckyPanelにログインしてAPIページで発行したキーを入力してください。未設定ならフォロ爆は受付されません。",
+        "source": {
+          "title": "APIキーの取得",
+          "steps": [
+            "luckypanel.jp にログインする",
+            "アカウント設定またはAPIページでAPIキーを確認する",
+            "キーを入力する(第三者に共有しない)"
+          ],
+          "url": "https://luckypanel.jp/api",
+          "link_label": "LuckyPanel API"
+        }
+      },
+      {
         "key": "DISCORD_NOTIFY_WEBHOOK_URL",
         "label": "仕入れ通知Webhook URL",
         "type": "url",
