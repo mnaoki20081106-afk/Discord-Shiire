@@ -4,7 +4,7 @@ import {build} from 'esbuild';
 import {Miniflare} from 'miniflare';
 
 const bundle=await build({stdin:{contents:`
-import {ensureSmmSchema,saveSmmSettings,createSmmProduct,createSmmOrder,markSmmPaid,getSmmOrder,attachSmmPaymentLink,loadSmmServices} from './src/smm-db';
+import {ensureSmmSchema,saveSmmSettings,createSmmMachine,defaultMachineTexts,createSmmProduct,createSmmOrder,markSmmPaid,getSmmOrder,attachSmmPaymentLink,loadSmmServices} from './src/smm-db';
 import {placeSmmOrder,processSmmPayment,trackSmmOrders,smmSweep,smmAdminAction} from './src/smm-orders';
 import {handleSmmBridge} from './src/smm-bridge';
 import {handleSmmInteraction} from './src/smm-vending';
@@ -13,8 +13,21 @@ export default {async fetch(req,env){
  if(u.pathname==='/init'){
   await ensureSmmSchema(env);
   await saveSmmSettings(env,'1',{paused:0,min_margin_percent:0,private_log_channel_id:'123456789012345678'});
-  const p=await createSmmProduct(env,'1',{name:'X Followers',description:'',emoji:null,service_id:'101',service_name:'X Followers',service_category:'X',markup_percent:30,fee_jpy:0,min_qty:10,max_qty:0,link_kind:'x_profile',active:true});
-  return Response.json({productId:p.id});
+  const machine=await createSmmMachine(env,'1',{sns:'x',...defaultMachineTexts('x'),name:'X',panel_image_url:null});
+  const p=await createSmmProduct(env,'1',{machine_id:machine.id,name:'X Followers',description:'',emoji:null,service_id:'101',service_name:'X Followers',service_category:'X',markup_percent:30,fee_jpy:0,min_qty:10,max_qty:0,link_kind:'x_profile',active:true});
+  return Response.json({productId:p.id,machineId:machine.id});
+ }
+ if(u.pathname==='/legacy-init'){
+  for(const sql of [
+   "CREATE TABLE smm_settings (guild_id TEXT PRIMARY KEY,panel_title TEXT NOT NULL,panel_description TEXT NOT NULL,panel_color INTEGER NOT NULL,panel_image_url TEXT,public_log_channel_id TEXT,private_log_channel_id TEXT,paused INTEGER NOT NULL DEFAULT 0,min_margin_percent REAL NOT NULL DEFAULT 0,max_open_orders_per_user INTEGER NOT NULL DEFAULT 5,min_supplier_balance_jpy INTEGER NOT NULL DEFAULT 0,updated_at INTEGER NOT NULL)",
+   "CREATE TABLE smm_products (id TEXT PRIMARY KEY,guild_id TEXT NOT NULL,name TEXT NOT NULL,description TEXT NOT NULL DEFAULT '',emoji TEXT,service_id TEXT NOT NULL,service_name TEXT NOT NULL DEFAULT '',service_category TEXT NOT NULL DEFAULT '',markup_percent REAL NOT NULL DEFAULT 30,fee_jpy INTEGER NOT NULL DEFAULT 0,min_qty INTEGER NOT NULL DEFAULT 1,max_qty INTEGER NOT NULL DEFAULT 0,link_kind TEXT NOT NULL DEFAULT 'url',active INTEGER NOT NULL DEFAULT 1,sales_count INTEGER NOT NULL DEFAULT 0,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL)",
+   "CREATE TABLE smm_panels (guild_id TEXT NOT NULL,channel_id TEXT NOT NULL,message_id TEXT NOT NULL,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL,PRIMARY KEY(guild_id,channel_id,message_id))",
+   "INSERT INTO smm_settings VALUES ('1','Old title','Old description',255,NULL,NULL,'123456789012345678',0,15,7,500,1)",
+   "INSERT INTO smm_products(id,guild_id,name,service_id,link_kind,created_at,updated_at) VALUES ('legacy-p','1','Legacy followers','101','x_profile',1,1)",
+   "INSERT INTO smm_panels VALUES ('1','555555555555555555','666666666666666666',1,1)"
+  ]) await env.DB.prepare(sql).run();
+  await ensureSmmSchema(env);
+  return Response.json({ok:true});
  }
  if(u.pathname==='/order'){
   const product=await env.DB.prepare('SELECT * FROM smm_products LIMIT 1').first();
@@ -42,7 +55,7 @@ export default {async fetch(req,env){
 
 const instances=[];after(async()=>{await Promise.all(instances.map(m=>m.dispose()));});
 
-async function fixture(){
+async function fixture(options={}){
  const lp={calls:[],balance:100000,currency:'JPY',addMode:'ok',nextOrder:9000,
   services:[{service:'101',name:'X Followers',type:'Default',category:'X',rate:'500',min:'10',max:'10000',refill:true,cancel:false}],
   statusFor:()=>({status:'In progress',charge:'500',start_count:'10',remains:'1000',currency:'JPY'})};
@@ -86,14 +99,16 @@ async function fixture(){
    }
    if(url.host==='discord.com'){
     let body=null;try{body=await req.json();}catch{}
-    discord.push({url:url.pathname,body});
+    discord.push({url:url.pathname,method:req.method,body});
+    const channel=url.pathname.match(/^\/api\/v10\/channels\/(\d+)$/);
+    if(req.method==='GET'&&channel)return Response.json({id:channel[1],guild_id:'1'});
     return Response.json({id:'123456789012345679'});
    }
    return Response.json({error:'unexpected '+req.url},{status:500});
   }});
  instances.push(mf);
- const init=await (await mf.dispatchFetch('https://test/init')).json();
- return {mf,lp,pay,discord,db:await mf.getD1Database('DB'),productId:init.productId,
+ const init=options.skipInit?{}:await (await mf.dispatchFetch('https://test/init')).json();
+ return {mf,lp,pay,discord,db:await mf.getD1Database('DB'),productId:init.productId,machineId:init.machineId,
   async order(params=''){return (await mf.dispatchFetch('https://test/order?'+params)).json();},
   async get(id){return (await mf.dispatchFetch('https://test/get?id='+id)).json();},
   async place(id){return (await (await mf.dispatchFetch('https://test/place?id='+id)).json()).result;}};
@@ -290,18 +305,18 @@ test('refund completion is recorded once',async()=>{
 test('bridge: product creation validates the service and refuses unprofitable pricing',async()=>{
  const f=await fixture();
  const post=async(path,body,method='POST')=>f.mf.dispatchFetch('https://test/bridge'+path,{method,body:JSON.stringify(body)});
- let res=await post('/products',{name:'Bad',service_id:'999',price_percent:130,link_kind:'x_profile'});
+ let res=await post('/products',{machine_id:f.machineId,name:'Bad',service_id:'999',price_percent:130,link_kind:'x_profile'});
  assert.equal(res.status,400);
  f.lp.services.push({service:'202',name:'Comments',type:'Custom Comments',category:'X',rate:'900',min:'10',max:'100',refill:false,cancel:false});
  await f.db.prepare("DELETE FROM smm_meta WHERE key='services_json'").run();
- res=await post('/products',{name:'Comments',service_id:'202',price_percent:130,link_kind:'x_post'});
+ res=await post('/products',{machine_id:f.machineId,name:'Comments',service_id:'202',price_percent:130,link_kind:'x_post'});
  assert.equal(res.status,400);
  assert.match((await res.json()).message,/SERVICE_TYPE_UNSUPPORTED/);
  await post('/settings',{min_margin_percent:20});
- res=await post('/products',{name:'Thin',service_id:'101',price_percent:105,link_kind:'x_profile'});
+ res=await post('/products',{machine_id:f.machineId,name:'Thin',service_id:'101',price_percent:105,link_kind:'x_profile'});
  assert.equal(res.status,400);
  assert.match((await res.json()).message,/MARGIN_BELOW_FLOOR/);
- res=await post('/products',{name:'Good',service_id:'101',price_percent:130,link_kind:'x_profile'});
+ res=await post('/products',{machine_id:f.machineId,name:'Good',service_id:'101',price_percent:130,link_kind:'x_profile'});
  assert.equal(res.status,200);
 });
 
@@ -309,10 +324,10 @@ test('bridge: prices must be at least 101% of cost and fixed fees are ignored',a
  const f=await fixture();
  const post=body=>f.mf.dispatchFetch('https://test/bridge/products',{method:'POST',body:JSON.stringify(body)});
  for(const price_percent of [100,99,0,'abc']){
-  const res=await post({name:'X',service_id:'101',price_percent,link_kind:'x_profile'});
+  const res=await post({machine_id:f.machineId,name:'X',service_id:'101',price_percent,link_kind:'x_profile'});
   assert.equal(res.status,400,String(price_percent));
  }
- const res=await post({name:'Cheap',service_id:'101',price_percent:101,fee_jpy:500,link_kind:'x_profile'});
+ const res=await post({machine_id:f.machineId,name:'Cheap',service_id:'101',price_percent:101,fee_jpy:500,link_kind:'x_profile'});
  assert.equal(res.status,200);
  const {product}=await res.json();
  assert.equal(product.markup_percent,1);assert.equal(product.fee_jpy,0);
@@ -344,7 +359,7 @@ const modal=(customId,fields)=>({type:5,data:{custom_id:customId,components:Obje
 
 test('interaction: the buy button lists active products with their price per 1000',async()=>{
  const f=await fixture();
- const {response}=await interact(f,{type:3,data:{custom_id:'smm:buy:1'}});
+ const {response}=await interact(f,{type:3,data:{custom_id:'smm:buy:'+f.machineId}});
  assert.match(response.data.content,/購入する商品/);
  const option=response.data.components[0].components[0].options[0];
  assert.equal(option.value,f.productId);
@@ -354,8 +369,8 @@ test('interaction: the buy button lists active products with their price per 100
 
 test('interaction: a paused shop refuses to start orders',async()=>{
  const f=await fixture();
- await f.db.prepare('UPDATE smm_settings SET paused=1').run();
- const {response}=await interact(f,{type:3,data:{custom_id:'smm:buy:1'}});
+ await f.db.prepare('UPDATE smm_guild_settings SET paused=1').run();
+ const {response}=await interact(f,{type:3,data:{custom_id:'smm:buy:'+f.machineId}});
  assert.match(response.data.content,/停止/);
  const order=await interact(f,modal('smm:order:'+f.productId,{link:'https://x.com/target',quantity:'1000'}));
  assert.match(order.edit.content,/停止/);
@@ -364,7 +379,7 @@ test('interaction: a paused shop refuses to start orders',async()=>{
 
 test('interaction: picking a product opens the order modal',async()=>{
  const f=await fixture();
- const {response}=await interact(f,{type:3,data:{custom_id:'smm:pick:1',values:[f.productId]}});
+ const {response}=await interact(f,{type:3,data:{custom_id:'smm:pick:'+f.machineId,values:[f.productId]}});
  assert.equal(response.type,9);
  assert.equal(response.data.custom_id,'smm:order:'+f.productId);
  assert.deepEqual(response.data.components.map(r=>r.components[0].custom_id),['link','quantity']);
@@ -410,7 +425,7 @@ test('interaction: orders are refused when the supplier balance is not in JPY',a
 
 test('interaction: the per-user open order cap is enforced',async()=>{
  const f=await fixture();
- await f.db.prepare('UPDATE smm_settings SET max_open_orders_per_user=2').run();
+ await f.db.prepare('UPDATE smm_guild_settings SET max_open_orders_per_user=2').run();
  for(let i=0;i<2;i++) await interact(f,modal('smm:order:'+f.productId,{link:'https://x.com/target',quantity:'100'}));
  const r=await interact(f,modal('smm:order:'+f.productId,{link:'https://x.com/target',quantity:'100'}));
  assert.match(r.edit.content,/上限/);
@@ -453,9 +468,9 @@ test('interaction: PayPay Money Light links are rejected with guidance',async()=
 test('interaction: order status shows only the buyer\'s own orders',async()=>{
  const f=await fixture();
  await f.order('paid=1');
- const mine=await interact(f,{type:3,data:{custom_id:'smm:status:1'}});
+ const mine=await interact(f,{type:3,data:{custom_id:'smm:status:'+f.machineId}});
  assert.equal(mine.response.data.embeds[0].fields.length,1);
- const other=await interact(f,{type:3,data:{custom_id:'smm:status:1'},member:{user:{id:'888'}}});
+ const other=await interact(f,{type:3,data:{custom_id:'smm:status:'+f.machineId},member:{user:{id:'888'}}});
  assert.match(other.response.data.content,/まだありません/);
 });
 
@@ -463,4 +478,146 @@ test('interaction: unrelated custom ids are left to other handlers',async()=>{
  const f=await fixture();
  const {response}=await interact(f,{type:3,data:{custom_id:'svm:buy:abc'}});
  assert.equal(response.unhandled,true);
+});
+
+
+const post=(f,path,body,method='POST')=>f.mf.dispatchFetch('https://test/bridge'+path,{method,body:JSON.stringify(body)});
+
+test('machines: each SNS gets its own panel texts and only its own link kinds',async()=>{
+ const f=await fixture();
+ let res=await post(f,'/machines',{sns:'instagram'});
+ assert.equal(res.status,200);
+ const {machine}=await res.json();
+ assert.equal(machine.sns,'instagram');assert.match(machine.panel_title,/Instagram/);
+ assert.equal((await post(f,'/machines',{sns:'myspace'})).status,400);
+ res=await post(f,'/products',{machine_id:machine.id,name:'IG Followers',service_id:'101',price_percent:130,link_kind:'x_profile'});
+ assert.equal(res.status,400);assert.equal((await res.json()).error,'LINK_KIND_INVALID');
+ res=await post(f,'/products',{machine_id:machine.id,name:'IG Followers',service_id:'101',price_percent:130,link_kind:'instagram_profile'});
+ assert.equal(res.status,200);
+ res=await post(f,'/products',{machine_id:'nope',name:'Ghost',service_id:'101',price_percent:130,link_kind:'url'});
+ assert.equal(res.status,400);assert.equal((await res.json()).error,'MACHINE_NOT_FOUND');
+});
+
+test('machines: the 25 product limit applies per machine, not per server',async()=>{
+ const f=await fixture();
+ const {machine:other}=await (await post(f,'/machines',{sns:'tiktok'})).json();
+ const base={name:'bulk',description:'',emoji:null,service_id:'101',service_name:'',service_category:'',markup_percent:30,fee_jpy:0,min_qty:10,max_qty:0,link_kind:'x_profile',active:1,sales_count:0,created_at:1,updated_at:1};
+ for(let i=0;i<23;i++) await f.db.prepare("INSERT INTO smm_products(id,guild_id,machine_id,name,service_id,link_kind,created_at,updated_at) VALUES (?,?,?,?,?,?,1,1)").bind('bulk'+i,'1',f.machineId,'bulk'+i,'101','x_profile').run();
+ assert.ok(base);
+ let res=await post(f,'/products',{machine_id:f.machineId,name:'25th',service_id:'101',price_percent:130,link_kind:'x_profile'});
+ assert.equal(res.status,200);
+ res=await post(f,'/products',{machine_id:f.machineId,name:'26th',service_id:'101',price_percent:130,link_kind:'x_profile'});
+ assert.equal(res.status,409);assert.equal((await res.json()).error,'TOO_MANY_ACTIVE_PRODUCTS');
+ res=await post(f,'/products',{machine_id:other.id,name:'TikTok one',service_id:'101',price_percent:130,link_kind:'tiktok_profile'});
+ assert.equal(res.status,200);
+});
+
+test('machines: panels install to separate channels and show only their own products',async()=>{
+ const f=await fixture();
+ const {machine:ig}=await (await post(f,'/machines',{sns:'instagram'})).json();
+ await post(f,'/products',{machine_id:ig.id,name:'IG Followers',service_id:'101',price_percent:130,link_kind:'instagram_profile'});
+ const a=await (await post(f,`/machines/${f.machineId}/panel`,{channelId:'111111111111111111'})).json();
+ const b=await (await post(f,`/machines/${ig.id}/panel`,{channelId:'222222222222222222'})).json();
+ assert.equal(a.ok,true);assert.equal(b.ok,true);
+ const sent=f.discord.filter(m=>m.method==='POST'&&/\/channels\/\d+\/messages$/.test(m.url)&&m.body?.embeds?.[0]?.fields);
+ const toX=sent.find(m=>m.url.includes('111111111111111111')),toIg=sent.find(m=>m.url.includes('222222222222222222'));
+ assert.deepEqual(toX.body.embeds[0].fields.map(x=>x.name),['X Followers']);
+ assert.deepEqual(toIg.body.embeds[0].fields.map(x=>x.name),['IG Followers']);
+ assert.equal(toX.body.components[0].components[0].custom_id,'smm:buy:'+f.machineId);
+ assert.equal(toIg.body.components[0].components[0].custom_id,'smm:buy:'+ig.id);
+ const overview=await (await f.mf.dispatchFetch('https://test/bridge')).json();
+ assert.equal(overview.machines.length,2);
+ assert.equal(overview.machines.find(m=>m.id===ig.id).panels[0].channel_id,'222222222222222222');
+ assert.equal((await post(f,`/machines/${ig.id}/panel`,{channelId:'not-a-channel'})).status>=400,true);
+});
+
+test('machines: editing a product refreshes only the panels of its machine',async()=>{
+ const f=await fixture();
+ const {machine:ig}=await (await post(f,'/machines',{sns:'instagram'})).json();
+ await post(f,`/machines/${f.machineId}/panel`,{channelId:'111111111111111111'});
+ await post(f,`/machines/${ig.id}/panel`,{channelId:'222222222222222222'});
+ const before=f.discord.length;
+ const res=await post(f,'/products/'+f.productId,{price_percent:150},'PATCH');
+ assert.equal(res.status,200);
+ const patches=f.discord.slice(before).filter(m=>m.method==='PATCH');
+ assert.equal(patches.length,1);
+ assert.match(patches[0].url,/channels\/111111111111111111\/messages/);
+ assert.match(patches[0].body.embeds[0].fields[0].value,/¥750/);
+});
+
+test('machines: pausing the shop disables the buttons on every panel',async()=>{
+ const f=await fixture();
+ const {machine:ig}=await (await post(f,'/machines',{sns:'instagram'})).json();
+ await post(f,`/machines/${f.machineId}/panel`,{channelId:'111111111111111111'});
+ await post(f,`/machines/${ig.id}/panel`,{channelId:'222222222222222222'});
+ const before=f.discord.length;
+ await post(f,'/settings',{paused:true});
+ const patches=f.discord.slice(before).filter(m=>m.method==='PATCH');
+ assert.equal(patches.length,2);
+ for(const patch of patches){
+  assert.equal(patch.body.components[0].components[0].disabled,true);
+  assert.match(patch.body.embeds[0].description,/停止/);
+ }
+});
+
+test('machines: deletion is blocked while products remain',async()=>{
+ const f=await fixture();
+ const {machine:tt}=await (await post(f,'/machines',{sns:'tiktok'})).json();
+ await post(f,'/products',{machine_id:tt.id,name:'TT',service_id:'101',price_percent:130,link_kind:'tiktok_profile'});
+ let res=await post(f,'/machines/'+tt.id,{},'DELETE');
+ assert.equal(res.status,409);assert.equal((await res.json()).error,'MACHINE_HAS_PRODUCTS');
+ const overview=await (await f.mf.dispatchFetch('https://test/bridge')).json();
+ const product=overview.products.find(p=>p.name==='TT');
+ await post(f,'/products/'+product.id,{},'DELETE');
+ res=await post(f,'/machines/'+tt.id,{},'DELETE');
+ assert.equal(res.status,200);
+});
+
+test('machines: a product can move to another machine of a compatible SNS',async()=>{
+ const f=await fixture();
+ const {machine:second}=await (await post(f,'/machines',{sns:'x',name:'X (2)'})).json();
+ let res=await post(f,'/products/'+f.productId,{machine_id:second.id},'PATCH');
+ assert.equal(res.status,200);
+ const {machine:ig}=await (await post(f,'/machines',{sns:'instagram'})).json();
+ res=await post(f,'/products/'+f.productId,{machine_id:ig.id},'PATCH');
+ assert.equal(res.status,400);assert.equal((await res.json()).error,'LINK_KIND_INVALID');
+});
+
+test('interaction: a panel only offers its own machine products',async()=>{
+ const f=await fixture();
+ const {machine:ig}=await (await post(f,'/machines',{sns:'instagram'})).json();
+ const {product}=await (await post(f,'/products',{machine_id:ig.id,name:'IG Followers',service_id:'101',price_percent:130,link_kind:'instagram_profile'})).json();
+ const x=await interact(f,{type:3,data:{custom_id:'smm:buy:'+f.machineId}});
+ assert.deepEqual(x.response.data.components[0].components[0].options.map(o=>o.value),[f.productId]);
+ const i=await interact(f,{type:3,data:{custom_id:'smm:buy:'+ig.id}});
+ assert.deepEqual(i.response.data.components[0].components[0].options.map(o=>o.value),[product.id]);
+ const cross=await interact(f,{type:3,data:{custom_id:'smm:pick:'+f.machineId,values:[product.id]}});
+ assert.match(cross.response.data.content,/購入できません/);
+ const wrongGuild=await interact(f,{type:3,data:{custom_id:'smm:buy:'+f.machineId},guild_id:'999'});
+ assert.match(wrongGuild.response.data.content,/利用できません/);
+});
+
+test('interaction: Instagram links are validated by the machine link kind',async()=>{
+ const f=await fixture();
+ const {machine:ig}=await (await post(f,'/machines',{sns:'instagram'})).json();
+ const {product}=await (await post(f,'/products',{machine_id:ig.id,name:'IG Followers',service_id:'101',price_percent:130,link_kind:'instagram_profile'})).json();
+ let r=await interact(f,modal('smm:order:'+product.id,{link:'https://x.com/target',quantity:'1000'}));
+ assert.match(r.edit.content,/URLの形式/);
+ r=await interact(f,modal('smm:order:'+product.id,{link:'https://instagram.com/some.user?igsh=abc',quantity:'1000'}));
+ assert.match(r.edit.content,/¥650/);
+ assert.equal((await f.db.prepare('SELECT link FROM smm_orders').first()).link,'https://www.instagram.com/some.user/');
+});
+
+test('legacy: a single-panel install is folded into an X machine without losing data',async()=>{
+ const f=await fixture({skipInit:true});
+ await f.mf.dispatchFetch('https://test/legacy-init');
+ const overview=await (await f.mf.dispatchFetch('https://test/bridge')).json();
+ assert.equal(overview.machines.length,1);
+ const machine=overview.machines[0];
+ assert.equal(machine.sns,'x');assert.equal(machine.panel_title,'Old title');assert.equal(machine.panel_description,'Old description');
+ assert.equal(machine.totalProducts,1);assert.equal(machine.panels.length,1);
+ assert.equal(overview.products[0].machine_id,machine.id);
+ assert.equal(overview.settings.private_log_channel_id,'123456789012345678');
+ assert.equal(overview.settings.min_margin_percent,15);assert.equal(overview.settings.max_open_orders_per_user,7);
+ assert.equal(overview.settings.paused,0);
 });

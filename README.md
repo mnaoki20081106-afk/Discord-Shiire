@@ -837,7 +837,7 @@ Binance出金用APIキー・固定送信元IP確認・Travel Rule JSONは現在�
 
 1. Worker Secret `LUCKYPANEL_API_KEY` を設定(Bot Factoryの入力欄、またはWrangler)。任意で `LUCKYPANEL_API_URL`(https のみ)。
 2. LuckyPanelの残高を円でチャージしておく(チャージは手動です。APIでは行えません)。
-3. Xaccount-Bot管理サイトの **フォロ爆** タブで、サービスから商品を作り、パネルを設置し、受付をONにする。
+3. Xaccount-Bot管理サイトの **フォロ爆** タブで、SNSごとに自販機を作り、サービスから商品を追加し、自販機ごとに設置チャンネルを選んでパネルを設置し、受付をONにする。
 
 初期状態は **受付停止** です。
 
@@ -848,7 +848,9 @@ Binance出金用APIキー・固定送信元IP確認・Travel Rule JSONは現在�
 - 明確な拒否は即失敗+返金対象。残高不足だけは5分間隔で最大12回再試行。
 - 発注直前に最新レートで再計算し、支払額に対して最低利益率を割る場合は発注せず `hold`。
 - 注文受付時に LuckyPanel の残高(JPYのみ)を確認。残高不足・通貨不一致・API障害では注文を受け付けない。
-- 1ユーザーあたりの進行中注文数に上限。商品は同時に25件まで(Discordセレクトの上限)。
+- 1ユーザーあたりの進行中注文数に上限。
+- 自販機はSNS別(X / Instagram / TikTok / YouTube / その他)で、1サーバー20個まで。1つの自販機に公開できる商品は25件まで(Discordセレクトの上限)なので、SNSやジャンルで自販機を分けると実質無制限に並べられる。自販機ごとに別チャンネルへ複数設置できる。
+- URL入力はSNS別に検証・正規化する(例: Instagramの自販機にXのURLを入れても弾く)。
 - 返金はPayPayの手動対応です。`返金待ち` として管理画面とログチャンネルに出ます。一部完了は残数量に比例した金額を算出します。
 - 対応サービスタイプは数量指定の `Default` のみ。コメント・サブスクリプション等のタイプは商品化できません。
 
@@ -857,14 +859,18 @@ Binance出金用APIキー・固定送信元IP確認・Travel Rule JSONは現在�
 `/bridge/main/guilds/:guildId/smm/*`(Shiire署名付き。Xaccount-Botの `/api/guilds/:guildId/shiire/smm/*` から中継)
 
 ```text
-GET    /smm                      概要(残高・設定・商品・集計)
-POST   /smm/settings             設定保存
-GET    /smm/services[?refresh=1] LuckyPanelのサービス一覧
-POST   /smm/products             商品作成
-PATCH  /smm/products/:id         商品更新
-DELETE /smm/products/:id         商品削除
-GET    /smm/orders[?status=]     注文一覧
-POST   /smm/orders/:id/action    retry | link_supplier | cancel_supplier | fail_refund | refund_done
-POST   /smm/panel                パネル設置
-POST   /smm/panel/refresh        設置済みパネル更新
+GET    /smm                         概要(残高・設定・自販機・商品・集計)
+POST   /smm/settings                サーバー共通設定(受付・ログ・安全設定)
+GET    /smm/services[?refresh=1]    LuckyPanelのサービス一覧
+POST   /smm/machines                自販機の追加 {sns,name?}
+PATCH  /smm/machines/:id            パネルの文面・色・画像
+DELETE /smm/machines/:id            自販機の削除(商品が残っていると409)
+POST   /smm/machines/:id/panel      パネル設置 {channelId}
+POST   /smm/machines/:id/panel/refresh        設置済みパネルの更新
+DELETE /smm/machines/:id/panels/:channelId/:messageId  パネルの削除
+POST   /smm/products                商品作成 {machine_id,price_percent,...}
+PATCH  /smm/products/:id            商品更新(machine_idで別の自販機へ移動)
+DELETE /smm/products/:id            商品削除
+GET    /smm/orders[?status=]        注文一覧
+POST   /smm/orders/:id/action       retry | link_supplier | cancel_supplier | fail_refund | refund_done
 ```

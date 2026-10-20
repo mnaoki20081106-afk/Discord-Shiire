@@ -7,16 +7,13 @@ import {
   SMM_PLACING_STALE_MS,
   type SmmLinkKind,
   type SmmOrderStatus,
-  type SmmRefundState
+  type SmmRefundState,
+  type SmmSns
 } from "./smm-policy";
 import { luckyServices, type LuckyService } from "./smm-luckypanel";
 
 export type SmmSettings={
   guild_id:string;
-  panel_title:string;
-  panel_description:string;
-  panel_color:number;
-  panel_image_url:string|null;
   public_log_channel_id:string|null;
   private_log_channel_id:string|null;
   paused:number;
@@ -26,9 +23,24 @@ export type SmmSettings={
   updated_at:number;
 };
 
+export type SmmMachine={
+  id:string;
+  guild_id:string;
+  sns:SmmSns;
+  name:string;
+  panel_title:string;
+  panel_description:string;
+  panel_color:number;
+  panel_image_url:string|null;
+  sort_order:number;
+  created_at:number;
+  updated_at:number;
+};
+
 export type SmmProduct={
   id:string;
   guild_id:string;
+  machine_id:string;
   name:string;
   description:string;
   emoji:string|null;
@@ -86,14 +98,32 @@ export const DEFAULT_SMM_DESCRIPTION=
   "・フォロワー数などは増減する場合があります\n"+
   "・非公開アカウントや誤ったリンクは対応できません";
 
-export const DEFAULT_SMM_COLOR=0x5865f2;
+export const SMM_SNS_LABEL:Record<SmmSns,string>={
+  x:"X(Twitter)",
+  instagram:"Instagram",
+  tiktok:"TikTok",
+  youtube:"YouTube",
+  other:"その他"
+};
+
+export const SMM_SNS_COLOR:Record<SmmSns,number>={
+  x:0x1d9bf0,
+  instagram:0xe1306c,
+  tiktok:0x25f4ee,
+  youtube:0xff0000,
+  other:0x5865f2
+};
+
+export const SMM_MAX_MACHINES_PER_GUILD=20;
 
 const SCHEMA=[
   "CREATE TABLE IF NOT EXISTS smm_meta (key TEXT PRIMARY KEY,value TEXT NOT NULL,updated_at INTEGER NOT NULL)",
-  "CREATE TABLE IF NOT EXISTS smm_settings (guild_id TEXT PRIMARY KEY,panel_title TEXT NOT NULL,panel_description TEXT NOT NULL,panel_color INTEGER NOT NULL,panel_image_url TEXT,public_log_channel_id TEXT,private_log_channel_id TEXT,paused INTEGER NOT NULL DEFAULT 0,min_margin_percent REAL NOT NULL DEFAULT 0,max_open_orders_per_user INTEGER NOT NULL DEFAULT 5,min_supplier_balance_jpy INTEGER NOT NULL DEFAULT 0,updated_at INTEGER NOT NULL)",
-  "CREATE TABLE IF NOT EXISTS smm_products (id TEXT PRIMARY KEY,guild_id TEXT NOT NULL,name TEXT NOT NULL,description TEXT NOT NULL DEFAULT '',emoji TEXT,service_id TEXT NOT NULL,service_name TEXT NOT NULL DEFAULT '',service_category TEXT NOT NULL DEFAULT '',markup_percent REAL NOT NULL DEFAULT 30,fee_jpy INTEGER NOT NULL DEFAULT 0,min_qty INTEGER NOT NULL DEFAULT 1,max_qty INTEGER NOT NULL DEFAULT 0,link_kind TEXT NOT NULL DEFAULT 'url',active INTEGER NOT NULL DEFAULT 1,sales_count INTEGER NOT NULL DEFAULT 0,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL)",
+  "CREATE TABLE IF NOT EXISTS smm_guild_settings (guild_id TEXT PRIMARY KEY,public_log_channel_id TEXT,private_log_channel_id TEXT,paused INTEGER NOT NULL DEFAULT 1,min_margin_percent REAL NOT NULL DEFAULT 0,max_open_orders_per_user INTEGER NOT NULL DEFAULT 5,min_supplier_balance_jpy INTEGER NOT NULL DEFAULT 0,updated_at INTEGER NOT NULL)",
+  "CREATE TABLE IF NOT EXISTS smm_machines (id TEXT PRIMARY KEY,guild_id TEXT NOT NULL,sns TEXT NOT NULL,name TEXT NOT NULL,panel_title TEXT NOT NULL,panel_description TEXT NOT NULL,panel_color INTEGER NOT NULL,panel_image_url TEXT,sort_order INTEGER NOT NULL DEFAULT 0,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL)",
+  "CREATE INDEX IF NOT EXISTS smm_machines_guild_idx ON smm_machines(guild_id,sort_order,created_at)",
+  "CREATE TABLE IF NOT EXISTS smm_products (id TEXT PRIMARY KEY,guild_id TEXT NOT NULL,machine_id TEXT NOT NULL DEFAULT '',name TEXT NOT NULL,description TEXT NOT NULL DEFAULT '',emoji TEXT,service_id TEXT NOT NULL,service_name TEXT NOT NULL DEFAULT '',service_category TEXT NOT NULL DEFAULT '',markup_percent REAL NOT NULL DEFAULT 30,fee_jpy INTEGER NOT NULL DEFAULT 0,min_qty INTEGER NOT NULL DEFAULT 1,max_qty INTEGER NOT NULL DEFAULT 0,link_kind TEXT NOT NULL DEFAULT 'url',active INTEGER NOT NULL DEFAULT 1,sales_count INTEGER NOT NULL DEFAULT 0,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL)",
   "CREATE INDEX IF NOT EXISTS smm_products_guild_idx ON smm_products(guild_id,active)",
-  "CREATE TABLE IF NOT EXISTS smm_panels (guild_id TEXT NOT NULL,channel_id TEXT NOT NULL,message_id TEXT NOT NULL,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL,PRIMARY KEY(guild_id,channel_id,message_id))",
+  "CREATE TABLE IF NOT EXISTS smm_panels (guild_id TEXT NOT NULL,machine_id TEXT NOT NULL DEFAULT '',channel_id TEXT NOT NULL,message_id TEXT NOT NULL,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL,PRIMARY KEY(guild_id,channel_id,message_id))",
   "CREATE TABLE IF NOT EXISTS smm_orders (id TEXT PRIMARY KEY,guild_id TEXT NOT NULL,user_id TEXT NOT NULL,product_id TEXT NOT NULL,product_name TEXT NOT NULL,service_id TEXT NOT NULL,link TEXT NOT NULL,quantity INTEGER NOT NULL,rate_snapshot REAL NOT NULL,total_amount INTEGER NOT NULL,status TEXT NOT NULL,payment_link_ciphertext TEXT,reserved_until INTEGER,supplier_order_id TEXT,supplier_status TEXT,start_count INTEGER,remains INTEGER,supplier_charge REAL,attempts INTEGER NOT NULL DEFAULT 0,next_attempt_at INTEGER,last_error TEXT,refund_state TEXT NOT NULL DEFAULT 'none',refund_amount INTEGER NOT NULL DEFAULT 0,buyer_notified_at INTEGER,notify_attempts INTEGER NOT NULL DEFAULT 0,admin_alerted_at INTEGER,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL,paid_at INTEGER,placed_at INTEGER,finished_at INTEGER)",
   "CREATE INDEX IF NOT EXISTS smm_orders_status_idx ON smm_orders(status,updated_at)",
   "CREATE INDEX IF NOT EXISTS smm_orders_user_idx ON smm_orders(guild_id,user_id,created_at DESC)",
@@ -102,9 +132,68 @@ const SCHEMA=[
 
 let ready=false;
 
+async function columnNames(env:Env,table:string){
+  return (await env.DB.prepare("PRAGMA table_info("+table+")").all<{name:string}>()).results.map(row=>row.name);
+}
+
+export function defaultMachineTexts(sns:SmmSns){
+  const label=SMM_SNS_LABEL[sns];
+  return {
+    name:label,
+    panel_title:(sns==="other"?"フォロ爆":label+" フォロ爆")+" 自販機",
+    panel_description:DEFAULT_SMM_DESCRIPTION,
+    panel_color:SMM_SNS_COLOR[sns]
+  };
+}
+
+// Earlier builds had one guild-wide panel. Fold that data into an "X" machine.
+async function migrateLegacy(env:Env){
+  const legacy=await env.DB.prepare(
+    "SELECT name FROM sqlite_master WHERE type='table' AND name='smm_settings'"
+  ).first();
+  let legacyRows:Array<Record<string,unknown>>=[];
+  if(legacy){
+    await env.DB.prepare(
+      "INSERT OR IGNORE INTO smm_guild_settings(guild_id,public_log_channel_id,private_log_channel_id,paused,min_margin_percent,max_open_orders_per_user,min_supplier_balance_jpy,updated_at) "+
+      "SELECT guild_id,public_log_channel_id,private_log_channel_id,paused,min_margin_percent,max_open_orders_per_user,min_supplier_balance_jpy,updated_at FROM smm_settings"
+    ).run();
+    legacyRows=(await env.DB.prepare("SELECT * FROM smm_settings").all<Record<string,unknown>>()).results;
+  }
+  const guilds=(await env.DB.prepare(
+    "SELECT guild_id FROM smm_products WHERE machine_id='' UNION SELECT guild_id FROM smm_panels WHERE machine_id=''"
+  ).all<{guild_id:string}>()).results;
+  for(const {guild_id} of guilds){
+    const old=legacyRows.find(row=>row.guild_id===guild_id);
+    const defaults=defaultMachineTexts("x");
+    const now=Date.now();
+    const id=randomId("smmm");
+    await env.DB.prepare(
+      "INSERT INTO smm_machines(id,guild_id,sns,name,panel_title,panel_description,panel_color,panel_image_url,sort_order,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,0,?,?)"
+    ).bind(
+      id,guild_id,"x",defaults.name,
+      String(old?.panel_title??defaults.panel_title),
+      String(old?.panel_description??defaults.panel_description),
+      Number(old?.panel_color??defaults.panel_color),
+      (old?.panel_image_url as string|null|undefined)??null,
+      now,now
+    ).run();
+    await env.DB.prepare("UPDATE smm_products SET machine_id=? WHERE guild_id=? AND machine_id=''").bind(id,guild_id).run();
+    await env.DB.prepare("UPDATE smm_panels SET machine_id=? WHERE guild_id=? AND machine_id=''").bind(id,guild_id).run();
+  }
+}
+
 export async function ensureSmmSchema(env:Env){
   if(ready) return;
   for(const sql of SCHEMA) await env.DB.prepare(sql).run();
+  if(!(await columnNames(env,"smm_products")).includes("machine_id")){
+    await env.DB.prepare("ALTER TABLE smm_products ADD COLUMN machine_id TEXT NOT NULL DEFAULT ''").run();
+  }
+  if(!(await columnNames(env,"smm_panels")).includes("machine_id")){
+    await env.DB.prepare("ALTER TABLE smm_panels ADD COLUMN machine_id TEXT NOT NULL DEFAULT ''").run();
+  }
+  await env.DB.prepare("CREATE INDEX IF NOT EXISTS smm_products_machine_idx ON smm_products(machine_id,active)").run();
+  await env.DB.prepare("CREATE INDEX IF NOT EXISTS smm_panels_machine_idx ON smm_panels(machine_id)").run();
+  await migrateLegacy(env);
   ready=true;
 }
 
@@ -161,15 +250,11 @@ export async function loadSmmServices(
 export async function getSmmSettings(env:Env,guildId:string):Promise<SmmSettings>{
   await ensureSmmSchema(env);
   const row=await env.DB.prepare(
-    "SELECT * FROM smm_settings WHERE guild_id=?"
+    "SELECT * FROM smm_guild_settings WHERE guild_id=?"
   ).bind(guildId).first<SmmSettings>();
   if(row) return row;
   return {
     guild_id:guildId,
-    panel_title:"フォロ爆 自販機",
-    panel_description:DEFAULT_SMM_DESCRIPTION,
-    panel_color:DEFAULT_SMM_COLOR,
-    panel_image_url:null,
     public_log_channel_id:null,
     private_log_channel_id:null,
     paused:1,
@@ -188,12 +273,11 @@ export async function saveSmmSettings(
   const current=await getSmmSettings(env,guildId);
   const next:SmmSettings={...current,...patch,guild_id:guildId,updated_at:Date.now()};
   await env.DB.prepare(
-    "INSERT INTO smm_settings(guild_id,panel_title,panel_description,panel_color,panel_image_url,public_log_channel_id,private_log_channel_id,paused,min_margin_percent,max_open_orders_per_user,min_supplier_balance_jpy,updated_at) "+
-    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?) "+
-    "ON CONFLICT(guild_id) DO UPDATE SET panel_title=excluded.panel_title,panel_description=excluded.panel_description,panel_color=excluded.panel_color,panel_image_url=excluded.panel_image_url,public_log_channel_id=excluded.public_log_channel_id,private_log_channel_id=excluded.private_log_channel_id,paused=excluded.paused,min_margin_percent=excluded.min_margin_percent,max_open_orders_per_user=excluded.max_open_orders_per_user,min_supplier_balance_jpy=excluded.min_supplier_balance_jpy,updated_at=excluded.updated_at"
+    "INSERT INTO smm_guild_settings(guild_id,public_log_channel_id,private_log_channel_id,paused,min_margin_percent,max_open_orders_per_user,min_supplier_balance_jpy,updated_at) "+
+    "VALUES (?,?,?,?,?,?,?,?) "+
+    "ON CONFLICT(guild_id) DO UPDATE SET public_log_channel_id=excluded.public_log_channel_id,private_log_channel_id=excluded.private_log_channel_id,paused=excluded.paused,min_margin_percent=excluded.min_margin_percent,max_open_orders_per_user=excluded.max_open_orders_per_user,min_supplier_balance_jpy=excluded.min_supplier_balance_jpy,updated_at=excluded.updated_at"
   ).bind(
-    next.guild_id,next.panel_title,next.panel_description,next.panel_color,
-    next.panel_image_url,next.public_log_channel_id,next.private_log_channel_id,
+    next.guild_id,next.public_log_channel_id,next.private_log_channel_id,
     next.paused,next.min_margin_percent,next.max_open_orders_per_user,
     next.min_supplier_balance_jpy,next.updated_at
   ).run();
@@ -203,17 +287,94 @@ export async function saveSmmSettings(
 export async function listSmmGuildIds(env:Env):Promise<string[]>{
   await ensureSmmSchema(env);
   return (await env.DB.prepare(
-    "SELECT guild_id FROM smm_settings"
+    "SELECT guild_id FROM smm_guild_settings"
   ).all<{guild_id:string}>()).results.map(row=>row.guild_id);
+}
+
+/* ---------------- machines (one panel family per SNS) ---------------- */
+
+export async function listSmmMachines(env:Env,guildId:string){
+  await ensureSmmSchema(env);
+  return (await env.DB.prepare(
+    "SELECT * FROM smm_machines WHERE guild_id=? ORDER BY sort_order ASC,created_at ASC"
+  ).bind(guildId).all<SmmMachine>()).results;
+}
+
+export async function getSmmMachine(env:Env,id:string){
+  await ensureSmmSchema(env);
+  return await env.DB.prepare(
+    "SELECT * FROM smm_machines WHERE id=?"
+  ).bind(id).first<SmmMachine>()??null;
+}
+
+export type SmmMachineInput={
+  sns:SmmSns;
+  name:string;
+  panel_title:string;
+  panel_description:string;
+  panel_color:number;
+  panel_image_url:string|null;
+};
+
+export async function createSmmMachine(env:Env,guildId:string,input:SmmMachineInput){
+  await ensureSmmSchema(env);
+  const count=await env.DB.prepare(
+    "SELECT COUNT(*) AS n FROM smm_machines WHERE guild_id=?"
+  ).bind(guildId).first<{n:number}>();
+  if(Number(count?.n??0)>=SMM_MAX_MACHINES_PER_GUILD) throw new Error("TOO_MANY_MACHINES");
+  const now=Date.now();
+  const id=randomId("smmm");
+  await env.DB.prepare(
+    "INSERT INTO smm_machines(id,guild_id,sns,name,panel_title,panel_description,panel_color,panel_image_url,sort_order,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)"
+  ).bind(
+    id,guildId,input.sns,input.name,input.panel_title,input.panel_description,
+    input.panel_color,input.panel_image_url,Number(count?.n??0),now,now
+  ).run();
+  return (await getSmmMachine(env,id))!;
+}
+
+export async function updateSmmMachine(
+  env:Env,
+  id:string,
+  patch:Partial<Omit<SmmMachineInput,"sns">>
+){
+  const current=await getSmmMachine(env,id);
+  if(!current) return null;
+  const next={...current,...patch};
+  await env.DB.prepare(
+    "UPDATE smm_machines SET name=?,panel_title=?,panel_description=?,panel_color=?,panel_image_url=?,updated_at=? WHERE id=?"
+  ).bind(
+    next.name,next.panel_title,next.panel_description,next.panel_color,
+    next.panel_image_url,Date.now(),id
+  ).run();
+  return getSmmMachine(env,id);
+}
+
+export async function deleteSmmMachine(env:Env,id:string){
+  await ensureSmmSchema(env);
+  const products=await env.DB.prepare(
+    "SELECT COUNT(*) AS n FROM smm_products WHERE machine_id=?"
+  ).bind(id).first<{n:number}>();
+  if(Number(products?.n??0)>0) throw new Error("MACHINE_HAS_PRODUCTS");
+  await env.DB.prepare("DELETE FROM smm_panels WHERE machine_id=?").bind(id).run();
+  await env.DB.prepare("DELETE FROM smm_machines WHERE id=?").bind(id).run();
 }
 
 /* ---------------- products ---------------- */
 
-export async function listSmmProducts(env:Env,guildId:string,activeOnly=false){
+export async function listSmmProducts(
+  env:Env,
+  guildId:string,
+  options:{machineId?:string;activeOnly?:boolean}={}
+){
   await ensureSmmSchema(env);
+  const where=["guild_id=?"];
+  const binds:unknown[]=[guildId];
+  if(options.machineId){where.push("machine_id=?");binds.push(options.machineId);}
+  if(options.activeOnly) where.push("active=1");
   return (await env.DB.prepare(
-    "SELECT * FROM smm_products WHERE guild_id=?"+(activeOnly?" AND active=1":"")+" ORDER BY created_at ASC"
-  ).bind(guildId).all<SmmProduct>()).results;
+    "SELECT * FROM smm_products WHERE "+where.join(" AND ")+" ORDER BY created_at ASC"
+  ).bind(...binds).all<SmmProduct>()).results;
 }
 
 export async function getSmmProduct(env:Env,id:string){
@@ -223,14 +384,15 @@ export async function getSmmProduct(env:Env,id:string){
   ).bind(id).first<SmmProduct>()??null;
 }
 
-async function activeProductCount(env:Env,guildId:string,exceptId?:string){
+async function activeProductCount(env:Env,machineId:string,exceptId?:string){
   const row=await env.DB.prepare(
-    "SELECT COUNT(*) AS n FROM smm_products WHERE guild_id=? AND active=1"+(exceptId?" AND id<>?":"")
-  ).bind(...(exceptId?[guildId,exceptId]:[guildId])).first<{n:number}>();
+    "SELECT COUNT(*) AS n FROM smm_products WHERE machine_id=? AND active=1"+(exceptId?" AND id<>?":"")
+  ).bind(...(exceptId?[machineId,exceptId]:[machineId])).first<{n:number}>();
   return Number(row?.n??0);
 }
 
 export type SmmProductInput={
+  machine_id:string;
   name:string;
   description:string;
   emoji:string|null;
@@ -247,15 +409,15 @@ export type SmmProductInput={
 
 export async function createSmmProduct(env:Env,guildId:string,input:SmmProductInput){
   await ensureSmmSchema(env);
-  if(input.active&&await activeProductCount(env,guildId)>=SMM_PANEL_PRODUCT_LIMIT){
+  if(input.active&&await activeProductCount(env,input.machine_id)>=SMM_PANEL_PRODUCT_LIMIT){
     throw new Error("TOO_MANY_ACTIVE_PRODUCTS");
   }
   const now=Date.now();
   const id=randomId("smmp");
   await env.DB.prepare(
-    "INSERT INTO smm_products(id,guild_id,name,description,emoji,service_id,service_name,service_category,markup_percent,fee_jpy,min_qty,max_qty,link_kind,active,sales_count,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,?,?)"
+    "INSERT INTO smm_products(id,guild_id,machine_id,name,description,emoji,service_id,service_name,service_category,markup_percent,fee_jpy,min_qty,max_qty,link_kind,active,sales_count,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,?,?)"
   ).bind(
-    id,guildId,input.name,input.description,input.emoji,input.service_id,
+    id,guildId,input.machine_id,input.name,input.description,input.emoji,input.service_id,
     input.service_name,input.service_category,input.markup_percent,input.fee_jpy,
     input.min_qty,input.max_qty,input.link_kind,input.active?1:0,now,now
   ).run();
@@ -270,13 +432,14 @@ export async function updateSmmProduct(
   const current=await getSmmProduct(env,id);
   if(!current) return null;
   const next={...current,...patch,active:patch.active===undefined?current.active:(patch.active?1:0)};
-  if(next.active===1&&current.active===0&&await activeProductCount(env,current.guild_id,id)>=SMM_PANEL_PRODUCT_LIMIT){
+  const activating=next.active===1&&(current.active===0||next.machine_id!==current.machine_id);
+  if(activating&&await activeProductCount(env,next.machine_id,id)>=SMM_PANEL_PRODUCT_LIMIT){
     throw new Error("TOO_MANY_ACTIVE_PRODUCTS");
   }
   await env.DB.prepare(
-    "UPDATE smm_products SET name=?,description=?,emoji=?,service_id=?,service_name=?,service_category=?,markup_percent=?,fee_jpy=?,min_qty=?,max_qty=?,link_kind=?,active=?,updated_at=? WHERE id=?"
+    "UPDATE smm_products SET machine_id=?,name=?,description=?,emoji=?,service_id=?,service_name=?,service_category=?,markup_percent=?,fee_jpy=?,min_qty=?,max_qty=?,link_kind=?,active=?,updated_at=? WHERE id=?"
   ).bind(
-    next.name,next.description,next.emoji,next.service_id,next.service_name,
+    next.machine_id,next.name,next.description,next.emoji,next.service_id,next.service_name,
     next.service_category,next.markup_percent,next.fee_jpy,next.min_qty,next.max_qty,
     next.link_kind,next.active,Date.now(),id
   ).run();
@@ -290,20 +453,31 @@ export async function deleteSmmProduct(env:Env,id:string){
 
 /* ---------------- panels ---------------- */
 
-export async function saveSmmPanel(env:Env,guildId:string,channelId:string,messageId:string){
+export type SmmPanelRow={
+  guild_id:string;machine_id:string;channel_id:string;message_id:string;
+  created_at:number;updated_at:number;
+};
+
+export async function saveSmmPanel(
+  env:Env,
+  guildId:string,
+  machineId:string,
+  channelId:string,
+  messageId:string
+){
   await ensureSmmSchema(env);
   const now=Date.now();
   await env.DB.prepare(
-    "INSERT INTO smm_panels(guild_id,channel_id,message_id,created_at,updated_at) VALUES (?,?,?,?,?) "+
-    "ON CONFLICT(guild_id,channel_id,message_id) DO UPDATE SET updated_at=excluded.updated_at"
-  ).bind(guildId,channelId,messageId,now,now).run();
+    "INSERT INTO smm_panels(guild_id,machine_id,channel_id,message_id,created_at,updated_at) VALUES (?,?,?,?,?,?) "+
+    "ON CONFLICT(guild_id,channel_id,message_id) DO UPDATE SET machine_id=excluded.machine_id,updated_at=excluded.updated_at"
+  ).bind(guildId,machineId,channelId,messageId,now,now).run();
 }
 
-export async function listSmmPanels(env:Env,guildId:string){
+export async function listSmmPanels(env:Env,machineId:string){
   await ensureSmmSchema(env);
   return (await env.DB.prepare(
-    "SELECT * FROM smm_panels WHERE guild_id=? ORDER BY created_at DESC"
-  ).bind(guildId).all<{guild_id:string;channel_id:string;message_id:string;created_at:number;updated_at:number}>()).results;
+    "SELECT * FROM smm_panels WHERE machine_id=? ORDER BY created_at DESC"
+  ).bind(machineId).all<SmmPanelRow>()).results;
 }
 
 export async function deleteSmmPanelRecord(env:Env,guildId:string,channelId:string,messageId:string){

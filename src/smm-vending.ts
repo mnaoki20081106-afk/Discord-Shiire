@@ -6,6 +6,7 @@ import {
   countOpenSmmOrders,
   createSmmOrder,
   ensureSmmSchema,
+  getSmmMachine,
   getSmmOrder,
   getSmmProduct,
   getSmmSettings,
@@ -15,6 +16,7 @@ import {
   type SmmProduct
 } from "./smm-db";
 import {
+  SMM_LINK_LABEL,
   SmmError,
   smmEphemeral,
   smmOrderLines,
@@ -34,17 +36,10 @@ import {
   smmCost,
   smmQuantityBounds,
   smmQuote,
-  smmQuoteIsProfitable,
-  type SmmLinkKind
+  smmQuoteIsProfitable
 } from "./smm-policy";
 
 const MAX_STALE_PRICE_AGE_MS=60*60_000;
-
-const LINK_LABEL:Record<SmmLinkKind,{label:string;placeholder:string}>={
-  x_profile:{label:"XアカウントのURL",placeholder:"https://x.com/ユーザー名"},
-  x_post:{label:"XポストのURL",placeholder:"https://x.com/ユーザー名/status/123..."},
-  url:{label:"対象のURL",placeholder:"https://..."}
-};
 
 function interactionResponse(payload:unknown){
   return new Response(JSON.stringify(payload),{
@@ -123,7 +118,7 @@ async function createOrderFromInput(
   const link=normalizeSmmLink(product.link_kind,fieldValue(interaction,"link"));
   if(!link){
     throw new SmmError(400,
-      "URLの形式が正しくありません。"+LINK_LABEL[product.link_kind].placeholder+" の形式で入力してください。"
+      "URLの形式が正しくありません。"+SMM_LINK_LABEL[product.link_kind].placeholder+" の形式で入力してください。"
     );
   }
 
@@ -205,12 +200,15 @@ export async function handleSmmInteraction(
 
   if(interaction.type===3){
     if(id.startsWith("smm:buy:")){
-      const guildId=id.slice(8);
-      const settings=await getSmmSettings(env,guildId);
+      const machine=await getSmmMachine(env,id.slice(8));
+      if(!machine||String(interaction.guild_id??"")!==machine.guild_id){
+        return interactionResponse(smmEphemeral("この自販機は利用できません。"));
+      }
+      const settings=await getSmmSettings(env,machine.guild_id);
       if(settings.paused){
         return interactionResponse(smmEphemeral("現在、注文の受付を停止しています。"));
       }
-      const products=await listSmmProducts(env,guildId,true);
+      const products=await listSmmProducts(env,machine.guild_id,{machineId:machine.id,activeOnly:true});
       if(!products.length){
         return interactionResponse(smmEphemeral("現在購入できる商品がありません。"));
       }
@@ -220,7 +218,7 @@ export async function handleSmmInteraction(
         "購入する商品を選択してください。",
         [{type:1,components:[{
           type:3,
-          custom_id:"smm:pick:"+guildId,
+          custom_id:"smm:pick:"+machine.id,
           placeholder:"商品を選択",
           options:products.slice(0,25).map(product=>({
             label:product.name.slice(0,100),
@@ -234,10 +232,10 @@ export async function handleSmmInteraction(
 
     if(id.startsWith("smm:pick:")){
       const product=await getSmmProduct(env,String(interaction.data?.values?.[0]??""));
-      if(!product||!product.active){
+      if(!product||!product.active||product.machine_id!==id.slice(9)){
         return interactionResponse(smmEphemeral("この商品は現在購入できません。"));
       }
-      const meta=LINK_LABEL[product.link_kind];
+      const meta=SMM_LINK_LABEL[product.link_kind];
       return interactionResponse({
         type:9,
         data:{
@@ -258,8 +256,11 @@ export async function handleSmmInteraction(
     }
 
     if(id.startsWith("smm:status:")){
-      const guildId=id.slice(11);
-      const orders=await listSmmOrders(env,guildId,{userId:userId(interaction),limit:5});
+      const machine=await getSmmMachine(env,id.slice(11));
+      if(!machine||String(interaction.guild_id??"")!==machine.guild_id){
+        return interactionResponse(smmEphemeral("この自販機は利用できません。"));
+      }
+      const orders=await listSmmOrders(env,machine.guild_id,{userId:userId(interaction),limit:5});
       if(!orders.length) return interactionResponse(smmEphemeral("注文履歴はまだありません。"));
       return interactionResponse(smmEphemeral("",undefined,[{
         title:"あなたの直近の注文",

@@ -2,20 +2,28 @@ import type { Env } from "./types";
 import { getMainPaymentStatus } from "./main-bot";
 import { luckyBalance, luckyPanelConfigured, type LuckyService } from "./smm-luckypanel";
 import {
+  SMM_SNS_LABEL,
+  createSmmMachine,
   createSmmProduct,
+  defaultMachineTexts,
+  deleteSmmMachine,
   deleteSmmPanelRecord,
   deleteSmmProduct,
   ensureSmmSchema,
+  getSmmMachine,
   getSmmOrder,
   getSmmProduct,
   getSmmSettings,
+  listSmmMachines,
   listSmmOrders,
   listSmmPanels,
   listSmmProducts,
   saveSmmPanel,
   saveSmmSettings,
   smmOrderSummary,
+  updateSmmMachine,
   updateSmmProduct,
+  type SmmMachine,
   type SmmOrder,
   type SmmProduct,
   type SmmProductInput,
@@ -24,6 +32,7 @@ import {
 import {
   SmmError,
   productPer1000,
+  smmDiscordFetch,
   smmDiscordJson,
   smmPanelPayload,
   smmRequireChannelInGuild,
@@ -35,8 +44,10 @@ import {
   type SmmAdminAction
 } from "./smm-orders";
 import {
-  SMM_LINK_KINDS,
+  SMM_LINK_KINDS_BY_SNS,
   SMM_PANEL_PRODUCT_LIMIT,
+  SMM_SNS,
+  isSmmSns,
   isSupportedSmmServiceType,
   isJpyCurrency,
   smmQuantityBounds,
@@ -117,13 +128,13 @@ async function cachedServices(env:Env):Promise<{map:Map<string,LuckyService>;cac
   }
 }
 
-async function refreshPanels(env:Env,guildId:string):Promise<boolean>{
-  const panels=await listSmmPanels(env,guildId);
+async function refreshMachinePanels(env:Env,machine:SmmMachine):Promise<boolean>{
+  const panels=await listSmmPanels(env,machine.id);
   if(!panels.length) return true;
-  const settings=await getSmmSettings(env,guildId);
-  const products=await listSmmProducts(env,guildId,true);
+  const settings=await getSmmSettings(env,machine.guild_id);
+  const products=await listSmmProducts(env,machine.guild_id,{machineId:machine.id,activeOnly:true});
   const services=(await cachedServices(env))?.map??new Map<string,LuckyService>();
-  const payload=smmPanelPayload(settings,products,services,guildId);
+  const payload=smmPanelPayload(settings,machine,products,services);
   let ok=true;
   for(const panel of panels){
     try{
@@ -134,11 +145,28 @@ async function refreshPanels(env:Env,guildId:string):Promise<boolean>{
       );
     }catch(error){
       ok=false;
-      console.error("smm panel refresh failed",guildId,panel,error);
+      console.error("smm panel refresh failed",machine.id,panel,error);
       if(error instanceof SmmError&&error.message.startsWith("DISCORD_404")){
-        await deleteSmmPanelRecord(env,guildId,panel.channel_id,panel.message_id).catch(()=>undefined);
+        await deleteSmmPanelRecord(env,machine.guild_id,panel.channel_id,panel.message_id).catch(()=>undefined);
       }
     }
+  }
+  return ok;
+}
+
+async function refreshGuildPanels(env:Env,guildId:string):Promise<boolean>{
+  let ok=true;
+  for(const machine of await listSmmMachines(env,guildId)){
+    if(!(await refreshMachinePanels(env,machine))) ok=false;
+  }
+  return ok;
+}
+
+async function refreshProductPanels(env:Env,machineIds:string[]):Promise<boolean>{
+  let ok=true;
+  for(const id of new Set(machineIds)){
+    const machine=await getSmmMachine(env,id);
+    if(machine&&!(await refreshMachinePanels(env,machine))) ok=false;
   }
   return ok;
 }
@@ -178,10 +206,15 @@ async function parseProductInput(
     if(!Number.isFinite(service.rate)) throw new SmmError(400,"SERVICE_RATE_INVALID");
   }
 
+  const machineId=text(pick("machine_id"),"machine_id",64,{required:true});
+  const machine=await getSmmMachine(env,machineId);
+  if(!machine||machine.guild_id!==guildId) throw new SmmError(400,"MACHINE_NOT_FOUND");
+
   const linkKind=String(pick("link_kind")??"url") as SmmLinkKind;
-  if(!SMM_LINK_KINDS.includes(linkKind)) throw new SmmError(400,"LINK_KIND_INVALID");
+  if(!SMM_LINK_KINDS_BY_SNS[machine.sns].includes(linkKind)) throw new SmmError(400,"LINK_KIND_INVALID");
 
   const input:SmmProductInput={
+    machine_id:machine.id,
     name:text(pick("name")||service?.name,"name",80,{required:true}),
     description:text(pick("description")??"","description",200),
     emoji:text(pick("emoji")??"","emoji",16)||null,
@@ -216,18 +249,6 @@ async function parseSettingsPatch(
   body:Record<string,unknown>
 ):Promise<Partial<Omit<SmmSettings,"guild_id"|"updated_at">>>{
   const patch:Partial<Omit<SmmSettings,"guild_id"|"updated_at">>={};
-  if(body.panel_title!==undefined) patch.panel_title=text(body.panel_title,"panel_title",80,{required:true});
-  if(body.panel_description!==undefined) patch.panel_description=text(body.panel_description,"panel_description",1500);
-  if(body.panel_color!==undefined) patch.panel_color=number(body.panel_color,"panel_color",0,0xffffff,true);
-  if(body.panel_image_url!==undefined){
-    const url=text(body.panel_image_url,"panel_image_url",500);
-    if(url){
-      let parsed:URL;
-      try{parsed=new URL(url);}catch{throw new SmmError(400,"PANEL_IMAGE_URL_INVALID");}
-      if(parsed.protocol!=="https:") throw new SmmError(400,"PANEL_IMAGE_URL_MUST_BE_HTTPS");
-    }
-    patch.panel_image_url=url||null;
-  }
   for(const key of ["public_log_channel_id","private_log_channel_id"] as const){
     if(body[key]===undefined) continue;
     const id=text(body[key],key,25);
@@ -244,6 +265,25 @@ async function parseSettingsPatch(
   return patch;
 }
 
+function parseImageUrl(value:unknown):string|null{
+  const url=text(value,"panel_image_url",500);
+  if(!url) return null;
+  let parsed:URL;
+  try{parsed=new URL(url);}catch{throw new SmmError(400,"PANEL_IMAGE_URL_INVALID");}
+  if(parsed.protocol!=="https:") throw new SmmError(400,"PANEL_IMAGE_URL_MUST_BE_HTTPS");
+  return url;
+}
+
+function machinePatch(body:Record<string,unknown>){
+  const patch:{name?:string;panel_title?:string;panel_description?:string;panel_color?:number;panel_image_url?:string|null}={};
+  if(body.name!==undefined) patch.name=text(body.name,"name",40,{required:true});
+  if(body.panel_title!==undefined) patch.panel_title=text(body.panel_title,"panel_title",80,{required:true});
+  if(body.panel_description!==undefined) patch.panel_description=text(body.panel_description,"panel_description",1500);
+  if(body.panel_color!==undefined) patch.panel_color=number(body.panel_color,"panel_color",0,0xffffff,true);
+  if(body.panel_image_url!==undefined) patch.panel_image_url=parseImageUrl(body.panel_image_url);
+  return patch;
+}
+
 export async function handleSmmBridge(
   env:Env,
   method:string,
@@ -257,10 +297,10 @@ export async function handleSmmBridge(
 
     if(suffix===""&&method==="GET"){
       const cached=await cachedServices(env);
-      const [settings,products,panels,summary,payment]=await Promise.all([
+      const [settings,products,machines,summary,payment]=await Promise.all([
         getSmmSettings(env,guildId),
         listSmmProducts(env,guildId),
-        listSmmPanels(env,guildId),
+        listSmmMachines(env,guildId),
         smmOrderSummary(env,guildId),
         getMainPaymentStatus(env).catch(()=>({paypay:false,kyash:false}))
       ]);
@@ -286,7 +326,15 @@ export async function handleSmmBridge(
         payment,
         settings,
         products:await enrichProducts(env,products,cached?.map??null),
-        panels,
+        machines:await Promise.all(machines.map(async machine=>({
+          ...machine,
+          snsLabel:SMM_SNS_LABEL[machine.sns],
+          linkKinds:SMM_LINK_KINDS_BY_SNS[machine.sns],
+          panels:await listSmmPanels(env,machine.id),
+          activeProducts:products.filter(p=>p.machine_id===machine.id&&p.active===1).length,
+          totalProducts:products.filter(p=>p.machine_id===machine.id).length
+        }))),
+        snsOptions:SMM_SNS.map(id=>({id,label:SMM_SNS_LABEL[id]})),
         summary,
         servicesCachedAt:cached?.cachedAt??null,
         limits:{panelProductLimit:SMM_PANEL_PRODUCT_LIMIT}
@@ -296,7 +344,7 @@ export async function handleSmmBridge(
     if(suffix==="/settings"&&method==="POST"){
       const patch=await parseSettingsPatch(env,guildId,parseBody(rawBody));
       const settings=await saveSmmSettings(env,guildId,patch);
-      const panelsRefreshed=await refreshPanels(env,guildId);
+      const panelsRefreshed=await refreshGuildPanels(env,guildId);
       return responseJson({ok:true,settings,panelsRefreshed});
     }
 
@@ -329,7 +377,7 @@ export async function handleSmmBridge(
         }
         throw error;
       }
-      return responseJson({ok:true,product,panelsRefreshed:await refreshPanels(env,guildId)});
+      return responseJson({ok:true,product,panelsRefreshed:await refreshProductPanels(env,[input.machine_id])});
     }
 
     const productMatch=suffix.match(/^\/products\/([^/]+)$/);
@@ -347,11 +395,11 @@ export async function handleSmmBridge(
           }
           throw error;
         }
-        return responseJson({ok:true,product,panelsRefreshed:await refreshPanels(env,guildId)});
+        return responseJson({ok:true,product,panelsRefreshed:await refreshProductPanels(env,[current.machine_id,input.machine_id])});
       }
       if(method==="DELETE"){
         await deleteSmmProduct(env,current.id);
-        return responseJson({ok:true,panelsRefreshed:await refreshPanels(env,guildId)});
+        return responseJson({ok:true,panelsRefreshed:await refreshProductPanels(env,[current.machine_id])});
       }
     }
 
@@ -383,22 +431,81 @@ export async function handleSmmBridge(
       );
     }
 
-    if(suffix==="/panel"&&method==="POST"){
+    if(suffix==="/machines"&&method==="POST"){
       const body=parseBody(rawBody);
-      const channelId=text(body.channelId,"channel_id",25,{required:true});
-      await smmRequireChannelInGuild(env,guildId,channelId);
-      const settings=await getSmmSettings(env,guildId);
-      const products=await listSmmProducts(env,guildId,true);
-      const services=(await cachedServices(env))?.map??new Map<string,LuckyService>();
-      const message=await smmSendMessage(
-        env,channelId,smmPanelPayload(settings,products,services,guildId)
-      );
-      await saveSmmPanel(env,guildId,channelId,message.id);
-      return responseJson({ok:true,messageId:message.id});
+      const sns=String(body.sns??"");
+      if(!isSmmSns(sns)) throw new SmmError(400,"SNS_INVALID");
+      const defaults=defaultMachineTexts(sns);
+      const patch=machinePatch(body);
+      let machine:SmmMachine;
+      try{
+        machine=await createSmmMachine(env,guildId,{
+          sns,
+          name:patch.name??defaults.name,
+          panel_title:patch.panel_title??defaults.panel_title,
+          panel_description:patch.panel_description??defaults.panel_description,
+          panel_color:patch.panel_color??defaults.panel_color,
+          panel_image_url:patch.panel_image_url??null
+        });
+      }catch(error){
+        if(error instanceof Error&&error.message==="TOO_MANY_MACHINES") throw new SmmError(409,"TOO_MANY_MACHINES");
+        throw error;
+      }
+      return responseJson({ok:true,machine});
     }
 
-    if(suffix==="/panel/refresh"&&method==="POST"){
-      return responseJson({ok:true,panelsRefreshed:await refreshPanels(env,guildId)});
+    const machineMatch=suffix.match(/^\/machines\/([^/]+)(\/panel(?:\/refresh)?)?$/);
+    if(machineMatch){
+      const machine=await getSmmMachine(env,machineMatch[1]!);
+      if(!machine||machine.guild_id!==guildId) throw new SmmError(404,"MACHINE_NOT_FOUND");
+      const sub=machineMatch[2]??"";
+
+      if(sub===""&&method==="PATCH"){
+        const updated=await updateSmmMachine(env,machine.id,machinePatch(parseBody(rawBody)));
+        return responseJson({ok:true,machine:updated,panelsRefreshed:await refreshMachinePanels(env,updated!)});
+      }
+
+      if(sub===""&&method==="DELETE"){
+        try{
+          await deleteSmmMachine(env,machine.id);
+        }catch(error){
+          if(error instanceof Error&&error.message==="MACHINE_HAS_PRODUCTS") throw new SmmError(409,"MACHINE_HAS_PRODUCTS");
+          throw error;
+        }
+        return responseJson({ok:true});
+      }
+
+      if(sub==="/panel"&&method==="POST"){
+        const body=parseBody(rawBody);
+        const channelId=text(body.channelId,"channel_id",25,{required:true});
+        await smmRequireChannelInGuild(env,guildId,channelId);
+        const settings=await getSmmSettings(env,guildId);
+        const products=await listSmmProducts(env,guildId,{machineId:machine.id,activeOnly:true});
+        const services=(await cachedServices(env))?.map??new Map<string,LuckyService>();
+        const message=await smmSendMessage(
+          env,channelId,smmPanelPayload(settings,machine,products,services)
+        );
+        await saveSmmPanel(env,guildId,machine.id,channelId,message.id);
+        return responseJson({ok:true,messageId:message.id});
+      }
+
+      if(sub==="/panel/refresh"&&method==="POST"){
+        return responseJson({ok:true,panelsRefreshed:await refreshMachinePanels(env,machine)});
+      }
+    }
+
+    const panelRemove=suffix.match(/^\/machines\/([^/]+)\/panels\/(\d+)\/(\d+)$/);
+    if(panelRemove&&method==="DELETE"){
+      const machine=await getSmmMachine(env,panelRemove[1]!);
+      if(!machine||machine.guild_id!==guildId) throw new SmmError(404,"MACHINE_NOT_FOUND");
+      const [,,channelId,messageId]=panelRemove;
+      const known=(await listSmmPanels(env,machine.id)).some(
+        panel=>panel.channel_id===channelId&&panel.message_id===messageId
+      );
+      if(!known) throw new SmmError(404,"PANEL_NOT_FOUND");
+      await smmDiscordFetch(env,"/channels/"+channelId+"/messages/"+messageId,{method:"DELETE"}).catch(()=>undefined);
+      await deleteSmmPanelRecord(env,guildId,channelId!,messageId!);
+      return responseJson({ok:true});
     }
 
     throw new SmmError(404,"NOT_FOUND");

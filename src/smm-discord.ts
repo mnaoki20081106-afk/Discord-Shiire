@@ -1,7 +1,8 @@
 import type { Env } from "./types";
-import type { SmmOrder, SmmProduct, SmmSettings } from "./smm-db";
+import type { SmmMachine, SmmOrder, SmmProduct, SmmSettings } from "./smm-db";
 import type { LuckyService } from "./smm-luckypanel";
 import {
+  type SmmLinkKind,
   maskSmmLink,
   smmQuantityBounds,
   smmQuote,
@@ -101,11 +102,23 @@ export function productPer1000(product:SmmProduct,rate:number|null):string{
   return yen(smmQuote(rate,1000,product));
 }
 
+export const SMM_LINK_LABEL:Record<SmmLinkKind,{label:string;placeholder:string}>={
+  x_profile:{label:"XアカウントのURL",placeholder:"https://x.com/ユーザー名"},
+  x_post:{label:"XポストのURL",placeholder:"https://x.com/ユーザー名/status/123..."},
+  instagram_profile:{label:"InstagramアカウントのURL",placeholder:"https://www.instagram.com/ユーザー名/"},
+  instagram_post:{label:"Instagram投稿・リールのURL",placeholder:"https://www.instagram.com/p/XXXXXXXXX/"},
+  tiktok_profile:{label:"TikTokアカウントのURL",placeholder:"https://www.tiktok.com/@ユーザー名"},
+  tiktok_video:{label:"TikTok動画のURL",placeholder:"https://www.tiktok.com/@ユーザー名/video/123..."},
+  youtube_channel:{label:"YouTubeチャンネルのURL",placeholder:"https://www.youtube.com/@ハンドル"},
+  youtube_video:{label:"YouTube動画のURL",placeholder:"https://www.youtube.com/watch?v=XXXXXXXXXXX"},
+  url:{label:"対象のURL",placeholder:"https://..."}
+};
+
 export function smmPanelPayload(
   settings:SmmSettings,
+  machine:SmmMachine,
   products:SmmProduct[],
-  services:Map<string,LuckyService>,
-  guildId:string
+  services:Map<string,LuckyService>
 ){
   const fields=products.slice(0,25).map(product=>{
     const service=services.get(product.service_id);
@@ -125,19 +138,19 @@ export function smmPanelPayload(
   });
   return {
     embeds:[{
-      title:settings.panel_title.slice(0,256),
+      title:machine.panel_title.slice(0,256),
       description:settings.paused
         ?"現在受付を停止しています。"
-        :settings.panel_description.slice(0,2000),
-      color:settings.panel_color,
+        :(fields.length?machine.panel_description:"現在販売中の商品はありません。").slice(0,2000),
+      color:machine.panel_color,
       fields,
-      ...(settings.panel_image_url?{image:{url:settings.panel_image_url}}:{})
+      ...(machine.panel_image_url?{image:{url:machine.panel_image_url}}:{})
     }],
     components:[{
       type:1,
       components:[
-        {type:2,style:3,label:"注文する",emoji:{name:"🛒"},custom_id:"smm:buy:"+guildId,disabled:Boolean(settings.paused)},
-        {type:2,style:1,label:"注文状況",emoji:{name:"📋"},custom_id:"smm:status:"+guildId}
+        {type:2,style:3,label:"注文する",emoji:{name:"🛒"},custom_id:"smm:buy:"+machine.id,disabled:Boolean(settings.paused)||!fields.length},
+        {type:2,style:1,label:"注文状況",emoji:{name:"📋"},custom_id:"smm:status:"+machine.id}
       ]
     }]
   };

@@ -5,8 +5,35 @@ export const SMM_PLACING_STALE_MS=5*60_000;
 export const SMM_MAX_PLACE_ATTEMPTS=12;
 export const SMM_RETRY_DELAY_MS=5*60_000;
 
-export type SmmLinkKind="x_profile"|"x_post"|"url";
-export const SMM_LINK_KINDS:SmmLinkKind[]=["x_profile","x_post","url"];
+export const SMM_SNS=["x","instagram","tiktok","youtube","other"] as const;
+export type SmmSns=typeof SMM_SNS[number];
+
+export type SmmLinkKind=
+  |"x_profile"|"x_post"
+  |"instagram_profile"|"instagram_post"
+  |"tiktok_profile"|"tiktok_video"
+  |"youtube_channel"|"youtube_video"
+  |"url";
+
+export const SMM_LINK_KINDS:SmmLinkKind[]=[
+  "x_profile","x_post",
+  "instagram_profile","instagram_post",
+  "tiktok_profile","tiktok_video",
+  "youtube_channel","youtube_video",
+  "url"
+];
+
+export const SMM_LINK_KINDS_BY_SNS:Record<SmmSns,SmmLinkKind[]>={
+  x:["x_profile","x_post","url"],
+  instagram:["instagram_profile","instagram_post","url"],
+  tiktok:["tiktok_profile","tiktok_video","url"],
+  youtube:["youtube_channel","youtube_video","url"],
+  other:["url"]
+};
+
+export function isSmmSns(value:unknown):value is SmmSns{
+  return SMM_SNS.includes(value as SmmSns);
+}
 
 export type SmmOrderStatus=
   |"awaiting_payment"
@@ -36,27 +63,82 @@ const X_RESERVED=new Set([
   "download","jobs","help","support","account","oauth","web","status"
 ]);
 
-export function normalizeSmmLink(kind:SmmLinkKind,raw:string):string|null{
-  const text=String(raw??"").trim();
-  if(!text||text.length>500||/\s/.test(text)) return null;
+const X_HOSTS=["x.com","www.x.com","mobile.x.com","twitter.com","www.twitter.com","mobile.twitter.com"];
+const IG_HOSTS=["instagram.com","www.instagram.com"];
+const TT_HOSTS=["tiktok.com","www.tiktok.com"];
+const YT_HOSTS=["youtube.com","www.youtube.com","m.youtube.com"];
+const IG_RESERVED=new Set(["p","reel","reels","tv","explore","accounts","stories","direct","about","legal"]);
+
+function parseHttpsUrl(text:string):URL|null{
   let url:URL;
   try{url=new URL(text);}catch{return null;}
   if(url.protocol!=="https:"||url.username||url.password) return null;
-  if(kind==="url") return url.toString();
+  return url;
+}
+
+export function normalizeSmmLink(kind:SmmLinkKind,raw:string):string|null{
+  const text=String(raw??"").trim();
+  if(!text||text.length>500||/\s/.test(text)) return null;
+  const url=parseHttpsUrl(text);
+  if(!url) return null;
   const host=url.hostname.toLowerCase();
-  if(!["x.com","www.x.com","mobile.x.com","twitter.com","www.twitter.com","mobile.twitter.com"].includes(host)){
-    return null;
-  }
   const parts=url.pathname.split("/").filter(Boolean);
-  const user=parts[0]??"";
-  if(!/^[A-Za-z0-9_]{1,15}$/.test(user)||X_RESERVED.has(user.toLowerCase())) return null;
-  if(kind==="x_profile"){
-    return parts.length===1?"https://x.com/"+user:null;
+  switch(kind){
+    case "url":
+      return url.toString();
+    case "x_profile":
+    case "x_post":{
+      if(!X_HOSTS.includes(host)) return null;
+      const user=parts[0]??"";
+      if(!/^[A-Za-z0-9_]{1,15}$/.test(user)||X_RESERVED.has(user.toLowerCase())) return null;
+      if(kind==="x_profile") return parts.length===1?"https://x.com/"+user:null;
+      if(parts.length>=3&&parts[1]==="status"&&/^\d{1,25}$/.test(parts[2]!)){
+        return "https://x.com/"+user+"/status/"+parts[2];
+      }
+      return null;
+    }
+    case "instagram_profile":{
+      if(!IG_HOSTS.includes(host)||parts.length!==1) return null;
+      const user=parts[0]!;
+      if(!/^[A-Za-z0-9._]{1,30}$/.test(user)||IG_RESERVED.has(user.toLowerCase())) return null;
+      return "https://www.instagram.com/"+user+"/";
+    }
+    case "instagram_post":{
+      if(!IG_HOSTS.includes(host)||parts.length<2) return null;
+      const type=parts[0]!.toLowerCase();
+      if(!["p","reel","tv"].includes(type)||!/^[A-Za-z0-9_-]{5,20}$/.test(parts[1]!)) return null;
+      return "https://www.instagram.com/"+type+"/"+parts[1]+"/";
+    }
+    case "tiktok_profile":{
+      if(!TT_HOSTS.includes(host)||parts.length!==1) return null;
+      const m=parts[0]!.match(/^@([A-Za-z0-9._]{2,24})$/);
+      return m?"https://www.tiktok.com/@"+m[1]:null;
+    }
+    case "tiktok_video":{
+      if(!TT_HOSTS.includes(host)||parts.length<3) return null;
+      const m=parts[0]!.match(/^@([A-Za-z0-9._]{2,24})$/);
+      if(!m||parts[1]!=="video"||!/^\d{10,25}$/.test(parts[2]!)) return null;
+      return "https://www.tiktok.com/@"+m[1]+"/video/"+parts[2];
+    }
+    case "youtube_channel":{
+      if(!YT_HOSTS.includes(host)||parts.length<1) return null;
+      const first=parts[0]!;
+      if(/^@[A-Za-z0-9._-]{3,30}$/.test(first)&&parts.length===1) return "https://www.youtube.com/"+first;
+      if(first==="channel"&&/^UC[A-Za-z0-9_-]{20,24}$/.test(parts[1]??"")&&parts.length===2){
+        return "https://www.youtube.com/channel/"+parts[1];
+      }
+      return null;
+    }
+    case "youtube_video":{
+      let id:string|null=null;
+      if(host==="youtu.be"&&parts.length===1) id=parts[0]!;
+      else if(YT_HOSTS.includes(host)){
+        if(parts[0]==="watch") id=url.searchParams.get("v");
+        else if(["shorts","live"].includes(parts[0]??"")&&parts.length===2) id=parts[1]!;
+      }
+      return id&&/^[A-Za-z0-9_-]{11}$/.test(id)?"https://www.youtube.com/watch?v="+id:null;
+    }
   }
-  if(parts.length>=3&&parts[1]==="status"&&/^\d{1,25}$/.test(parts[2]!)){
-    return "https://x.com/"+user+"/status/"+parts[2];
-  }
-  return null;
 }
 
 export function smmCost(ratePer1000:number,quantity:number):number{

@@ -1,6 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  SMM_LINK_KINDS_BY_SNS,
+  isSmmSns,
   isJpyCurrency,
   isRetryableSupplierRejection,
   mapSmmSupplierStatus,
@@ -130,4 +132,40 @@ test("only JPY supplier balances are accepted",()=>{
   assert.equal(isJpyCurrency("円"),true);
   assert.equal(isJpyCurrency("USD"),false);
   assert.equal(isJpyCurrency(""),false);
+});
+
+test("Instagram links are normalized per kind",()=>{
+  assert.equal(normalizeSmmLink("instagram_profile","https://instagram.com/some.user?igsh=1"),"https://www.instagram.com/some.user/");
+  assert.equal(normalizeSmmLink("instagram_profile","https://www.instagram.com/p/ABCDE12345/"),null);
+  assert.equal(normalizeSmmLink("instagram_profile","https://www.instagram.com/explore"),null);
+  assert.equal(normalizeSmmLink("instagram_post","https://www.instagram.com/reel/ABCDE12345/?utm=1"),"https://www.instagram.com/reel/ABCDE12345/");
+  assert.equal(normalizeSmmLink("instagram_post","https://www.instagram.com/some.user/"),null);
+  assert.equal(normalizeSmmLink("instagram_post","https://x.com/p/ABCDE12345"),null);
+});
+
+test("TikTok links need an @handle and numeric video id",()=>{
+  assert.equal(normalizeSmmLink("tiktok_profile","https://www.tiktok.com/@some.user?lang=ja"),"https://www.tiktok.com/@some.user");
+  assert.equal(normalizeSmmLink("tiktok_profile","https://www.tiktok.com/some.user"),null);
+  assert.equal(normalizeSmmLink("tiktok_video","https://tiktok.com/@some.user/video/7234567890123456789"),"https://www.tiktok.com/@some.user/video/7234567890123456789");
+  assert.equal(normalizeSmmLink("tiktok_video","https://www.tiktok.com/@some.user"),null);
+  assert.equal(normalizeSmmLink("tiktok_video","https://vm.tiktok.com/ZMabc/"),null);
+});
+
+test("YouTube channel and video links resolve to canonical forms",()=>{
+  assert.equal(normalizeSmmLink("youtube_channel","https://www.youtube.com/@some_handle"),"https://www.youtube.com/@some_handle");
+  assert.equal(normalizeSmmLink("youtube_channel","https://youtube.com/channel/UCabcdefghijklmnopqrstuv"),"https://www.youtube.com/channel/UCabcdefghijklmnopqrstuv");
+  assert.equal(normalizeSmmLink("youtube_channel","https://www.youtube.com/watch?v=dQw4w9WgXcQ"),null);
+  assert.equal(normalizeSmmLink("youtube_video","https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=10s"),"https://www.youtube.com/watch?v=dQw4w9WgXcQ");
+  assert.equal(normalizeSmmLink("youtube_video","https://youtu.be/dQw4w9WgXcQ?si=abc"),"https://www.youtube.com/watch?v=dQw4w9WgXcQ");
+  assert.equal(normalizeSmmLink("youtube_video","https://www.youtube.com/shorts/dQw4w9WgXcQ"),"https://www.youtube.com/watch?v=dQw4w9WgXcQ");
+  assert.equal(normalizeSmmLink("youtube_video","https://www.youtube.com/watch?v=short"),null);
+  assert.equal(normalizeSmmLink("youtube_video","https://evil.example/watch?v=dQw4w9WgXcQ"),null);
+});
+
+test("each SNS only allows its own link kinds plus a generic URL",()=>{
+  assert.deepEqual(SMM_LINK_KINDS_BY_SNS.x,["x_profile","x_post","url"]);
+  assert.ok(SMM_LINK_KINDS_BY_SNS.instagram.every(kind=>kind==="url"||kind.startsWith("instagram")));
+  assert.deepEqual(SMM_LINK_KINDS_BY_SNS.other,["url"]);
+  assert.equal(isSmmSns("tiktok"),true);
+  assert.equal(isSmmSns("myspace"),false);
 });
