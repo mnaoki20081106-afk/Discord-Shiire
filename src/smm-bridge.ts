@@ -91,6 +91,7 @@ async function enrichProducts(
     const bounds=service?smmQuantityBounds(service,product):null;
     return {
       ...product,
+      price_percent:Math.round((100+product.markup_percent)*100)/100,
       live:service?{
         found:true,
         type:service.type,
@@ -147,6 +148,11 @@ function sanitizeOrder(order:SmmOrder){
   return rest;
 }
 
+function pricePercent(body:Record<string,unknown>,current:SmmProduct|null):number{
+  if(body.price_percent===undefined&&current) return Math.round((100+current.markup_percent)*100)/100;
+  return number(body.price_percent??130,"price_percent",101,1000);
+}
+
 async function parseProductInput(
   env:Env,
   guildId:string,
@@ -160,7 +166,7 @@ async function parseProductInput(
   const serviceChanged=!current||current.service_id!==serviceId;
 
   let service:LuckyService|undefined;
-  if(serviceChanged||body.markup_percent!==undefined||body.fee_jpy!==undefined||body.min_qty!==undefined){
+  if(serviceChanged||body.price_percent!==undefined||body.min_qty!==undefined){
     const loaded=await smmServicesMap(env,{maxAgeMs:10*60_000}).catch(()=>{
       throw new SmmError(503,"LUCKYPANEL_SERVICES_UNAVAILABLE");
     });
@@ -182,8 +188,8 @@ async function parseProductInput(
     service_id:serviceId,
     service_name:service?.name??current?.service_name??"",
     service_category:service?.category??current?.service_category??"",
-    markup_percent:number(pick("markup_percent")??30,"markup_percent",0,1000),
-    fee_jpy:number(pick("fee_jpy")??0,"fee_jpy",0,100_000,true),
+    markup_percent:pricePercent(body,current)-100,
+    fee_jpy:0,
     min_qty:number(pick("min_qty")??1,"min_qty",1,10_000_000,true),
     max_qty:number(pick("max_qty")??0,"max_qty",0,10_000_000,true),
     link_kind:linkKind,

@@ -290,19 +290,35 @@ test('refund completion is recorded once',async()=>{
 test('bridge: product creation validates the service and refuses unprofitable pricing',async()=>{
  const f=await fixture();
  const post=async(path,body,method='POST')=>f.mf.dispatchFetch('https://test/bridge'+path,{method,body:JSON.stringify(body)});
- let res=await post('/products',{name:'Bad',service_id:'999',markup_percent:30,link_kind:'x_profile'});
+ let res=await post('/products',{name:'Bad',service_id:'999',price_percent:130,link_kind:'x_profile'});
  assert.equal(res.status,400);
  f.lp.services.push({service:'202',name:'Comments',type:'Custom Comments',category:'X',rate:'900',min:'10',max:'100',refill:false,cancel:false});
  await f.db.prepare("DELETE FROM smm_meta WHERE key='services_json'").run();
- res=await post('/products',{name:'Comments',service_id:'202',markup_percent:30,link_kind:'x_post'});
+ res=await post('/products',{name:'Comments',service_id:'202',price_percent:130,link_kind:'x_post'});
  assert.equal(res.status,400);
  assert.match((await res.json()).message,/SERVICE_TYPE_UNSUPPORTED/);
  await post('/settings',{min_margin_percent:20});
- res=await post('/products',{name:'Thin',service_id:'101',markup_percent:5,link_kind:'x_profile'});
+ res=await post('/products',{name:'Thin',service_id:'101',price_percent:105,link_kind:'x_profile'});
  assert.equal(res.status,400);
  assert.match((await res.json()).message,/MARGIN_BELOW_FLOOR/);
- res=await post('/products',{name:'Good',service_id:'101',markup_percent:30,link_kind:'x_profile'});
+ res=await post('/products',{name:'Good',service_id:'101',price_percent:130,link_kind:'x_profile'});
  assert.equal(res.status,200);
+});
+
+test('bridge: prices must be at least 101% of cost and fixed fees are ignored',async()=>{
+ const f=await fixture();
+ const post=body=>f.mf.dispatchFetch('https://test/bridge/products',{method:'POST',body:JSON.stringify(body)});
+ for(const price_percent of [100,99,0,'abc']){
+  const res=await post({name:'X',service_id:'101',price_percent,link_kind:'x_profile'});
+  assert.equal(res.status,400,String(price_percent));
+ }
+ const res=await post({name:'Cheap',service_id:'101',price_percent:101,fee_jpy:500,link_kind:'x_profile'});
+ assert.equal(res.status,200);
+ const {product}=await res.json();
+ assert.equal(product.markup_percent,1);assert.equal(product.fee_jpy,0);
+ const overview=await (await f.mf.dispatchFetch('https://test/bridge')).json();
+ const cheap=overview.products.find(p=>p.name==='Cheap');
+ assert.equal(cheap.price_percent,101);assert.equal(cheap.per1000,505);
 });
 
 test('bridge: overview reports balance and never exposes payment links',async()=>{
