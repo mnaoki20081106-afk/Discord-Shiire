@@ -2642,6 +2642,27 @@ export async function handleShiireMainBridge(
     return responseJson({ok:true});
   }
 
+  if(suffix==="/generator/push"&&request.method==="POST"){
+    const input=await parseBridgeJson(rawBody);
+    const supplierId=String(input.supplierId??"").trim();
+    const sku=String(input.sku??"").trim();
+    const items=Array.isArray(input.items)
+      ?input.items.map(v=>String(v).trim()).filter(Boolean)
+      :[];
+    if(!supplierId||!sku||items.length===0||items.length>500){
+      throw new ShiireVendingError(400,"GENERATOR_PUSH_INVALID");
+    }
+    const {addPoolItems}=await import("./db");
+    const added=await addPoolItems(env,supplierId,sku,items);
+    await auditX(env,{
+      level:"info",
+      kind:"GENERATOR_ACCOUNTS_PUSHED",
+      message:`${added} generator accounts pushed to supplier pool.`,
+      details:{supplierId,sku,submitted:items.length,added,guildId}
+    }).catch(()=>undefined);
+    return responseJson({ok:true,supplierId,sku,submitted:items.length,added});
+  }
+
   throw new ShiireVendingError(404,"NOT_FOUND");
 }
 
