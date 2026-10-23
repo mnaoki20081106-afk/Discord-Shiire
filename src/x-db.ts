@@ -826,7 +826,7 @@ export async function purchasedAccountCountForOrder(
 // ignored through the unique credential fingerprint.
 export async function addGeneratorAccountsAsStock(env:Env,input:{
   supplierProductId:string;
-  procurementClass:"TOP_SEARCH"|"NO_SHADOWBAN"|null;
+  procurementClass:"TOP_SEARCH"|"NO_SHADOWBAN"|"INVITE_CAMPAIGN"|"FREE_GIVEAWAY"|null;
   items:string[];
 }):Promise<number>{
   await ensureXSchema(env);

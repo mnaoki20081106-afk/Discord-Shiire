@@ -48,6 +48,14 @@ import {
   setXSetting,
   addGeneratorAccountsAsStock
 } from "./x-db";
+import {
+  GENERATOR_POOLS,
+  freeGiveawayOverview,
+  poolAvailableCount,
+  postFreeGiveawayPanel,
+  setFreeGiveawayEnabled,
+  type GeneratorPoolName
+} from "./free-giveaway";
 import { receiveMainPayment, getMainPaymentStatus } from "./main-bot";
 import {
   getInviteCampaignDashboard,
@@ -2684,6 +2692,69 @@ export async function handleShiireMainBridge(
         stockCount:await availableShiireAccounts(env,product)
       });
     }
+  }
+
+  // Pools that the generator can fill directly (invite-campaign rewards and
+  // the free giveaway). Same shape as the per-product stock routes above.
+  const poolStock=suffix.match(/^\/generator\/pools\/([^/]+)\/stock$/);
+  if(poolStock){
+    const poolName=poolStock[1]!;
+    // hasOwn: "constructor" and other inherited names must not resolve to a pool.
+    if(!Object.hasOwn(GENERATOR_POOLS,poolName)){
+      throw new ShiireVendingError(404,"POOL_NOT_FOUND");
+    }
+    const procurementClass=GENERATOR_POOLS[poolName as GeneratorPoolName];
+    if(request.method==="GET"){
+      return responseJson({pool:poolName,stockCount:await poolAvailableCount(env,procurementClass)});
+    }
+    if(request.method==="POST"){
+      const input=await parseBridgeJson(rawBody);
+      const items=[...new Set(
+        (Array.isArray(input.items)?input.items:[])
+          .map(v=>String(v).trim()).filter(Boolean)
+      )];
+      if(items.length===0||items.length>500){
+        throw new ShiireVendingError(400,"GENERATOR_STOCK_INVALID");
+      }
+      const added=await addGeneratorAccountsAsStock(env,{
+        supplierProductId:"generator",
+        procurementClass,
+        items
+      });
+      await auditX(env,{
+        level:"info",
+        kind:"GENERATOR_POOL_RESTOCKED",
+        message:`${added} generator accounts added to the ${poolName} pool.`,
+        details:{pool:poolName,submitted:items.length,added,guildId}
+      }).catch(()=>undefined);
+      return responseJson({
+        ok:true,
+        submitted:items.length,
+        added,
+        stockCount:await poolAvailableCount(env,procurementClass)
+      });
+    }
+  }
+
+  if(suffix==="/free-giveaway"&&request.method==="GET"){
+    return responseJson(await freeGiveawayOverview(env));
+  }
+
+  if(suffix==="/free-giveaway/settings"&&request.method==="POST"){
+    const input=await parseBridgeJson(rawBody);
+    if(typeof input.enabled!=="boolean"){
+      throw new ShiireVendingError(400,"FREE_GIVEAWAY_SETTINGS_INVALID");
+    }
+    await setFreeGiveawayEnabled(env,input.enabled);
+    return responseJson(await freeGiveawayOverview(env));
+  }
+
+  if(suffix==="/free-giveaway/panel"&&request.method==="POST"){
+    const input=await parseBridgeJson(rawBody);
+    const channelId=String(input.channelId??"").trim();
+    if(!channelId) throw new ShiireVendingError(400,"CHANNEL_REQUIRED");
+    await requireChannelInGuild(env,guildId,channelId);
+    return responseJson({ok:true,...await postFreeGiveawayPanel(env,channelId)});
   }
 
   if(suffix==="/generator/push"&&request.method==="POST"){

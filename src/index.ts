@@ -1,3 +1,4 @@
+import { handleFreeGiveawayInteraction } from "./free-giveaway";
 import type { Env, ProcessorKind, SupplierKind } from "./types";
 import {
   addPoolItems,
@@ -166,6 +167,8 @@ async function handleInteraction(
   if(interaction.type===3||interaction.type===5){
     const smm=await handleSmmInteraction(interaction,env,ctx);
     if(smm) return smm;
+    const giveaway=await handleFreeGiveawayInteraction(interaction,env,ctx);
+    if(giveaway) return giveaway;
     const vending=await handleShiireVendingInteraction(interaction,env);
     if(vending) return vending;
     return interactionResponse("未対応の操作です。");

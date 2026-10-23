@@ -765,6 +765,41 @@ Discord setup required for this feature:
 - after upgrading from an older build that registered `/invite-link`, run `POST /api/discord/register` once so Discord removes that legacy global command
 
 
+## Free giveaway
+
+Every Discord account can claim **one** free account by pressing a button on a panel.
+
+- Stock is its own pool (`procurement_class='FREE_GIVEAWAY'`). It is not touched by HStora
+  procurement, ordinary vending, or the invite campaign, and nothing else consumes it.
+- Pressing **無料で受け取る** replies privately right away, reserves one account with a
+  conditional state transition and sends it by DM. A claim row per Discord user id
+  (`free_giveaway_claims`, primary key `user_id`) makes it one per account, across guilds.
+- If Discord refuses the DM (DMs closed) the account goes back to stock and the user can press
+  the button again after opening DMs. If the result of sending is unknown the account stays
+  reserved and the claim is `DELIVERY_UNCERTAIN`, so a second account is never handed out.
+- If the pool is empty the claim is `WAITING_STOCK`; the same user can press again after restock.
+- Giveaway is **off** until enabled. Bridge routes (signed like the other `/bridge/main` routes):
+
+```text
+GET  /bridge/main/guilds/:guild/free-giveaway            status, stock, claim counts, recent claims
+POST /bridge/main/guilds/:guild/free-giveaway/settings   {enabled:boolean}
+POST /bridge/main/guilds/:guild/free-giveaway/panel      {channelId}  posts the claim panel
+```
+
+## Filling the invite and giveaway pools from the generator
+
+The X-Account Generator can add accounts straight into a pool or a vending product:
+
+```text
+GET|POST /bridge/main/guilds/:guild/generator/pools/invite-campaign/stock
+GET|POST /bridge/main/guilds/:guild/generator/pools/free-giveaway/stock
+GET|POST /bridge/main/guilds/:guild/generator/products/:productId/stock
+```
+
+`POST` takes `{items:[...]}` (up to 500 credential lines). Accounts are stored encrypted like
+procured ones; a credential that is already stored is ignored. Filling the invite pool also
+reduces what HStora procurement buys for it, because that pool is topped up toward its target.
+
 ## Production deployment checklist
 
 現在、このリポジトリの GitHub Actions は CI（typecheck / test）のみで、Cloudflare Worker の本番デプロイは自動ではありません。
