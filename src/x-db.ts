@@ -818,6 +818,48 @@ export async function purchasedAccountCountForOrder(
   return Math.max(0,Number(row?.count??0));
 }
 
+// Adds accounts supplied by the X-Account Generator directly to a vending
+// product's sellable stock. Rows are stored exactly like procured accounts
+// (encrypted, READY_FOR_DELIVERY), keyed so that availableShiireAccounts()
+// counts them for the target product: by procurement_class for class-based
+// products, by supplier_product_id for individual products. Duplicates are
+// ignored through the unique credential fingerprint.
+export async function addGeneratorAccountsAsStock(env:Env,input:{
+  supplierProductId:string;
+  procurementClass:"TOP_SEARCH"|"NO_SHADOWBAN"|null;
+  items:string[];
+}):Promise<number>{
+  await ensureXSchema(env);
+  const fingerprintSecret=env.CREDENTIALS_ENCRYPTION_KEY?.trim()??"";
+  if(!fingerprintSecret) throw new Error("CREDENTIALS_ENCRYPTION_KEY_NOT_CONFIGURED");
+  const now=Date.now();
+  const batchId="generator:"+randomId();
+  // Class-based products have no supplier_product_id of their own; the
+  // column is NOT NULL, so file those rows under a fixed generator bucket.
+  const supplierProductId=input.supplierProductId||"generator";
+  let inserted=0;
+  for(const raw of input.items){
+    const fingerprint=await hmacHex(fingerprintSecret,"credential-fingerprint\n"+raw);
+    const encrypted=await encryptSensitive(env,raw);
+    const result=await env.DB.prepare(`INSERT OR IGNORE INTO purchased_accounts(
+      id,supplier,supplier_product_id,purchase_order_id,purchase_price,purchased_at,
+      credentials_ciphertext,email_ciphertext,two_factor_ciphertext,credential_fingerprint,procurement_class,status,created_at
+    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(
+      randomId(),"generator",supplierProductId,batchId,0,now,
+      JSON.stringify(encrypted),null,null,fingerprint,input.procurementClass,"READY_FOR_DELIVERY",now
+    ).run();
+    if((result.meta?.changes??0)>0) inserted++;
+  }
+  if(inserted>0){
+    await env.DB.prepare(`INSERT INTO inventory(id,supplier_product_id,status,quantity,updated_at)
+      VALUES(?,?,?,?,?)
+      ON CONFLICT(supplier_product_id,status) DO UPDATE SET
+        quantity=quantity+excluded.quantity,updated_at=excluded.updated_at`
+    ).bind(randomId(),supplierProductId,"READY_FOR_DELIVERY",inserted,now).run();
+  }
+  return inserted;
+}
+
 export async function inventoryClassSummary(env:Env){
   await ensureXSchema(env);
   const rows=await env.DB.prepare(

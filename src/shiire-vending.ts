@@ -45,7 +45,8 @@ import {
   pendingPurchaseOrders,
   circuitState,
   getXSetting,
-  setXSetting
+  setXSetting,
+  addGeneratorAccountsAsStock
 } from "./x-db";
 import { receiveMainPayment, getMainPaymentStatus } from "./main-bot";
 import {
@@ -2640,6 +2641,49 @@ export async function handleShiireMainBridge(
     );
     await saveShiirePanel(env,machine.id,guildId,channelId,messageId);
     return responseJson({ok:true});
+  }
+
+  // Stock read/write for a single vending product, used by the main bot's
+  // generator auto-restock. Restricted to products of machines in this guild.
+  const generatorStock=suffix.match(/^\/generator\/products\/([^/]+)\/stock$/);
+  if(generatorStock){
+    const product=await getShiireProduct(env,generatorStock[1]!);
+    if(!product) throw new ShiireVendingError(404,"PRODUCT_NOT_FOUND");
+    await machineInGuild(env,product.vending_machine_id,guildId);
+    if(request.method==="GET"){
+      return responseJson({
+        productId:product.id,
+        name:product.name,
+        stockCount:await availableShiireAccounts(env,product)
+      });
+    }
+    if(request.method==="POST"){
+      const input=await parseBridgeJson(rawBody);
+      const items=[...new Set(
+        (Array.isArray(input.items)?input.items:[])
+          .map(v=>String(v).trim()).filter(Boolean)
+      )];
+      if(items.length===0||items.length>500){
+        throw new ShiireVendingError(400,"GENERATOR_STOCK_INVALID");
+      }
+      const added=await addGeneratorAccountsAsStock(env,{
+        supplierProductId:product.supplier_product_id,
+        procurementClass:product.procurement_class,
+        items
+      });
+      await auditX(env,{
+        level:"info",
+        kind:"GENERATOR_PRODUCT_RESTOCKED",
+        message:`${added} generator accounts added to vending product stock.`,
+        details:{productId:product.id,submitted:items.length,added,guildId}
+      }).catch(()=>undefined);
+      return responseJson({
+        ok:true,
+        submitted:items.length,
+        added,
+        stockCount:await availableShiireAccounts(env,product)
+      });
+    }
   }
 
   if(suffix==="/generator/push"&&request.method==="POST"){
