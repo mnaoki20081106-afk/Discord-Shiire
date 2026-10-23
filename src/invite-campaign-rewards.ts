@@ -15,6 +15,7 @@ import {
   InviteCampaignDiscordError,
   sendInviteCampaignDm
 } from "./invite-campaign-discord";
+import { resolveRewardSource } from "./reward-stock";
 
 export type InviteCampaignProgress={
   guild_id:string;
@@ -152,12 +153,14 @@ async function reserveCampaignAccountForReward(
   env:Env,
   reward:RewardRow
 ):Promise<CampaignAccountRow|null>{
+  const source=await resolveRewardSource(env,"invite");
+  if(source.unavailable) return null;
   for(let attempt=0;attempt<8;attempt++){
     const row=await env.DB.prepare(
       "SELECT id,credentials_ciphertext,status FROM purchased_accounts "+
-      "WHERE procurement_class='INVITE_CAMPAIGN' AND status='READY_FOR_DELIVERY' "+
-      "ORDER BY created_at ASC,id ASC LIMIT 1"
-    ).first<CampaignAccountRow>();
+      "WHERE "+source.where+" AND status='READY_FOR_DELIVERY' "+
+      "ORDER BY purchased_at ASC,id ASC LIMIT 1"
+    ).bind(...source.binds).first<CampaignAccountRow>();
     if(!row) return null;
 
     try{
@@ -194,9 +197,12 @@ async function loadReservedCampaignAccount(
   env:Env,
   accountId:string
 ):Promise<CampaignAccountRow|null>{
+  // The class/product this account was pulled from no longer matters here:
+  // reserveCampaignAccountForReward already picked it from the current
+  // reward source and recorded it on the reward row. This just confirms the
+  // reservation is still intact for a retried delivery.
   const row=await env.DB.prepare(
-    "SELECT id,credentials_ciphertext,status FROM purchased_accounts "+
-    "WHERE id=? AND procurement_class='INVITE_CAMPAIGN'"
+    "SELECT id,credentials_ciphertext,status FROM purchased_accounts WHERE id=?"
   ).bind(accountId).first<CampaignAccountRow>();
   if(!row) return null;
 

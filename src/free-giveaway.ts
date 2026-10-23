@@ -6,6 +6,7 @@ import {
   inviteDiscordJson,
   sendInviteCampaignDm
 } from "./invite-campaign-discord";
+import { describeRewardSource, resolveRewardSource } from "./reward-stock";
 
 // Free giveaway: every Discord account can claim exactly one account for free
 // by pressing the button on a panel. Stock is a dedicated pool of
@@ -223,18 +224,22 @@ async function beginClaim(
 
 async function reserveAccount(env:Env,claim:ClaimRow):Promise<PoolAccountRow|null>{
   if(claim.account_id){
+    // Already assigned to this claim by an earlier attempt: which pool it
+    // came from no longer matters, only that the reservation is intact.
     const held=await env.DB.prepare(
       "SELECT id,credentials_ciphertext,status FROM purchased_accounts "+
-      "WHERE id=? AND procurement_class=? AND status=?"
-    ).bind(claim.account_id,FREE_GIVEAWAY_CLASS,RESERVED_STATUS).first<PoolAccountRow>();
+      "WHERE id=? AND status=?"
+    ).bind(claim.account_id,RESERVED_STATUS).first<PoolAccountRow>();
     if(held) return held;
   }
+  const source=await resolveRewardSource(env,"giveaway");
+  if(source.unavailable) return null;
   for(let attempt=0;attempt<8;attempt++){
     const row=await env.DB.prepare(
       "SELECT id,credentials_ciphertext,status FROM purchased_accounts "+
-      "WHERE procurement_class=? AND status='READY_FOR_DELIVERY' "+
-      "ORDER BY created_at ASC,id ASC LIMIT 1"
-    ).bind(FREE_GIVEAWAY_CLASS).first<PoolAccountRow>();
+      "WHERE "+source.where+" AND status='READY_FOR_DELIVERY' "+
+      "ORDER BY purchased_at ASC,id ASC LIMIT 1"
+    ).bind(...source.binds).first<PoolAccountRow>();
     if(!row) return null;
     const results=await env.DB.batch([
       env.DB.prepare(
@@ -506,16 +511,18 @@ export async function postFreeGiveawayPanel(env:Env,channelId:string){
 
 export async function freeGiveawayOverview(env:Env){
   await ensureFreeGiveawaySchema(env);
-  const [enabled,burstLimit,blocked,stock,reserved,statusRows,recent]=await Promise.all([
+  const [enabled,burstLimit,blocked,source,reserved,statusRows,recent]=await Promise.all([
     isFreeGiveawayEnabled(env),
     getBurstLimit(env),
     env.DB.prepare(
       "SELECT user_id,reason,created_at FROM free_giveaway_blocked ORDER BY created_at DESC LIMIT 50"
     ).all<{user_id:string;reason:string|null;created_at:number}>(),
-    poolAvailableCount(env,FREE_GIVEAWAY_CLASS),
+    describeRewardSource(env,"giveaway"),
+    // RESERVED_STATUS is only ever set by this file's own reserveAccount, on
+    // whichever pool the current source points at, so no class filter here.
     env.DB.prepare(
-      "SELECT COUNT(*) AS count FROM purchased_accounts WHERE procurement_class=? AND status=?"
-    ).bind(FREE_GIVEAWAY_CLASS,RESERVED_STATUS).first<{count:number}>(),
+      "SELECT COUNT(*) AS count FROM purchased_accounts WHERE status=?"
+    ).bind(RESERVED_STATUS).first<{count:number}>(),
     env.DB.prepare(
       "SELECT status,COUNT(*) AS count FROM free_giveaway_claims GROUP BY status"
     ).all<{status:string;count:number}>(),
@@ -531,7 +538,8 @@ export async function freeGiveawayOverview(env:Env){
     burstLimit,
     burstWindowMinutes:BURST_WINDOW_MS/60_000,
     blocked:blocked.results,
-    stockCount:stock,
+    source,
+    stockCount:source.stockCount,
     reservedCount:Math.max(0,Number(reserved?.count??0)),
     claims,
     recent:recent.results

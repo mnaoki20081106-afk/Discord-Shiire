@@ -786,6 +786,25 @@ POST /bridge/main/guilds/:guild/free-giveaway/settings   {enabled:boolean}
 POST /bridge/main/guilds/:guild/free-giveaway/panel      {channelId}  posts the claim panel
 ```
 
+## Sharing invite/giveaway stock with a vending product
+
+By default each reward (invite campaign, free giveaway) draws from its own dedicated pool
+(`procurement_class='INVITE_CAMPAIGN'` / `'FREE_GIVEAWAY'`). Either reward can instead be pointed
+at an existing vending-machine product, so the reward and ordinary sales of that product share one
+stock — no separate top-up needed for the reward.
+
+```text
+GET  /bridge/main/guilds/:guild/affiliate                      combined invite + giveaway dashboard, with each reward's current source and candidate products
+POST /bridge/main/guilds/:guild/affiliate/invite/product       {productId:string|null}  null switches back to the dedicated pool
+POST /bridge/main/guilds/:guild/affiliate/giveaway/product      {productId:string|null}
+```
+
+Switching the source does not move existing stock between pools: accounts already sitting in the
+dedicated pool stay there (unused while a product is selected), and the product's existing stock is
+what the reward starts drawing from. Generator restock (`/generator/pools/:pool/stock`, below) and
+the admin dashboard's manual product UI both land in whichever pool is currently selected, so there
+is only one place to keep topped up.
+
 ## Filling the invite and giveaway pools from the generator
 
 The X-Account Generator can add accounts straight into a pool or a vending product:

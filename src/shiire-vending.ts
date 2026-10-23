@@ -66,6 +66,14 @@ import {
 } from "./invite-campaign-db";
 import { seedInviteCampaignSnapshot } from "./invite-campaign";
 import {
+  describeRewardSource,
+  listRewardCandidateProducts,
+  resolveRewardSource,
+  rewardStockCount,
+  setRewardProductId,
+  type RewardKind
+} from "./reward-stock";
+import {
   reconcileInviteCampaignRewards,
   retryInviteCampaignReward
 } from "./invite-campaign-rewards";
@@ -2706,9 +2714,10 @@ export async function handleShiireMainBridge(
     if(!Object.hasOwn(GENERATOR_POOLS,poolName)){
       throw new ShiireVendingError(404,"POOL_NOT_FOUND");
     }
-    const procurementClass=GENERATOR_POOLS[poolName as GeneratorPoolName];
+    const rewardKind:RewardKind=poolName==="invite-campaign"?"invite":"giveaway";
+    const dedicatedClass=GENERATOR_POOLS[poolName as GeneratorPoolName];
     if(request.method==="GET"){
-      return responseJson({pool:poolName,stockCount:await poolAvailableCount(env,procurementClass)});
+      return responseJson({pool:poolName,stockCount:await rewardStockCount(env,await resolveRewardSource(env,rewardKind))});
     }
     if(request.method==="POST"){
       const input=await parseBridgeJson(rawBody);
@@ -2719,24 +2728,65 @@ export async function handleShiireMainBridge(
       if(items.length===0||items.length>500){
         throw new ShiireVendingError(400,"GENERATOR_STOCK_INVALID");
       }
-      const added=await addGeneratorAccountsAsStock(env,{
-        supplierProductId:"generator",
-        procurementClass,
-        items
-      });
+      // A product has been chosen to share stock with this reward: file the
+      // generated accounts under that product's own class/supplier id so
+      // they count for both the reward and ordinary sales of that product.
+      // Otherwise fall back to the dedicated pool.
+      const source=await resolveRewardSource(env,rewardKind);
+      if(source.mode==="product"&&source.unavailable){
+        throw new ShiireVendingError(409,"REWARD_PRODUCT_UNAVAILABLE");
+      }
+      // fillProcurementClass can legitimately be null (a plain, non-class
+      // product), so the dedicated-pool class is only a fallback for mode
+      // "dedicated" — not via `??`, which would also catch that null.
+      const added=await addGeneratorAccountsAsStock(env,source.mode==="product"
+        ?{supplierProductId:source.fillSupplierProductId!,procurementClass:source.fillProcurementClass,items}
+        :{supplierProductId:"generator",procurementClass:dedicatedClass,items}
+      );
       await auditX(env,{
         level:"info",
         kind:"GENERATOR_POOL_RESTOCKED",
         message:`${added} generator accounts added to the ${poolName} pool.`,
-        details:{pool:poolName,submitted:items.length,added,guildId}
+        details:{pool:poolName,submitted:items.length,added,guildId,mode:source.mode}
       }).catch(()=>undefined);
       return responseJson({
         ok:true,
         submitted:items.length,
         added,
-        stockCount:await poolAvailableCount(env,procurementClass)
+        stockCount:await rewardStockCount(env,await resolveRewardSource(env,rewardKind))
       });
     }
+  }
+
+  // アフィリエイト (招待キャンペーン + 無料配布): one combined dashboard for
+  // the two affiliate-style rewards, including which stock each one currently
+  // draws from (its own dedicated pool, or a chosen vending product's stock).
+  if(suffix==="/affiliate"&&request.method==="GET"){
+    const [invite,giveaway,products]=await Promise.all([
+      getInviteCampaignDashboard(env),
+      freeGiveawayOverview(env),
+      listRewardCandidateProducts(env,guildId)
+    ]);
+    return responseJson({
+      invite:{...invite,currentGuildId:guildId,currentGuildSelected:invite.settings.guild_id===guildId},
+      giveaway,
+      products
+    });
+  }
+
+  const affiliateProduct=suffix.match(/^\/affiliate\/(invite|giveaway)\/product$/);
+  if(affiliateProduct&&request.method==="POST"){
+    const rewardKind=affiliateProduct[1] as RewardKind;
+    const input=await parseBridgeJson(rawBody);
+    const productId=input.productId===null||input.productId===undefined||input.productId===""
+      ?null
+      :String(input.productId);
+    try{
+      await setRewardProductId(env,rewardKind,productId,guildId);
+    }catch(error){
+      throw new ShiireVendingError(400,error instanceof Error?error.message:"REWARD_PRODUCT_INVALID");
+    }
+    return responseJson({ok:true,source:await describeRewardSource(env,rewardKind)});
   }
 
   if(suffix==="/free-giveaway"&&request.method==="GET"){

@@ -5,6 +5,7 @@ import {
   DEFAULT_INVITE_CAMPAIGN_TARGET_STOCK,
   normalizePositiveInteger
 } from "./invite-campaign-policy";
+import { describeRewardSource } from "./reward-stock";
 
 export type InviteCampaignSettings={
   enabled:boolean;
@@ -199,7 +200,7 @@ export async function getInviteCampaignDashboard(env:Env){
 
   const [
     guilds,
-    stock,
+    source,
     runtime,
     progress,
     rewards,
@@ -207,7 +208,7 @@ export async function getInviteCampaignDashboard(env:Env){
     memberStats
   ]=await Promise.all([
     listInviteCampaignGuilds(env),
-    inviteCampaignStockCount(env),
+    describeRewardSource(env,"invite"),
     env.DB.prepare(
       "SELECT gateway_ready_at,last_event_at,last_error,updated_at "+
       "FROM invite_campaign_runtime WHERE id=1"
@@ -243,10 +244,11 @@ export async function getInviteCampaignDashboard(env:Env){
   return {
     settings,
     guilds,
+    source,
     stock:{
-      available:stock,
+      available:source.stockCount,
       target:settings.target_stock,
-      deficit:Math.max(0,settings.target_stock-stock)
+      deficit:Math.max(0,settings.target_stock-source.stockCount)
     },
     runtime:runtime??{
       gateway_ready_at:null,last_event_at:null,last_error:null,updated_at:null
