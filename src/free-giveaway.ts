@@ -1,6 +1,6 @@
 import type { Env } from "./types";
 import { decryptSensitive, type EncryptedSecret } from "./x-crypto";
-import { ensureXSchema, getXSetting, setXSetting } from "./x-db";
+import { auditX, ensureXSchema, getXSetting, setXSetting } from "./x-db";
 import {
   InviteCampaignDiscordError,
   inviteDiscordJson,
@@ -25,6 +25,12 @@ export const GENERATOR_POOLS={
 export type GeneratorPoolName=keyof typeof GENERATOR_POOLS;
 
 const ENABLED_KEY="free_giveaway_enabled";
+const BURST_LIMIT_KEY="free_giveaway_burst_limit";
+// Deliveries allowed per rolling window before further claims are asked to wait.
+// Slows down alt-account farms and raids without turning real users away for good.
+export const DEFAULT_BURST_LIMIT=20;
+const BURST_WINDOW_MS=10*60_000;
+const MAX_BURST_LIMIT=1000;
 const RESERVED_STATUS="FREE_GIVEAWAY_RESERVED";
 const DELIVERED_STATUS="DELIVERED_FREE_GIVEAWAY";
 // A claim stuck mid-flight (crashed worker) can be retaken after this long.
@@ -39,6 +45,8 @@ type ClaimRow={
   account_id:string|null;
   status:ClaimStatus;
   error:string|null;
+  attempts:number;
+  last_attempt_at:number|null;
   created_at:number;
   updated_at:number;
   delivered_at:number|null;
@@ -53,7 +61,20 @@ export async function ensureFreeGiveawaySchema(env:Env){
   await env.DB.prepare(
     "CREATE TABLE IF NOT EXISTS free_giveaway_claims ("+
     "user_id TEXT PRIMARY KEY,guild_id TEXT NOT NULL,account_id TEXT,status TEXT NOT NULL,"+
-    "error TEXT,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL,delivered_at INTEGER)"
+    "error TEXT,attempts INTEGER NOT NULL DEFAULT 1,last_attempt_at INTEGER,"+
+    "created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL,delivered_at INTEGER)"
+  ).run();
+  const columns=new Set((await env.DB.prepare("PRAGMA table_info(free_giveaway_claims)").all<{name:string}>())
+    .results.map(column=>column.name));
+  if(!columns.has("attempts")){
+    await env.DB.prepare("ALTER TABLE free_giveaway_claims ADD COLUMN attempts INTEGER NOT NULL DEFAULT 1").run();
+  }
+  if(!columns.has("last_attempt_at")){
+    await env.DB.prepare("ALTER TABLE free_giveaway_claims ADD COLUMN last_attempt_at INTEGER").run();
+  }
+  await env.DB.prepare(
+    "CREATE TABLE IF NOT EXISTS free_giveaway_blocked ("+
+    "user_id TEXT PRIMARY KEY,reason TEXT,created_at INTEGER NOT NULL)"
   ).run();
   await env.DB.prepare(
     "CREATE INDEX IF NOT EXISTS free_giveaway_claims_status_idx ON free_giveaway_claims(status,updated_at)"
@@ -69,6 +90,45 @@ export async function setFreeGiveawayEnabled(env:Env,enabled:boolean){
   await setXSetting(env,ENABLED_KEY,Boolean(enabled));
 }
 
+export async function getBurstLimit(env:Env):Promise<number>{
+  const value=await getXSetting<number>(env,BURST_LIMIT_KEY);
+  return typeof value==="number"&&Number.isInteger(value)&&value>=0&&value<=MAX_BURST_LIMIT
+    ?value
+    :DEFAULT_BURST_LIMIT;
+}
+
+export async function setBurstLimit(env:Env,limit:number){
+  if(!Number.isInteger(limit)||limit<0||limit>MAX_BURST_LIMIT){
+    throw new Error("FREE_GIVEAWAY_BURST_LIMIT_INVALID");
+  }
+  await setXSetting(env,BURST_LIMIT_KEY,limit);
+}
+
+const USER_ID=/^\d{15,25}$/;
+
+export async function blockGiveawayUser(env:Env,userId:string,reason:string){
+  await ensureFreeGiveawaySchema(env);
+  if(!USER_ID.test(userId)) throw new Error("FREE_GIVEAWAY_USER_ID_INVALID");
+  await env.DB.prepare(
+    "INSERT INTO free_giveaway_blocked(user_id,reason,created_at) VALUES(?,?,?) "+
+    "ON CONFLICT(user_id) DO UPDATE SET reason=excluded.reason"
+  ).bind(userId,reason.trim().slice(0,200)||null,Date.now()).run();
+  await auditX(env,{level:"warn",kind:"FREE_GIVEAWAY_USER_BLOCKED",message:"User blocked from the free giveaway.",details:{userId}})
+    .catch(()=>undefined);
+}
+
+export async function unblockGiveawayUser(env:Env,userId:string):Promise<boolean>{
+  await ensureFreeGiveawaySchema(env);
+  const result=await env.DB.prepare("DELETE FROM free_giveaway_blocked WHERE user_id=?").bind(userId).run();
+  return Number(result.meta?.changes??0)>0;
+}
+
+async function isBlocked(env:Env,userId:string):Promise<boolean>{
+  const row=await env.DB.prepare("SELECT 1 AS hit FROM free_giveaway_blocked WHERE user_id=?")
+    .bind(userId).first();
+  return Boolean(row);
+}
+
 export async function poolAvailableCount(env:Env,procurementClass:string):Promise<number>{
   await ensureXSchema(env);
   const row=await env.DB.prepare(
@@ -82,6 +142,19 @@ async function loadClaim(env:Env,userId:string){
   return await env.DB.prepare(
     "SELECT * FROM free_giveaway_claims WHERE user_id=?"
   ).bind(userId).first<ClaimRow>()??null;
+}
+
+async function recordAttempt(env:Env,userId:string){
+  await env.DB.prepare(
+    "UPDATE free_giveaway_claims SET attempts=attempts+1,last_attempt_at=? WHERE user_id=?"
+  ).bind(Date.now(),userId).run();
+}
+
+async function recentDeliveryCount(env:Env,sinceMs:number):Promise<number>{
+  const row=await env.DB.prepare(
+    "SELECT COUNT(*) AS count FROM free_giveaway_claims WHERE delivered_at>=?"
+  ).bind(sinceMs).first<{count:number}>();
+  return Math.max(0,Number(row?.count??0));
 }
 
 async function setClaim(
@@ -112,9 +185,9 @@ async function beginClaim(
 ):Promise<{claim:ClaimRow}|{stop:"ALREADY_CLAIMED"|"BUSY"|"ERROR"}>{
   const now=Date.now();
   const inserted=await env.DB.prepare(
-    "INSERT OR IGNORE INTO free_giveaway_claims(user_id,guild_id,status,created_at,updated_at) "+
-    "VALUES(?,?,'CLAIMING',?,?)"
-  ).bind(userId,guildId,now,now).run();
+    "INSERT OR IGNORE INTO free_giveaway_claims(user_id,guild_id,status,attempts,last_attempt_at,created_at,updated_at) "+
+    "VALUES(?,?,'CLAIMING',1,?,?,?)"
+  ).bind(userId,guildId,now,now,now).run();
   if(Number(inserted.meta?.changes??0)===1){
     const fresh=await loadClaim(env,userId);
     return fresh?{claim:fresh}:{stop:"ERROR"};
@@ -128,9 +201,9 @@ async function beginClaim(
   }
   if(existing.status==="WAITING_STOCK"||existing.status==="DM_FAILED"||existing.status==="ERROR"){
     const taken=await env.DB.prepare(
-      "UPDATE free_giveaway_claims SET status='CLAIMING',error=NULL,guild_id=?,updated_at=? "+
-      "WHERE user_id=? AND status=?"
-    ).bind(guildId,now,userId,existing.status).run();
+      "UPDATE free_giveaway_claims SET status='CLAIMING',error=NULL,guild_id=?,updated_at=?,"+
+      "attempts=attempts+1,last_attempt_at=? WHERE user_id=? AND status=?"
+    ).bind(guildId,now,now,userId,existing.status).run();
     if(Number(taken.meta?.changes??0)!==1) return {stop:"BUSY"};
     return {claim:{...existing,status:"CLAIMING",error:null,guild_id:guildId,updated_at:now}};
   }
@@ -202,7 +275,15 @@ function credentialBlock(value:string){
 
 export type ClaimOutcome=
   |"DELIVERED"|"ALREADY_CLAIMED"|"BUSY"|"DISABLED"|"WAITING_STOCK"|"DM_FAILED"
-  |"DELIVERY_UNCERTAIN"|"ERROR";
+  |"DELIVERY_UNCERTAIN"|"ERROR"|"BLOCKED"|"NOT_VERIFIED"|"RESTRICTED"|"THROTTLED";
+
+// What the interaction tells us about the member pressing the button.
+export type ClaimantInfo={
+  // true while the member has not passed the server's membership screening
+  pending?:boolean;
+  // ISO time until which the member is timed out by a moderator
+  timedOutUntil?:string|null;
+};
 
 // Runs the whole claim for one user. Safe to call concurrently for the same
 // user: only one caller gets the claim row, and an account is only ever
@@ -210,10 +291,49 @@ export type ClaimOutcome=
 export async function claimFreeGiveaway(
   env:Env,
   userId:string,
-  guildId:string
+  guildId:string,
+  claimant:ClaimantInfo={}
+):Promise<ClaimOutcome>{
+  const outcome=await claimFreeGiveawayInner(env,userId,guildId,claimant);
+  // Every press is logged so abuse can be investigated afterwards.
+  await auditX(env,{
+    level:outcome==="BLOCKED"||outcome==="THROTTLED"||outcome==="RESTRICTED"?"warn":"info",
+    kind:"FREE_GIVEAWAY_CLAIM",
+    message:"Free giveaway press: "+outcome,
+    details:{userId,guildId,outcome}
+  }).catch(()=>undefined);
+  return outcome;
+}
+
+async function claimFreeGiveawayInner(
+  env:Env,
+  userId:string,
+  guildId:string,
+  claimant:ClaimantInfo
 ):Promise<ClaimOutcome>{
   await ensureFreeGiveawaySchema(env);
   if(!(await isFreeGiveawayEnabled(env))) return "DISABLED";
+
+  // Anti-abuse gates. None of them depend on how old the Discord account is.
+  if(await isBlocked(env,userId)) return "BLOCKED";
+  if(claimant.pending) return "NOT_VERIFIED";
+  if(claimant.timedOutUntil){
+    const until=Date.parse(claimant.timedOutUntil);
+    if(Number.isFinite(until)&&until>Date.now()) return "RESTRICTED";
+  }
+
+  // Someone who already has an account hears that, even while the giveaway is throttled.
+  const existing=await loadClaim(env,userId);
+  if(existing&&(existing.status==="DELIVERED"||existing.status==="DELIVERY_UNCERTAIN")){
+    await recordAttempt(env,userId);
+    return "ALREADY_CLAIMED";
+  }
+
+  const burstLimit=await getBurstLimit(env);
+  if(burstLimit>0&&(await recentDeliveryCount(env,Date.now()-BURST_WINDOW_MS))>=burstLimit){
+    if(existing) await recordAttempt(env,userId);
+    return "THROTTLED";
+  }
 
   const begun=await beginClaim(env,userId,guildId);
   if("stop" in begun) return begun.stop;
@@ -289,7 +409,11 @@ const OUTCOME_MESSAGE:Record<ClaimOutcome,string>={
   WAITING_STOCK:"ただいま在庫切れです。入荷したらもう一度ボタンを押してください。",
   DM_FAILED:"DMを送れませんでした。サーバーのプライバシー設定でDMを許可してから、もう一度ボタンを押してください。",
   DELIVERY_UNCERTAIN:"送信結果を確認できませんでした。DMを確認し、届いていなければ管理者に連絡してください。",
-  ERROR:"エラーが発生しました。時間をおいてもう一度お試しください。"
+  ERROR:"エラーが発生しました。時間をおいてもう一度お試しください。",
+  BLOCKED:"このアカウントでは受け取りできません。",
+  NOT_VERIFIED:"サーバーのルールへの同意（メンバー認証）を済ませてから、もう一度押してください。",
+  RESTRICTED:"現在このアカウントでは受け取りできません。",
+  THROTTLED:"ただいま受け取りが集中しています。数分おいてから、もう一度押してください。"
 };
 
 export const FREE_GIVEAWAY_BUTTON_ID="fgv:claim";
@@ -358,7 +482,10 @@ export async function handleFreeGiveawayInteraction(
   ctx.waitUntil((async()=>{
     let outcome:ClaimOutcome;
     try{
-      outcome=await claimFreeGiveaway(env,userId,guildId);
+      outcome=await claimFreeGiveaway(env,userId,guildId,{
+        pending:interaction.member?.pending===true,
+        timedOutUntil:interaction.member?.communication_disabled_until??null
+      });
     }catch(error){
       console.error("free giveaway claim failed",error);
       outcome="ERROR";
@@ -379,8 +506,12 @@ export async function postFreeGiveawayPanel(env:Env,channelId:string){
 
 export async function freeGiveawayOverview(env:Env){
   await ensureFreeGiveawaySchema(env);
-  const [enabled,stock,reserved,statusRows,recent]=await Promise.all([
+  const [enabled,burstLimit,blocked,stock,reserved,statusRows,recent]=await Promise.all([
     isFreeGiveawayEnabled(env),
+    getBurstLimit(env),
+    env.DB.prepare(
+      "SELECT user_id,reason,created_at FROM free_giveaway_blocked ORDER BY created_at DESC LIMIT 50"
+    ).all<{user_id:string;reason:string|null;created_at:number}>(),
     poolAvailableCount(env,FREE_GIVEAWAY_CLASS),
     env.DB.prepare(
       "SELECT COUNT(*) AS count FROM purchased_accounts WHERE procurement_class=? AND status=?"
@@ -389,14 +520,17 @@ export async function freeGiveawayOverview(env:Env){
       "SELECT status,COUNT(*) AS count FROM free_giveaway_claims GROUP BY status"
     ).all<{status:string;count:number}>(),
     env.DB.prepare(
-      "SELECT user_id,status,error,updated_at,delivered_at FROM free_giveaway_claims "+
+      "SELECT user_id,status,error,attempts,updated_at,delivered_at FROM free_giveaway_claims "+
       "ORDER BY updated_at DESC LIMIT 20"
-    ).all<{user_id:string;status:string;error:string|null;updated_at:number;delivered_at:number|null}>()
+    ).all<{user_id:string;status:string;error:string|null;attempts:number;updated_at:number;delivered_at:number|null}>()
   ]);
   const claims:Record<string,number>={};
   for(const row of statusRows.results) claims[row.status]=Number(row.count);
   return {
     enabled,
+    burstLimit,
+    burstWindowMinutes:BURST_WINDOW_MS/60_000,
+    blocked:blocked.results,
     stockCount:stock,
     reservedCount:Math.max(0,Number(reserved?.count??0)),
     claims,

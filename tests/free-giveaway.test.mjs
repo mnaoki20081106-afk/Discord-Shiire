@@ -60,7 +60,9 @@ async function fixture(t){
  const addStock=(pool,items)=>bridge('/generator/pools/'+pool+'/stock','POST',{items});
  const stock=async pool=>(await (await bridge('/generator/pools/'+pool+'/stock')).json()).stockCount;
  const overview=async()=>(await bridge('/free-giveaway')).json();
- return {state,bridge,press,flush,addStock,stock,overview};
+ const db=await mf.getD1Database('DB');
+ const audit=async()=>(await db.prepare("SELECT message,details_json FROM audit_logs WHERE kind='FREE_GIVEAWAY_CLAIM' ORDER BY created_at").all()).results.map(r=>({message:r.message,...JSON.parse(r.details_json)}));
+ return {state,bridge,press,flush,addStock,stock,overview,db,audit};
 }
 
 test('pools are filled independently and unknown pool names are rejected',async t=>{
@@ -98,7 +100,7 @@ test('each Discord account gets exactly one free account, delivered by DM',async
  await press('1001');await flush();
  assert.equal(state.dms.length,1);
  assert.equal(state.dms[0].userId,'1001');
- assert.match(state.dms[0].payload.embeds[0].description,/a:pw\|a@x\.test/,'credentials are decrypted for delivery');
+ assert.match(state.dms[0].payload.embeds[0].description,/([ab]):pw\|\1@x\.test/,'credentials are decrypted for delivery');
  assert.match(state.edits.at(-1),/DMに送りました/);
  assert.equal(await stock('free-giveaway'),1);
 
@@ -109,6 +111,7 @@ test('each Discord account gets exactly one free account, delivered by DM',async
 
  await press('1002');await flush();
  assert.equal(state.dms.length,2);
+ assert.notEqual(state.dms[1].payload.embeds[0].description,state.dms[0].payload.embeds[0].description,'each claimant gets a different account');
  assert.equal(await stock('free-giveaway'),0);
 
  const data=await overview();
@@ -171,4 +174,90 @@ test('the panel is posted with the claim button and only to a channel of this gu
  // Interactions that are not ours are ignored.
  const other=await press('5001',{data:{custom_id:'svm:buy:x'}});
  assert.equal(other.status,404);
+});
+
+test('blocked users cannot claim, and unblocking restores access',async t=>{
+ const {state,bridge,press,addStock,stock,overview}=await fixture(t);
+ await bridge('/free-giveaway/settings','POST',{enabled:true});
+ await addStock('free-giveaway',['a:pw','b:pw']);
+
+ assert.equal((await bridge('/free-giveaway/blocklist','POST',{userId:'abc'})).status,400);
+ const blocked=await (await bridge('/free-giveaway/blocklist','POST',{userId:'6001234567890123',reason:'alt farm'})).json();
+ assert.equal(blocked.blocked[0].user_id,'6001234567890123');
+ assert.equal(blocked.blocked[0].reason,'alt farm');
+
+ await press('6001234567890123');
+ assert.match(state.edits.at(-1),/受け取りできません/);
+ assert.equal(state.dms.length,0);
+ assert.equal(await stock('free-giveaway'),2,'no account is reserved for a blocked user');
+ assert.equal(Object.keys((await overview()).claims).length,0,'blocked presses create no claim');
+
+ assert.equal((await bridge('/free-giveaway/blocklist/6001234567890123','DELETE')).status,200);
+ assert.equal((await bridge('/free-giveaway/blocklist/6001234567890123','DELETE')).status,404);
+ await press('6001234567890123');
+ assert.equal(state.dms.length,1);
+});
+
+test('members who skipped membership screening or are timed out do not get an account',async t=>{
+ const {state,bridge,press,addStock,stock,overview}=await fixture(t);
+ await bridge('/free-giveaway/settings','POST',{enabled:true});
+ await addStock('free-giveaway',['a:pw']);
+
+ await press('7001',{member:{user:{id:'7001'},pending:true}});
+ assert.match(state.edits.at(-1),/メンバー認証/);
+ const future=new Date(Date.now()+3600_000).toISOString();
+ await press('7002',{member:{user:{id:'7002'},communication_disabled_until:future}});
+ assert.match(state.edits.at(-1),/受け取りできません/);
+ await press('7003',{member:{user:{id:'7003'},communication_disabled_until:new Date(Date.now()-3600_000).toISOString()}});
+ assert.equal(state.dms.length,1,'an expired timeout no longer blocks');
+ assert.equal(state.dms[0].userId,'7003');
+ assert.equal(await stock('free-giveaway'),0);
+ assert.deepEqual(Object.keys((await overview()).claims),['DELIVERED']);
+});
+
+test('a burst of claims is throttled, and it never blocks people who already have an account',async t=>{
+ const {state,bridge,press,addStock,db,overview}=await fixture(t);
+ await bridge('/free-giveaway/settings','POST',{enabled:true});
+ assert.equal((await bridge('/free-giveaway/settings','POST',{burstLimit:-1})).status,400);
+ assert.equal((await bridge('/free-giveaway/settings','POST',{burstLimit:1.5})).status,400);
+ assert.equal((await bridge('/free-giveaway/settings','POST',{})).status,400);
+ assert.equal((await (await bridge('/free-giveaway/settings','POST',{burstLimit:2})).json()).burstLimit,2);
+ await addStock('free-giveaway',['a:pw','b:pw','c:pw','d:pw']);
+
+ await press('8001');await press('8002');
+ assert.equal(state.dms.length,2);
+ await press('8003');
+ assert.match(state.edits.at(-1),/集中しています/);
+ assert.equal(state.dms.length,2);
+ await press('8001');
+ assert.match(state.edits.at(-1),/1個まで/,'a person who already claimed is told so, not "busy"');
+
+ // Once the window has passed, claims flow again.
+ await db.prepare('UPDATE free_giveaway_claims SET delivered_at=delivered_at-1200000').run();
+ await press('8003');
+ assert.equal(state.dms.length,3);
+ assert.equal((await overview()).burstLimit,2);
+
+ // 0 turns the throttle off.
+ await bridge('/free-giveaway/settings','POST',{burstLimit:0});
+ await press('8004');await press('8005');
+ assert.equal(state.dms.length,4,'the pool had one account left');
+});
+
+test('every press is logged and repeat attempts are counted',async t=>{
+ const {state,bridge,press,addStock,overview,audit}=await fixture(t);
+ await bridge('/free-giveaway/settings','POST',{enabled:true});
+ await addStock('free-giveaway',['a:pw']);
+ await press('9001');
+ await press('9001');
+ await press('9001');
+ await bridge('/free-giveaway/blocklist','POST',{userId:'90021234567890123'});
+ await press('90021234567890123');
+
+ const log=await audit();
+ assert.deepEqual(log.map(entry=>entry.userId+':'+entry.outcome),['9001:DELIVERED','9001:ALREADY_CLAIMED','9001:ALREADY_CLAIMED','90021234567890123:BLOCKED']);
+ const data=await overview();
+ assert.equal(data.recent.find(row=>row.user_id==='9001').attempts,3);
+ assert.equal(state.dms.length,1);
+ assert.doesNotMatch(JSON.stringify(log),/pw/,'credentials are never written to the log');
 });

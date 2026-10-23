@@ -52,8 +52,11 @@ import {
   GENERATOR_POOLS,
   freeGiveawayOverview,
   poolAvailableCount,
+  blockGiveawayUser,
   postFreeGiveawayPanel,
+  setBurstLimit,
   setFreeGiveawayEnabled,
+  unblockGiveawayUser,
   type GeneratorPoolName
 } from "./free-giveaway";
 import { receiveMainPayment, getMainPaymentStatus } from "./main-bot";
@@ -2742,10 +2745,35 @@ export async function handleShiireMainBridge(
 
   if(suffix==="/free-giveaway/settings"&&request.method==="POST"){
     const input=await parseBridgeJson(rawBody);
-    if(typeof input.enabled!=="boolean"){
+    const hasEnabled=input.enabled!==undefined;
+    const hasBurst=input.burstLimit!==undefined;
+    if(
+      (!hasEnabled&&!hasBurst)||
+      (hasEnabled&&typeof input.enabled!=="boolean")||
+      (hasBurst&&(typeof input.burstLimit!=="number"||!Number.isInteger(input.burstLimit)||input.burstLimit<0||input.burstLimit>1000))
+    ){
       throw new ShiireVendingError(400,"FREE_GIVEAWAY_SETTINGS_INVALID");
     }
-    await setFreeGiveawayEnabled(env,input.enabled);
+    if(hasEnabled) await setFreeGiveawayEnabled(env,input.enabled as boolean);
+    if(hasBurst) await setBurstLimit(env,input.burstLimit as number);
+    return responseJson(await freeGiveawayOverview(env));
+  }
+
+  if(suffix==="/free-giveaway/blocklist"&&request.method==="POST"){
+    const input=await parseBridgeJson(rawBody);
+    try{
+      await blockGiveawayUser(env,String(input.userId??"").trim(),String(input.reason??""));
+    }catch(error){
+      throw new ShiireVendingError(400,error instanceof Error?error.message:"FREE_GIVEAWAY_BLOCK_INVALID");
+    }
+    return responseJson(await freeGiveawayOverview(env));
+  }
+
+  const unblock=suffix.match(/^\/free-giveaway\/blocklist\/([^/]+)$/);
+  if(unblock&&request.method==="DELETE"){
+    if(!await unblockGiveawayUser(env,unblock[1]!)){
+      throw new ShiireVendingError(404,"FREE_GIVEAWAY_BLOCK_NOT_FOUND");
+    }
     return responseJson(await freeGiveawayOverview(env));
   }
 
