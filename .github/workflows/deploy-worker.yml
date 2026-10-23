@@ -1,0 +1,33 @@
+name: Deploy Discord-Shiire worker to Cloudflare
+
+on:
+  push:
+    branches: ["main"]
+    paths:
+      - "src/**"
+      - "wrangler.jsonc"
+      - "package.json"
+      - "package-lock.json"
+      - ".github/workflows/deploy-worker.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-worker
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci
+      - name: Deploy Worker
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          # Not a secret: Cloudflare account IDs are visible in the dashboard URL.
+          accountId: "3f4daf94bed8e8159413918292375b7a"
+          command: deploy
