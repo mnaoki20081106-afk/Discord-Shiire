@@ -1,4 +1,5 @@
 import { panelPayload, isPanelColor, PANEL_FORMAT_VERSION } from "./shiire-panel-payload";
+import { paymentPendingMessage, paymentRejectedMessage } from "./payment-messages";
 import type { Env } from "./types";
 import { hmacHex, sha256Hex } from "./crypto";
 import { loadXSettings, saveXSettings } from "./x-settings";
@@ -942,7 +943,7 @@ async function processPaymentLink(
     };
   }
   if(result.status==="pending"){
-    return {status:"pending",delivered:false};
+    return {status:"pending",delivered:false,reason:result.reason};
   }
   await clearShiirePaymentLink(env,order.id);
   return {status:"rejected",delivered:false,reason:result.reason};
@@ -1318,17 +1319,9 @@ export async function handleShiireVendingInteraction(
         ));
       }
       if(result.status==="pending"){
-        return interactionResponse(ephemeral(
-          "決済受取が保留されています。1分ごとに自動確認します。"
-        ));
+        return interactionResponse(ephemeral(paymentPendingMessage(result.reason)));
       }
-      return interactionResponse(ephemeral(
-        result.reason==="PAYPAY_MONEY_LIGHT_NOT_ALLOWED"
-          ?"PayPayマネーライトを含む送金リンクは無在庫販売では利用できません。PayPayマネーのみのリンクを入力してください。"
-          :result.reason==="PAYPAY_BALANCE_TYPE_UNKNOWN"
-            ?"PayPay残高の種類を確認できないため受け取りませんでした。PayPayマネーのみのリンクを入力してください。"
-            :"決済を確認できませんでした。別の有効な送金リンクを入力してください。"
-      ));
+      return interactionResponse(ephemeral(paymentRejectedMessage(result.reason)));
     }
   }
 
