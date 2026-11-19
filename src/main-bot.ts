@@ -85,10 +85,13 @@ async function responseJson<T>(response:Response):Promise<T>{
   return (text?JSON.parse(text):{}) as T;
 }
 
+// 仕入れ品の補充先 is an Xaccount-Bot vending product (its supply bridge).
 export async function getMainStock(env:Env,mainProductId:string){
   const response=await signedFetch(
     env,
-    "/api/vending/supply/products/"+encodeURIComponent(mainProductId)+"/stock"
+    "/api/vending/supply/products/"+encodeURIComponent(mainProductId)+"/stock",
+    {},
+    "xaccount"
   );
   return responseJson<{
     productId:string;
@@ -110,7 +113,7 @@ export async function deliverToMain(
   const response=await signedFetch(env,"/api/vending/supply/deliver",{
     method:"POST",
     body
-  });
+  },"xaccount");
   return responseJson<{
     ok:boolean;
     productId:string;
@@ -122,7 +125,7 @@ export async function deliverToMain(
 }
 
 export async function getMainCatalog(env:Env){
-  const response=await signedFetch(env,"/api/vending/supply/catalog");
+  const response=await signedFetch(env,"/api/vending/supply/catalog",{},"xaccount");
   return responseJson<{
     products:Array<{
       product_id:string;

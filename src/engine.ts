@@ -21,6 +21,7 @@ import {
 import { acquireFromSupplier, SupplierError } from "./suppliers";
 import { processItems, ProcessorError } from "./processors";
 import { deliverToMain, getMainStock } from "./main-bot";
+import { dueGenericItems, ensureProcurementSchema, markItemRan } from "./procurement";
 
 const OUT_OF_STOCK_RETRY_MS=15*60_000;
 
@@ -319,9 +320,12 @@ export async function runProduct(
       };
     }
 
+    // 上限在庫 (max_stock, 0 = none) caps the target.
+    const maxStock=Number((product as ProductRow&{max_stock?:number}).max_stock??0);
+    const target=maxStock>0?Math.min(product.target_stock,maxStock):product.target_stock;
     const requested=Math.min(
       product.max_batch,
-      Math.max(0,product.target_stock-stock.available)
+      Math.max(0,target-stock.available)
     );
     if(requested<=0){
       return {
@@ -359,11 +363,21 @@ export async function runProduct(
   }
 }
 
-export async function runAllProducts(env:Env){
-  await ensureSchema(env);
-  const products=await listEnabledProducts(env);
+/**
+ * Generic (non-HSTORA) 仕入れ品. Each item runs once a day at the shared
+ * restock time; an unfinished job (e.g. delivery failed) is resumed every
+ * minute until it completes. HSTORA items are run by the HSTORA engine.
+ */
+export async function runAllProducts(env:Env,now=Date.now()){
+  await ensureProcurementSchema(env);
+  const due=new Set((await dueGenericItems(env,now)).map(item=>item.id));
+  const products=(await listEnabledProducts(env)).filter(product=>product.main_product_id);
   const results:RunResult[]=[];
   for(const product of products){
+    const supplier=await getSupplier(env,product.supplier_id);
+    if(!supplier||supplier.kind==="hstora") continue;
+    const resumable=Boolean(await findRecoverableJob(env,product.id));
+    if(!due.has(product.id)&&!resumable) continue;
     try{
       results.push(await runProduct(env,product));
     }catch(error){
@@ -374,6 +388,8 @@ export async function runAllProducts(env:Env){
         productId:product.id,
         message
       }).catch(()=>undefined);
+    }finally{
+      if(due.has(product.id)) await markItemRan(env,product.id,now).catch(()=>undefined);
     }
   }
   return results;

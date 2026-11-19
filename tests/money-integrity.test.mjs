@@ -92,15 +92,16 @@ test('deposit budget credit survives audit failure without crediting twice',asyn
  await mf.dispatchFetch('https://test/balance-run');
  assert.equal((await db.prepare('SELECT SUM(available_usd) n FROM procurement_budgets').first()).n,110);
 });
-test('overlapping daily executions publish one summary',async()=>{
- const {mf,db,calls,entered,release}=await fixture({holdNotification:true});await mf.dispatchFetch('https://test/daily-init');await notificationState(mf,db);
- const first=mf.dispatchFetch('https://test/daily-continue');await entered;
- const second=mf.dispatchFetch('https://test/daily-continue');
- // Flush the second invocation through its database operations before responding.
- const response=await Promise.race([second,new Promise(r=>setTimeout(()=>r(null),100))]);
- release();await first;await second;
- assert.equal(calls.filter(u=>u.includes('discord.com')).length,1);
- assert.ok(response,'overlap should promptly report a held daily lease');
+test('completed daily batch is announced by Xaccount-Bot, not posted by Shiire',async()=>{
+ // Arrivals are announced by the destination machine's stock-added notification
+ // in Xaccount-Bot (仕入れ品 → 補充先); Shiire no longer posts its own panel.
+ const {mf,db,calls}=await fixture();await mf.dispatchFetch('https://test/daily-init');await notificationState(mf,db);
+ assert.equal((await mf.dispatchFetch('https://test/daily-continue')).status,200);
+ await mf.dispatchFetch('https://test/daily-continue');
+ assert.equal(calls.filter(u=>u.includes('discord.com')).length,0);
+ const state=JSON.parse((await db.prepare("SELECT value_json FROM settings WHERE key='x_daily_restock_state'").first()).value_json);
+ assert.ok(state.notified_at>0);
+ assert.equal(state.notification_skipped_reason,'XACCOUNT_STOCK_NOTIFICATION');
 });
 
 test('order persistence failure rolls back the reserved category budgets',async()=>{
@@ -124,21 +125,6 @@ test('busy financial run keeps daily batch running and blocks admin rebalance',a
   assert.equal(JSON.parse((await db.prepare("SELECT value_json FROM settings WHERE key='x_daily_restock_state'").first()).value_json).status,'running');
   assert.equal((await mf.dispatchFetch('https://test/api/x/procurement-budget/rebalance',{method:'POST',body:'{}'})).status,409);
  }finally{release();await held;}
-});
-
-test('public arrival notice lists sellable stock without internal target or budget fields',async()=>{
- const {mf,db,messages}=await fixture();await mf.dispatchFetch('https://test/daily-init');await notificationState(mf,db);
- await db.prepare("UPDATE purchased_accounts SET procurement_class='TOP_SEARCH' WHERE id='a'").run();
- await db.prepare("INSERT INTO purchased_accounts(id,supplier,supplier_product_id,purchase_order_id,purchase_price,purchased_at,credentials_ciphertext,credential_fingerprint,procurement_class,status,created_at) VALUES ('b','hstora','1','po',1,1,'{}','reserved-fingerprint','NO_SHADOWBAN','VENDING_RESERVED',1)").run();
- assert.equal((await mf.dispatchFetch('https://test/daily-continue')).status,200);
- assert.match(messages[0].content,/①Search Top \+ No shadow ban\*\n現在在庫 : 0個（\+0個）/);
- assert.match(messages[0].content,/②【Old】Top Search \+ No shadow ban\*\n現在在庫 : 1個（\+1個）/);
- assert.match(messages[0].content,/^@everyone/);
- assert.deepEqual(messages[0].allowed_mentions,{parse:['everyone']});
- assert.deepEqual(messages[0].embeds,[]);
- await mf.dispatchFetch('https://test/daily-continue');
- assert.equal(messages.length,1,'retry after successful notification must not send again');
- assert.doesNotMatch(JSON.stringify(messages[0]),/TARGET_NOT_REACHED|budget|恒常在庫未達/);
 });
 
 async function notificationState(mf,db){
@@ -187,10 +173,8 @@ for(const mention of ['123456789012345680',''])test('daily arrival mention selec
  assert.deepEqual(messages[0].allowed_mentions,{parse:[]},'installing preview must not ping');
  await notificationState(mf,db);
  await mf.dispatchFetch('https://test/daily-continue');
- assert.equal(messages.length,3);
- assert.deepEqual(messages[1].allowed_mentions,{parse:[]},'updating tracked panel must not ping');
- assert.deepEqual(messages[2].allowed_mentions,mention?{roles:[mention]}:{parse:[]});
- assert.equal(messages[2].content,(mention?'<@&'+mention+'>':'')+' 通常 0個 (+0) / Old 1個 (+1)');
+ // Completion no longer posts or pings from Shiire (Xaccount-Bot stock notification instead).
+ assert.equal(messages.length,1);
  await mf.dispatchFetch('https://test/daily-continue');
- assert.equal(messages.length,3);
+ assert.equal(messages.length,1);
 });

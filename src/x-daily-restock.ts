@@ -1,3 +1,4 @@
+import { getRestockTime, isRestockWindow, stockForClass } from "./procurement";
 import { restockMessagePayload, validateRestockMessage, isRestockMention } from "./shiire-restock-message";
 import { withNamedRunLock } from "./x-run-lock";
 import type { Env } from "./types";
@@ -76,9 +77,10 @@ function notificationPayload(
 }
 
 async function currentStocks(env:Env){
+  // Stock now lives in the destination Xaccount-Bot products (仕入れ品).
   const [top,noShadow]=await Promise.all([
-    readyInventoryCountByClass(env,"TOP_SEARCH"),
-    readyInventoryCountByClass(env,"NO_SHADOWBAN")
+    stockForClass(env,"TOP_SEARCH"),
+    stockForClass(env,"NO_SHADOWBAN")
   ]);
   return {top,noShadow};
 }
@@ -259,7 +261,13 @@ async function finishDailyRestock(
       targetTopSearch:state.target_top_search
     }
   });
-  return publishDailyRestockSummary(env,state,config);
+  // Arrivals are announced by the Xaccount-Bot stock-added notification of the
+  // destination machine (仕入れ品 → 補充先). The old Shiire panel is retired.
+  void config;
+  state.notified_at=Date.now();
+  state.notification_skipped_reason="XACCOUNT_STOCK_NOTIFICATION";
+  await saveDailyRestockState(env,state);
+  return {action:"DAILY_RESTOCK_"+status.toUpperCase(),state};
 }
 
 function isPurchaseProgress(result:XRunResult){
@@ -482,14 +490,10 @@ async function continueDailyRestockLocked(env:Env){
       (state.status==="completed"||state.status==="partial")&&
       state.notified_at===0
     ){
-      try{
-        await publishDailyRestockSummary(env,state,config);
-      }catch(error){
-        return {
-          action:"DAILY_RESTOCK_NOTIFICATION_RETRY_FAILED",
-          error:error instanceof Error?error.message:String(error)
-        };
-      }
+      // Announced by the Xaccount-Bot stock-added notification instead.
+      state.notified_at=Date.now();
+      state.notification_skipped_reason="XACCOUNT_STOCK_NOTIFICATION";
+      await saveDailyRestockState(env,state);
     }
     return {action:"DAILY_RESTOCK_NOT_RUNNING",state};
   }
@@ -693,7 +697,7 @@ export async function handleDailyRestockCron(
     return continueDailyRestock(env);
   }
 
-  if(isDailyRestockScheduleWindow(scheduledTime)){
+  if(isRestockWindow(scheduledTime,await getRestockTime(env))){
     return startDailyRestock(env,scheduledTime,false);
   }
   return {action:"NO_DAILY_RESTOCK_CRON_ACTION"};

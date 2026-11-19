@@ -1,3 +1,5 @@
+import { handleProcurementBridge } from "./procurement-bridge";
+import { hstoraEnv } from "./procurement";
 import { panelPayload, isPanelColor, PANEL_FORMAT_VERSION } from "./shiire-panel-payload";
 import { paymentPendingMessage, paymentRejectedMessage } from "./payment-messages";
 import type { Env } from "./types";
@@ -1400,6 +1402,11 @@ export async function handleShiireMainBridge(
   const suffix=root[2]??"";
   const rawBody=["GET","HEAD"].includes(request.method)?"":await request.text();
   await verifyMainBridgeRequest(request,env,url,rawBody);
+  // HSTORA credentials entered on the dashboard (仕入れ先) override the Worker secrets.
+  env=await hstoraEnv(env);
+
+  const procurement=await handleProcurementBridge(env,request.method,suffix,rawBody);
+  if(procurement) return procurement;
 
   if(suffix==="/smm"||suffix.startsWith("/smm/")){
     return handleSmmBridge(env,request.method,guildId,suffix.slice(4),url,rawBody);

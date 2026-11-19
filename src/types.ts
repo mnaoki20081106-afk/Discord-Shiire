@@ -29,7 +29,7 @@ export interface Env {
   LUCKYPANEL_API_URL?: string;
 }
 
-export type SupplierKind = "pool" | "http_json";
+export type SupplierKind = "pool" | "http_json" | "hstora" | "custom_api" | "manual";
 export type ProcessorKind = "identity" | "http_json";
 
 export type SupplierRow = {

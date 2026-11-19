@@ -1,5 +1,6 @@
 import type { Env, SupplierRow } from "./types";
 import { takePoolItems } from "./db";
+import { supplierSecrets } from "./procurement";
 
 export class SupplierError extends Error{
   constructor(
@@ -52,7 +53,8 @@ async function acquireHttpJson(
   supplier:SupplierRow,
   sku:string,
   quantity:number,
-  idempotencyKey:string
+  idempotencyKey:string,
+  secrets:Record<string,string>={}
 ):Promise<string[]>{
   const config=parseConfig<HttpJsonSupplierConfig>(supplier.config_json);
   if(!config.baseUrl) throw new SupplierError("SUPPLIER_CONFIG_INVALID",false);
@@ -69,13 +71,12 @@ async function acquireHttpJson(
     ?null
     :(config.idempotencyHeader??"Idempotency-Key");
   if(idempotencyHeader) headers.set(idempotencyHeader,idempotencyKey);
-  if(config.tokenBinding){
-    const token=secretBinding(env,config.tokenBinding);
-    if(!token) throw new SupplierError("SUPPLIER_SECRET_MISSING",false);
-    headers.set(
-      config.authHeader??"Authorization",
-      (config.authScheme??"Bearer")+" "+token
-    );
+  // Key entered on the dashboard (encrypted on the supplier), or a Worker secret binding.
+  const token=secrets.apiKey||(config.tokenBinding?secretBinding(env,config.tokenBinding):null);
+  if(config.tokenBinding&&!token) throw new SupplierError("SUPPLIER_SECRET_MISSING",false);
+  if(token){
+    const scheme=config.authScheme===undefined?"Bearer":String(config.authScheme).trim();
+    headers.set(config.authHeader||"Authorization",scheme?scheme+" "+token:token);
   }
 
   let response:Response;
@@ -133,13 +134,14 @@ export async function acquireFromSupplier(
 ):Promise<string[]>{
   if(!supplier.enabled) throw new SupplierError("SUPPLIER_DISABLED",false);
   if(quantity<=0) return [];
-  if(supplier.kind==="pool"){
+  if(supplier.kind==="pool"||supplier.kind==="manual"){
     const items=await takePoolItems(env,supplier.id,sku,quantity,idempotencyKey);
     if(items.length===0) throw new SupplierError("OUT_OF_STOCK",true);
     return items;
   }
-  if(supplier.kind==="http_json"){
-    return acquireHttpJson(env,supplier,sku,quantity,idempotencyKey);
+  if(supplier.kind==="http_json"||supplier.kind==="custom_api"){
+    const secrets=await supplierSecrets(env,supplier as SupplierRow&{secrets_enc?:string|null}).catch(()=>({} as Record<string,string>));
+    return acquireHttpJson(env,supplier,sku,quantity,idempotencyKey,secrets);
   }
   throw new SupplierError("SUPPLIER_KIND_UNSUPPORTED",false);
 }

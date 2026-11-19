@@ -1,3 +1,4 @@
+import { hstoraEnv, transferHstoraAccounts } from "./procurement";
 import { handleFreeGiveawayInteraction } from "./free-giveaway";
 import type { Env, ProcessorKind, SupplierKind } from "./types";
 import {
@@ -477,15 +478,17 @@ export default {
       }
 
       try{
-        const settings=await loadXSettings(env);
+        // HSTORA credentials saved on the dashboard (仕入れ先) override the Worker secrets.
+        const xEnv=await hstoraEnv(env);
+        const settings=await loadXSettings(xEnv);
         try{
-          await runXMaintenance(env);
+          await runXMaintenance(xEnv);
         }catch(error){
           console.error("scheduled HStora balance/reconciliation failed",error);
         }
         if(settings.funding_mode==="binance_auto"&&settings.auto_purchase_enabled){
           try{
-            await runLtcAutoPurchase(env);
+            await runLtcAutoPurchase(xEnv);
           }catch(error){
             console.error("scheduled LTC auto-purchase failed",error);
           }
@@ -495,16 +498,22 @@ export default {
             // Outside the 18:00 daily batch, only the invite-campaign bucket
             // is allowed to auto-procure. This call also keeps HStora wallet
             // balance increases and procurement budgets synchronized.
-            await runXProcurement(env,{targetClasses:["INVITE_CAMPAIGN"]});
+            await runXProcurement(xEnv,{targetClasses:["INVITE_CAMPAIGN"]});
           }catch(error){
             console.error("scheduled invite X procurement failed",error);
           }
         }
 
         try{
-          await handleDailyRestockCron(env,controller.scheduledTime);
+          await handleDailyRestockCron(xEnv,controller.scheduledTime);
         }catch(error){
-          console.error("scheduled daily 18:00 restock failed",error);
+          console.error("scheduled daily restock failed",error);
+        }
+        try{
+          // Purchased HSTORA accounts → destination Xaccount-Bot products (仕入れ品).
+          await transferHstoraAccounts(xEnv);
+        }catch(error){
+          console.error("scheduled HSTORA transfer failed",error);
         }
       }catch(error){
         console.error("scheduled X automation settings load failed",error);

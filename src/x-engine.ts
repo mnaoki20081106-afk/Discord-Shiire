@@ -1,3 +1,4 @@
+import { stockForClass } from "./procurement";
 import { withFinancialRunLock, type AssertFinancialLease } from "./x-run-lock";
 import type { Env } from "./types";
 import { randomId } from "./crypto";
@@ -1569,8 +1570,9 @@ async function runXProcurementLocked(
   const campaignSettings=await getInviteCampaignSettings(env);
   const [inventory,topInventory,noShadowInventory,campaignInventory]=await Promise.all([
     readyInventoryCount(env),
-    readyInventoryCountByClass(env,"TOP_SEARCH"),
-    readyInventoryCountByClass(env,"NO_SHADOWBAN"),
+    // Includes the destination Xaccount-Bot product stock (仕入れ品).
+    stockForClass(env,"TOP_SEARCH"),
+    stockForClass(env,"NO_SHADOWBAN"),
     inviteCampaignStockCount(env)
   ]);
 
@@ -1741,10 +1743,9 @@ async function runXProcurementLocked(
     };
   }
 
-  const refreshedClassInventory=await readyInventoryCountByClass(
-    env,
-    targetClass
-  );
+  const refreshedClassInventory=targetClass==="INVITE_CAMPAIGN"
+    ?await readyInventoryCountByClass(env,targetClass)
+    :await stockForClass(env,targetClass);
   const overrideTarget=options.targetStockOverride?.[targetClass];
   const refreshedReorder=
     overrideTarget!==undefined
