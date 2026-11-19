@@ -9,7 +9,7 @@ const key=randomBytes(32).toString('base64');
 const guild='123456789012345678';
 const bundle=await build({stdin:{contents:`
 import {handleShiireMainBridge} from './src/shiire-vending';
-import {transferHstoraAccounts,stockForClass,ensureProcurementSchema} from './src/procurement';
+import {transferHstoraAccounts,stockForClass,ensureProcurementSchema,hstoraClassCaps,capQuantity,jstDayStart} from './src/procurement';
 import {runAllProducts} from './src/engine';
 import {encryptSensitive} from './src/x-crypto';
 export default {async fetch(request,env){
@@ -18,6 +18,12 @@ export default {async fetch(request,env){
   if(u.pathname==='/transfer') return Response.json(await transferHstoraAccounts(env));
   if(u.pathname==='/stock') return Response.json({n:await stockForClass(env,u.searchParams.get('class'))});
   if(u.pathname==='/run-all') return Response.json(await runAllProducts(env,Number(u.searchParams.get('now'))));
+  if(u.pathname==='/caps'){
+   const caps=await hstoraClassCaps(env,Number(u.searchParams.get('now')));
+   const b=await request.json();
+   const charged=b.charged.map(([cls,share])=>({state:caps.get(cls),share}));
+   return Response.json({spent:Object.fromEntries([...caps].map(([k,v])=>[k,v.spentSourceToday])),decision:capQuantity({...b,charged}),dayStart:jstDayStart(Number(u.searchParams.get('now')))});
+  }
   if(u.pathname==='/schema'){await ensureProcurementSchema(env);return Response.json({ok:true});}
   if(u.pathname==='/account'){
    const b=await request.json();
@@ -191,4 +197,43 @@ test('readable HSTORA accounts are delivered to the destination once and retries
  await mf.dispatchFetch('https://t/transfer');
  assert.equal(main.delivered.length,1,'nothing is re-sent');
  assert.equal((await (await mf.dispatchFetch('https://t/stock?class=TOP_SEARCH')).json()).n,1,'counted once (destination)');
+});
+
+test('per-item amount caps: unit price, per run and per JST day (split orders charge half to each class)',async()=>{
+ const {call,mf,db}=await fixture();
+ const {body}=await call('GET','/procurement');
+ const top=body.items.find(i=>i.condition.class==='TOP_SEARCH');
+ const ns=body.items.find(i=>i.condition.class==='NO_SHADOWBAN');
+ assert.equal((await call('PATCH','/procurement/items/'+top.id,{maxPurchaseJpy:1000,dailyLimitJpy:1500,maxUnitPriceJpy:300})).status,200);
+ const now=Date.UTC(2026,10,19,3,0); // 12:00 JST
+ const caps=async(b)=>(await mf.dispatchFetch('https://shiire.example/caps?now='+now,{method:'POST',body:JSON.stringify(b)})).json();
+ // 1 USD = 150 JPY; unit 2 USD = 300 JPY.
+ let r=await caps({requested:10,unitPriceJpy:300,unitPriceSource:2,charged:[['TOP_SEARCH',1]],evenOnly:false});
+ assert.deepEqual(r.decision,{quantity:3,limitedBy:'PER_RUN'},'1000円/300円 = 3');
+ r=await caps({requested:10,unitPriceJpy:301,unitPriceSource:2,charged:[['TOP_SEARCH',1]],evenOnly:false});
+ assert.deepEqual(r.decision,{quantity:0,limitedBy:'UNIT_PRICE'});
+ r=await caps({requested:10,unitPriceJpy:300,unitPriceSource:2,charged:[['NO_SHADOWBAN',1]],evenOnly:false});
+ assert.deepEqual(r.decision,{quantity:10,limitedBy:null},'no caps on the other item');
+ r=await caps({requested:10,unitPriceJpy:0,unitPriceSource:2,charged:[['TOP_SEARCH',1]],evenOnly:false});
+ assert.equal(r.decision.quantity,0,'unknown price with a cap blocks');
+ // Today: 6 USD (=900 JPY) for TOP, a split order 4 USD (2 USD each), a failed order and yesterday's order ignored.
+ const ins=(id,cls,total,status,created,split=null)=>db.prepare("INSERT INTO purchase_orders(id,supplier,supplier_product_id,quantity,unit_price,total_amount,currency,status,external_order_id,idempotency_key,procurement_class,delivery_split_mode,dry_run,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,0,?,?)")
+   .bind(id,'hstora','1',1,total,total,'USD',status,'e'+id,'i'+id,cls,split,created,created).run();
+ await ins('o1','TOP_SEARCH',6,'DELIVERED',now-3600_000);
+ await ins('o2','NO_SHADOWBAN',4,'PROCESSING',now-60_000,'DUAL');
+ await ins('o3','TOP_SEARCH',50,'FAILED',now-60_000);
+ await ins('o4','TOP_SEARCH',50,'DELIVERED',now-13*3600_000); // 前日 23:00 JST
+ r=await caps({requested:10,unitPriceJpy:150,unitPriceSource:1,charged:[['TOP_SEARCH',1]],evenOnly:false});
+ assert.equal(r.spent.TOP_SEARCH,8);
+ assert.equal(r.spent.NO_SHADOWBAN,2);
+ assert.deepEqual(r.decision,{quantity:2,limitedBy:'DAILY'},'1500円=10USD - 8USD spent = 2 left');
+ // Split: each class pays half, quantity stays even.
+ r=await caps({requested:10,unitPriceJpy:150,unitPriceSource:1,charged:[['TOP_SEARCH',0.5],['NO_SHADOWBAN',0.5]],evenOnly:true});
+ assert.deepEqual(r.decision,{quantity:4,limitedBy:'DAILY'});
+ assert.equal((await call('PATCH','/procurement/items/'+ns.id,{maxPurchaseJpy:-1})).status,400);
+ assert.equal(body.templates.find(t=>t.id==='hstora').supportsAmountCaps,true);
+ const manual=await call('POST','/procurement/suppliers',{name:'手動',template:'manual'});
+ const created=await call('POST','/procurement/items',{name:'M',supplierId:manual.body.id,condition:{sku:'S'},dailyLimitJpy:100});
+ assert.equal(created.status,400,'caps on a supplier without prices are refused');
+ assert.equal(created.body.error,'ITEM_CAPS_UNSUPPORTED');
 });

@@ -48,6 +48,8 @@ export type SupplierTemplate={
   fields:TemplateField[];
   // Saved on each item (what to buy from this supplier).
   conditionFields:TemplateField[];
+  // The supplier reports unit prices, so 1回/1日/単価 caps can be enforced.
+  supportsAmountCaps:boolean;
 };
 
 export const HSTORA_CLASSES=[
@@ -59,6 +61,7 @@ export type HstoraClass=typeof HSTORA_CLASSES[number]["value"];
 export const SUPPLIER_TEMPLATES:SupplierTemplate[]=[
   {
     id:"hstora",
+    supportsAmountCaps:true,
     label:"HSTORA",
     description:"Xアカウントの仕入れ先。API KeyとAPI Secretを入れるだけで使えます。支払いはHSTORAの残高から行います。",
     fields:[
@@ -71,6 +74,7 @@ export const SUPPLIER_TEMPLATES:SupplierTemplate[]=[
   },
   {
     id:"custom_api",
+    supportsAmountCaps:false,
     label:"カスタムAPI",
     description:"「数量を送ると在庫の文字列が返る」形のHTTP APIを持つ仕入れ先。URL・APIキー・レスポンス内の場所を設定します。",
     fields:[
@@ -87,6 +91,7 @@ export const SUPPLIER_TEMPLATES:SupplierTemplate[]=[
   },
   {
     id:"manual",
+    supportsAmountCaps:false,
     label:"手動投入",
     description:"自分で用意した在庫を貼り付けて補充先へ流します。",
     fields:[],
@@ -429,6 +434,10 @@ export async function saveItem(env:Env,id:string|null,input:ItemInput){
   const maxPurchaseJpy=intIn(input.maxPurchaseJpy,"1回の金額上限",0,10_000_000,existing?.max_purchase_jpy??0);
   const dailyLimitJpy=intIn(input.dailyLimitJpy,"1日の金額上限",0,100_000_000,existing?.daily_limit_jpy??0);
   const maxUnitPriceJpy=intIn(input.maxUnitPriceJpy,"単価の上限",0,10_000_000,existing?.max_unit_price_jpy??0);
+  if(!template.supportsAmountCaps&&(maxPurchaseJpy>0||dailyLimitJpy>0||maxUnitPriceJpy>0)){
+    // Without unit prices a cap could not be checked; refusing beats a cap that silently does nothing.
+    throw new ProcurementError(400,"ITEM_CAPS_UNSUPPORTED","この仕入れ先は価格を返さないため、金額上限は設定できません");
+  }
   const stocklessEnabled=input.stocklessEnabled===undefined?Boolean(existing?.stockless_enabled):Boolean(input.stocklessEnabled);
 
   const mainProductId=cleanText(input.mainProductId===undefined?existing?.main_product_id:input.mainProductId,64);
@@ -704,3 +713,79 @@ export function destinationsFromCatalog(catalog:Awaited<ReturnType<typeof getMai
 }
 
 export { getProduct };
+
+// ---------------------------------------------------------------------------
+// Per-item amount caps (1回 / 1日 / 単価, JPY; 0 = no cap)
+
+export type ItemCaps={maxPurchaseJpy:number;dailyLimitJpy:number;maxUnitPriceJpy:number};
+export type ClassCapState={procurementClass:HstoraClass;caps:ItemCaps;spentSourceToday:number};
+
+export function jstDayStart(now:number){
+  const shifted=now+9*3600_000;
+  return shifted-(shifted%86_400_000)-9*3600_000;
+}
+
+/** Caps of the HSTORA item for each class plus what that class spent today (order currency). */
+export async function hstoraClassCaps(env:Env,now=Date.now()):Promise<Map<HstoraClass,ClassCapState>>{
+  await ensureXSchema(env);
+  const targets=await hstoraTargets(env);
+  const out=new Map<HstoraClass,ClassCapState>();
+  for(const {item,procurementClass} of targets){
+    const caps={
+      maxPurchaseJpy:Math.max(0,Number(item.max_purchase_jpy??0)),
+      dailyLimitJpy:Math.max(0,Number(item.daily_limit_jpy??0)),
+      maxUnitPriceJpy:Math.max(0,Number(item.max_unit_price_jpy??0))
+    };
+    // Orders not known to have failed count (pending ones may still be charged).
+    // A split order is charged half to each class, as the budget does.
+    const row=await env.DB.prepare(
+      "SELECT COALESCE(SUM(CASE WHEN delivery_split_mode IS NOT NULL THEN total_amount/2.0 ELSE total_amount END),0) AS spent "+
+      "FROM purchase_orders WHERE supplier='hstora' AND dry_run=0 AND created_at>=? "+
+      "AND status NOT IN ('FAILED','CANCELED','CANCELLED','REJECTED','REFUNDED') "+
+      "AND (procurement_class=? OR delivery_split_mode IS NOT NULL)"
+    ).bind(jstDayStart(now),procurementClass).first<{spent:number}>();
+    out.set(procurementClass,{procurementClass,caps,spentSourceToday:Math.max(0,Number(row?.spent??0))});
+  }
+  return out;
+}
+
+export type CapDecision={quantity:number;limitedBy:null|"UNIT_PRICE"|"PER_RUN"|"DAILY"};
+
+/**
+ * Largest quantity ≤ requested that keeps every charged class inside its caps.
+ * unitPriceJpy / unitPriceSource are for the same unit; the source currency is
+ * what purchase_orders.total_amount is stored in.
+ */
+export function capQuantity(input:{
+  requested:number;
+  unitPriceJpy:number;
+  unitPriceSource:number;
+  charged:{state:ClassCapState|undefined;share:number}[];
+  evenOnly:boolean;
+}):CapDecision{
+  let quantity=Math.max(0,Math.floor(input.requested));
+  let limitedBy:CapDecision["limitedBy"]=null;
+  const unitJpy=Number(input.unitPriceJpy);
+  const unitSource=Number(input.unitPriceSource);
+  const anyCap=input.charged.some(row=>row.state&&(row.state.caps.maxPurchaseJpy>0||row.state.caps.dailyLimitJpy>0||row.state.caps.maxUnitPriceJpy>0));
+  if(!anyCap) return {quantity,limitedBy};
+  // A cap that cannot be evaluated must block, not pass.
+  if(!(unitJpy>0)||!(unitSource>0)) return {quantity:0,limitedBy:"UNIT_PRICE"};
+  for(const {state,share} of input.charged){
+    if(!state) continue;
+    const {caps}=state;
+    if(caps.maxUnitPriceJpy>0&&unitJpy>caps.maxUnitPriceJpy) return {quantity:0,limitedBy:"UNIT_PRICE"};
+    if(caps.maxPurchaseJpy>0){
+      const allowed=Math.floor(caps.maxPurchaseJpy/(unitJpy*share)+1e-9);
+      if(allowed<quantity){quantity=allowed;limitedBy="PER_RUN";}
+    }
+    if(caps.dailyLimitJpy>0){
+      const limitSource=caps.dailyLimitJpy*(unitSource/unitJpy);
+      const remaining=Math.max(0,limitSource-state.spentSourceToday);
+      const allowed=Math.floor(remaining/(unitSource*share)+1e-9);
+      if(allowed<quantity){quantity=allowed;limitedBy="DAILY";}
+    }
+  }
+  if(input.evenOnly) quantity=quantity<2?0:quantity-(quantity%2);
+  return {quantity:Math.max(0,quantity),limitedBy};
+}

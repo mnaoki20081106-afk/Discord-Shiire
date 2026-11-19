@@ -1,4 +1,4 @@
-import { stockForClass } from "./procurement";
+import { capQuantity, hstoraClassCaps, stockForClass, type CapDecision } from "./procurement";
 import { withFinancialRunLock, type AssertFinancialLease } from "./x-run-lock";
 import type { Env } from "./types";
 import { randomId } from "./crypto";
@@ -1851,21 +1851,53 @@ async function runXProcurementLocked(
       :policyQualification;
   };
 
+  // 仕入れ品ごとの金額上限 (1回/1日/単価). A split order is charged half to each class.
+  const itemCapStates=await hstoraClassCaps(env);
+  const capSplit=targetClass!=="INVITE_CAMPAIGN"&&splitAcrossClasses;
+  const chargedCaps=targetClass==="INVITE_CAMPAIGN"
+    ?[]
+    :capSplit
+      ?[{state:itemCapStates.get("TOP_SEARCH"),share:0.5},{state:itemCapStates.get("NO_SHADOWBAN"),share:0.5}]
+      :[{state:itemCapStates.get(targetClass),share:1}];
+  let capDecision:CapDecision={quantity,limitedBy:null};
+
   let q=qualifyForQuantity(quantity);
   while(quantity>0){
     const budgetUnitSource=Number(q.unit_price_source);
     if(!Number.isFinite(budgetUnitSource)||budgetUnitSource<=0) break;
 
-    const nextQuantity=maxAffordableQuantityForBudget(
+    const affordable=maxAffordableQuantityForBudget(
       targetClass,
       splitAcrossClasses,
       budgetUnitSource,
       quantity,
       budgetSnapshot.available
     );
+    capDecision=capQuantity({
+      requested:affordable,
+      unitPriceJpy:Number(q.unit_price_jpy),
+      unitPriceSource:budgetUnitSource,
+      charged:chargedCaps,
+      evenOnly:capSplit
+    });
+    const nextQuantity=capDecision.quantity;
     if(nextQuantity===quantity) break;
 
     quantity=nextQuantity;
+    if(quantity<=0&&capDecision.limitedBy&&affordable>0){
+      await auditX(env,{
+        kind:"X_PROCUREMENT_ITEM_CAP",
+        message:"仕入れ品の金額上限により今回の仕入れを見送りました",
+        details:{targetClass,limitedBy:capDecision.limitedBy,unitPriceJpy:q.unit_price_jpy}
+      }).catch(()=>undefined);
+      return {
+        action:"PROCUREMENT_ITEM_CAP_REACHED",
+        dryRun:settings.dry_run,
+        inventory,
+        productId:Number(fresh.id),
+        details:{targetClass,limitedBy:capDecision.limitedBy,unitPriceJpy:q.unit_price_jpy}
+      };
+    }
     if(quantity<=0){
       return {
         action:"PROCUREMENT_BUDGET_EXHAUSTED",
