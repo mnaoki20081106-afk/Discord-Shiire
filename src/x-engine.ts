@@ -1,3 +1,4 @@
+import { resolveRewardSource } from "./reward-stock";
 import { capQuantity, hstoraClassCaps, stockForClass, type CapDecision } from "./procurement";
 import { withFinancialRunLock, type AssertFinancialLease } from "./x-run-lock";
 import type { Env } from "./types";
@@ -1591,9 +1592,12 @@ async function runXProcurementLocked(
   const noShadowTarget=
     options.targetStockOverride?.NO_SHADOWBAN??settings.no_shadowban_target_stock;
 
+  // Rewards taken from an Xaccount-Bot product need no dedicated HSTORA pool.
+  const inviteFromXaccount=(await resolveRewardSource(env,"invite")).mode==="xaccount";
   if(
     allowTarget("INVITE_CAMPAIGN")&&
     campaignSettings.enabled&&
+    !inviteFromXaccount&&
     campaignInventory<inviteTarget
   ){
     targetOptions.push({

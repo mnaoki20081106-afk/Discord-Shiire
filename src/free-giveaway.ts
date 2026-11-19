@@ -6,7 +6,7 @@ import {
   inviteDiscordJson,
   sendInviteCampaignDm
 } from "./invite-campaign-discord";
-import { describeRewardSource, resolveRewardSource } from "./reward-stock";
+import { describeRewardSource, ensureXaccountRewardStock, resolveRewardSource } from "./reward-stock";
 
 // Free giveaway: every Discord account can claim exactly one account for free
 // by pressing the button on a panel. Stock is a dedicated pool of
@@ -234,6 +234,7 @@ async function reserveAccount(env:Env,claim:ClaimRow):Promise<PoolAccountRow|nul
   }
   const source=await resolveRewardSource(env,"giveaway");
   if(source.unavailable) return null;
+  if(!await ensureXaccountRewardStock(env,source,"giveaway:"+claim.user_id)) return null;
   for(let attempt=0;attempt<8;attempt++){
     const row=await env.DB.prepare(
       "SELECT id,credentials_ciphertext,status FROM purchased_accounts "+

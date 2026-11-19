@@ -4,9 +4,10 @@ import {createHmac,randomUUID} from 'node:crypto';
 import {build} from 'esbuild';
 import {Miniflare} from 'miniflare';
 
-// A product can be chosen to share stock with the invite-campaign reward
-// and/or the free giveaway, instead of each drawing from its own dedicated
-// pool of generator accounts.
+// An Xaccount-Bot product can be chosen as the stock of the invite-campaign
+// reward and/or the free giveaway (instead of each drawing from its own
+// dedicated pool of generator accounts). Accounts are withdrawn from that
+// product one at a time through the signed supply bridge.
 
 const guild='123456789012345678',secret='fixture-reward-stock-secret-longer-than-32-characters';
 const encryptionKey=Buffer.alloc(32,9).toString('base64');
@@ -25,11 +26,21 @@ export default {async fetch(request,env){try{
 }catch(error){return Response.json({message:error.message},{status:error.status??500});}}};`,resolveDir:process.cwd(),sourcefile:'reward-stock-fixture.ts'},bundle:true,write:false,format:'esm',platform:'browser'});
 
 async function fixture(t){
- const state={dms:[]};
+ const state={dms:[],stock:{'xp-1':[],'xp-2':[]},withdrawals:{}};
  const mf=new Miniflare({modules:true,script:bundle.outputFiles[0].text,compatibilityDate:'2026-08-06',compatibilityFlags:['nodejs_compat'],d1Databases:['DB'],
-  bindings:{SHIIRE_BRIDGE_SECRET:secret,CREDENTIALS_ENCRYPTION_KEY:encryptionKey,DISCORD_BOT_TOKEN:'fixture'},
+  bindings:{SHIIRE_BRIDGE_SECRET:secret,CREDENTIALS_ENCRYPTION_KEY:encryptionKey,DISCORD_BOT_TOKEN:'fixture',XACCOUNT_BOT_BASE_URL:'https://xaccount.example'},
   outboundService:async request=>{
    const url=new URL(request.url);
+   if(url.host==='xaccount.example'){
+    if(url.pathname==='/api/vending/supply/catalog') return Response.json({products:Object.keys(state.stock).map(id=>({product_id:id,product_name:'商品'+id,vending_machine_id:'vm',vending_machine_name:'自販機',guild_id:guild,available:state.stock[id].length}))});
+    const stock=url.pathname.match(/^\/api\/vending\/supply\/products\/([^/]+)\/stock$/);
+    if(stock) return state.stock[stock[1]]?Response.json({productId:stock[1],name:'x',available:state.stock[stock[1]].length,infinite:false}):Response.json({error:'product_not_found'},{status:404});
+    if(url.pathname==='/api/vending/supply/withdraw'){
+     const body=await request.json();
+     if(!state.withdrawals[body.idempotencyKey]) state.withdrawals[body.idempotencyKey]=state.stock[body.productId].splice(0,body.quantity);
+     return Response.json({ok:true,productId:body.productId,items:state.withdrawals[body.idempotencyKey]});
+    }
+   }
    if(url.pathname==='/api/v10/users/@me/channels') return Response.json({id:'dm-'+(await request.json()).recipient_id});
    const dmMatch=url.pathname.match(/^\/api\/v10\/channels\/dm-(\d+)\/messages$/);
    if(dmMatch){
@@ -60,93 +71,57 @@ async function fixture(t){
  return {state,bridge,press,addStock,createMachine,createProduct,db};
 }
 
-test('choosing a product for the invite reward shares its stock',async t=>{
- const {bridge,addStock,createMachine,createProduct,db}=await fixture(t);
-
- // Before any product is chosen, the generator fills the dedicated pool.
+test('choosing an Xaccount-Bot product for the invite reward uses its stock',async t=>{
+ const {state,bridge,addStock}=await fixture(t);
  await addStock('invite-campaign',['legacy1:pw']);
  let affiliate=await (await bridge('/affiliate')).json();
  assert.equal(affiliate.invite.source.mode,'dedicated');
  assert.equal(affiliate.invite.stock.available,1);
+ assert.deepEqual(affiliate.products.map(p=>p.id),['xp-1','xp-2'],'candidates are Xaccount-Bot products');
 
- const machine=await createMachine('本棚');
- const product=await createProduct(machine.id,{name:'シャドバなし',supplierProductId:'sku-1',pricePayPay:1000,priceKyash:1000});
+ state.stock['xp-1'].push('shared1:pw','shared2:pw');
+ const switched=await (await bridge('/affiliate/invite/product','POST',{productId:'xp-1'})).json();
+ assert.equal(switched.source.mode,'xaccount');
+ assert.equal(switched.source.productName,'商品xp-1');
+ assert.equal(switched.source.stockCount,2,'the legacy pool does not follow the switch');
 
- const switched=await (await bridge('/affiliate/invite/product','POST',{productId:product.id})).json();
- assert.equal(switched.source.mode,'product');
- assert.equal(switched.source.productId,product.id);
- assert.equal(switched.source.stockCount,0,'the legacy dedicated-pool account does not follow the switch');
+ // Stock now belongs on the Xaccount-Bot product, not in a Shiire pool.
+ assert.equal((await addStock('invite-campaign',['x:pw'])).status,409);
 
- // Generator restock now lands in the chosen product's own stock instead of
- // the dedicated INVITE_CAMPAIGN pool.
- await addStock('invite-campaign',['shared1:pw','shared2:pw']);
- affiliate=await (await bridge('/affiliate')).json();
- assert.equal(affiliate.invite.source.stockCount,2);
- assert.equal(affiliate.invite.stock.available,2);
-
- // stock_count is computed live from purchased_accounts, not stored on the
- // row, so read it back through the ordinary vending list route.
- const listed=await (await bridge('/vending')).json();
- const found=listed.find(m=>m.id===machine.id).products.find(p=>p.id===product.id);
- assert.equal(found.stock_count,2,'the ordinary product listing sees the same stock');
-
- // Switching back to the dedicated pool leaves the product's stock behind.
  await bridge('/affiliate/invite/product','POST',{productId:null});
  affiliate=await (await bridge('/affiliate')).json();
  assert.equal(affiliate.invite.source.mode,'dedicated');
  assert.equal(affiliate.invite.stock.available,1,'the original legacy account is still there');
 });
 
-test('an invite reward is delivered from the shared product stock and reserved out of ordinary sale',async t=>{
- const {bridge,addStock,createMachine,createProduct}=await fixture(t);
- const machine=await createMachine('本棚');
- const product=await createProduct(machine.id,{name:'シャドバなし',supplierProductId:'sku-2',pricePayPay:1000,priceKyash:1000});
- await bridge('/affiliate/invite/product','POST',{productId:product.id});
- await addStock('invite-campaign',['credA:pw']);
-
- await bridge('/affiliate/invite/product','POST',{productId:product.id});
- const affiliate=await (await bridge('/affiliate')).json();
- assert.equal(affiliate.invite.source.stockCount,1);
-});
-
-test('choosing an unknown product is rejected and a deleted product is reported as unavailable',async t=>{
- const {bridge,createMachine,createProduct}=await fixture(t);
+test('choosing an unknown product is rejected and a removed product is reported as unavailable',async t=>{
+ const {state,bridge}=await fixture(t);
  assert.equal((await bridge('/affiliate/giveaway/product','POST',{productId:'does-not-exist'})).status,400);
-
- const machine=await createMachine('本棚');
- const product=await createProduct(machine.id,{name:'シャドバなし',supplierProductId:'sku-3',pricePayPay:1000,priceKyash:1000});
- await bridge('/affiliate/giveaway/product','POST',{productId:product.id});
- await bridge('/vending/'+machine.id+'/products/'+product.id,'DELETE');
-
+ assert.equal((await bridge('/affiliate/giveaway/product','POST',{productId:'xp-2'})).status,200);
+ delete state.stock['xp-2'];
  const affiliate=await (await bridge('/affiliate')).json();
  assert.equal(affiliate.giveaway.source.unavailable,true);
  assert.equal(affiliate.giveaway.source.stockCount,0);
 });
 
-test('the free giveaway claims from the chosen product once one is selected',async t=>{
- const {state,bridge,press,addStock,createMachine,createProduct}=await fixture(t);
+test('the free giveaway takes one account from the chosen Xaccount-Bot product per claim',async t=>{
+ const {state,bridge,press,addStock}=await fixture(t);
  await bridge('/free-giveaway/settings','POST',{enabled:true});
-
- // Stock added before a product is chosen lands in, and is claimed from,
- // the legacy dedicated pool.
  await addStock('free-giveaway',['dedicated:pw']);
+ await bridge('/affiliate/giveaway/product','POST',{productId:'xp-1'});
 
- const machine=await createMachine('本棚');
- const product=await createProduct(machine.id,{name:'シャドバなし',supplierProductId:'sku-4',pricePayPay:1000,priceKyash:1000});
- await bridge('/affiliate/giveaway/product','POST',{productId:product.id});
-
- // Once a product is chosen, the dedicated-pool account is left behind...
+ // The dedicated-pool account is left behind and the product is empty.
  await press('1001');
  assert.equal(state.dms.length,0);
+ assert.equal(Object.keys(state.withdrawals).length,1,'one (empty) withdrawal attempt');
 
- // ...but stock the generator sends now (product mode active) reaches the
- // claimant, filed under the product's own stock.
- await addStock('free-giveaway',['shared:pw']);
+ state.stock['xp-1'].push('shared:pw','other:pw');
  await press('1001');
  assert.equal(state.dms.length,1);
  assert.match(state.dms[0].payload.embeds[0].description,/shared:pw/);
-
- const listed=await (await bridge('/vending')).json();
- const found=listed.find(m=>m.id===machine.id).products.find(p=>p.id===product.id);
- assert.equal(found.stock_count,0,'the one unit was reserved for the claimant, not left for ordinary sale');
+ assert.deepEqual(state.stock['xp-1'],['other:pw'],'only one account left the product');
+ // The same user cannot take a second one.
+ await press('1001');
+ assert.equal(state.dms.length,1);
+ assert.deepEqual(state.stock['xp-1'],['other:pw']);
 });

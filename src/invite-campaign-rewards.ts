@@ -15,7 +15,7 @@ import {
   InviteCampaignDiscordError,
   sendInviteCampaignDm
 } from "./invite-campaign-discord";
-import { resolveRewardSource } from "./reward-stock";
+import { ensureXaccountRewardStock, resolveRewardSource } from "./reward-stock";
 
 export type InviteCampaignProgress={
   guild_id:string;
@@ -155,6 +155,7 @@ async function reserveCampaignAccountForReward(
 ):Promise<CampaignAccountRow|null>{
   const source=await resolveRewardSource(env,"invite");
   if(source.unavailable) return null;
+  if(!await ensureXaccountRewardStock(env,source,reward.id)) return null;
   for(let attempt=0;attempt<8;attempt++){
     const row=await env.DB.prepare(
       "SELECT id,credentials_ciphertext,status FROM purchased_accounts "+

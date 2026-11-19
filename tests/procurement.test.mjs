@@ -11,6 +11,7 @@ const bundle=await build({stdin:{contents:`
 import {handleShiireMainBridge} from './src/shiire-vending';
 import {transferHstoraAccounts,stockForClass,ensureProcurementSchema,hstoraClassCaps,capQuantity,jstDayStart} from './src/procurement';
 import {runAllProducts} from './src/engine';
+import {ensureXaccountRewardStock,resolveRewardSource,setRewardProductId,describeRewardSource} from './src/reward-stock';
 import {encryptSensitive} from './src/x-crypto';
 export default {async fetch(request,env){
  const u=new URL(request.url);
@@ -24,6 +25,11 @@ export default {async fetch(request,env){
    const charged=b.charged.map(([cls,share])=>({state:caps.get(cls),share}));
    return Response.json({spent:Object.fromEntries([...caps].map(([k,v])=>[k,v.spentSourceToday])),decision:capQuantity({...b,charged}),dayStart:jstDayStart(Number(u.searchParams.get('now')))});
   }
+  if(u.pathname==='/reward-set'){const b=await request.json();await setRewardProductId(env,b.kind,b.productId,b.guildId);return Response.json(await describeRewardSource(env,b.kind));}
+  if(u.pathname==='/reward-take'){const b=await request.json();const source=await resolveRewardSource(env,b.kind);
+   const ok=await ensureXaccountRewardStock(env,source,b.rewardId);
+   const rows=(await env.DB.prepare("SELECT id,supplier_product_id,status FROM purchased_accounts WHERE supplier='xaccount'").all()).results;
+   return Response.json({ok,mode:source.mode,rows});}
   if(u.pathname==='/schema'){await ensureProcurementSchema(env);return Response.json({ok:true});}
   if(u.pathname==='/account'){
    const b=await request.json();
@@ -54,6 +60,17 @@ async function fixture(options={}){
     if(stock){
      if(options.stockDown) return Response.json({error:'down'},{status:503});
      return Response.json({productId:stock[1],name:'x',available:main.stock[stock[1]]??0,infinite:false});
+    }
+    if(url.pathname==='/api/vending/supply/withdraw'){
+     if(options.withdrawDown) return Response.json({error:'down'},{status:503});
+     const body=await req.json();
+     main.withdrawKeys=(main.withdrawKeys??{});
+     if(!main.withdrawKeys[body.idempotencyKey]){
+      const n=Math.min(body.quantity,main.stock[body.productId]??0);
+      main.stock[body.productId]-=n;
+      main.withdrawKeys[body.idempotencyKey]=Array.from({length:n},(_,i)=>'acct-'+body.idempotencyKey+'-'+i);
+     }
+     return Response.json({ok:true,productId:body.productId,items:main.withdrawKeys[body.idempotencyKey]});
     }
     if(url.pathname==='/api/vending/supply/deliver'){
      const body=await req.json();
@@ -236,4 +253,37 @@ test('per-item amount caps: unit price, per run and per JST day (split orders ch
  const created=await call('POST','/procurement/items',{name:'M',supplierId:manual.body.id,condition:{sku:'S'},dailyLimitJpy:100});
  assert.equal(created.status,400,'caps on a supplier without prices are refused');
  assert.equal(created.body.error,'ITEM_CAPS_UNSUPPORTED');
+});
+
+test('rewards from an Xaccount-Bot product: withdraw one per reward, reuse what waits, survive a lost response',async()=>{
+ const {mf,main,db}=await fixture({stockA:2});
+ const post=async(path,b)=>(await mf.dispatchFetch('https://shiire.example'+path,{method:'POST',body:JSON.stringify(b)})).json();
+ await post('/schema',{});
+ const other=await mf.dispatchFetch('https://shiire.example/reward-set',{method:'POST',body:JSON.stringify({kind:'invite',productId:'prod-a',guildId:'999999999999999999'})});
+ assert.equal(other.status,500,'product of another guild is refused');
+ const set=await post('/reward-set',{kind:'invite',productId:'prod-a',guildId:guild});
+ assert.equal(set.mode,'xaccount');assert.equal(set.productName,'商品A');assert.equal(set.stockCount,2);
+ let r=await post('/reward-take',{kind:'invite',rewardId:'r1'});
+ assert.equal(r.ok,true);assert.equal(r.rows.length,1);assert.equal(main.stock['prod-a'],1);
+ // Something already waits locally: no second withdrawal.
+ r=await post('/reward-take',{kind:'invite',rewardId:'r2'});
+ assert.equal(r.rows.length,1);assert.equal(main.stock['prod-a'],1);
+ // It is used; the next reward withdraws again.
+ await db.prepare("UPDATE purchased_accounts SET status='DELIVERED_INVITE_REWARD' WHERE supplier='xaccount'").run();
+ // Lost response: the withdrawal is recorded but its items never arrive here.
+ const down=await fixture({stockA:1,withdrawDown:true});
+ await (await down.mf.dispatchFetch('https://shiire.example/schema',{method:'POST'})).json();
+ await (await down.mf.dispatchFetch('https://shiire.example/reward-set',{method:'POST',body:JSON.stringify({kind:'giveaway',productId:'prod-a',guildId:guild})})).json();
+ const failed=await (await down.mf.dispatchFetch('https://shiire.example/reward-take',{method:'POST',body:JSON.stringify({kind:'giveaway',rewardId:'u1'})})).json();
+ assert.equal(failed.ok,false);
+ const pending=await down.db.prepare('SELECT idempotency_key,completed_at FROM reward_withdrawals').all();
+ assert.equal(pending.results.length,1);assert.equal(pending.results[0].completed_at,null);
+ r=await post('/reward-take',{kind:'invite',rewardId:'r3'});
+ assert.equal(r.ok,true);assert.equal(main.stock['prod-a'],0);
+ await db.prepare("UPDATE purchased_accounts SET status='DELIVERED_INVITE_REWARD' WHERE supplier='xaccount'").run();
+ r=await post('/reward-take',{kind:'invite',rewardId:'r4'});
+ assert.equal(r.ok,false,'no stock left: the reward waits');
+ const keys=(await db.prepare('SELECT reward_id,completed_at FROM reward_withdrawals ORDER BY created_at').all()).results;
+ assert.deepEqual(keys.map(k=>k.reward_id),['r1','r3','r4']);
+ assert.ok(keys.every(k=>k.completed_at));
 });

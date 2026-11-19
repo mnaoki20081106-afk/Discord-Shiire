@@ -2736,6 +2736,10 @@ export async function handleShiireMainBridge(
       if(source.mode==="product"&&source.unavailable){
         throw new ShiireVendingError(409,"REWARD_PRODUCT_UNAVAILABLE");
       }
+      if(source.mode==="xaccount"){
+        // The reward draws from an Xaccount-Bot product: stock goes there.
+        throw new ShiireVendingError(409,"REWARD_STOCK_IS_XACCOUNT_PRODUCT");
+      }
       // fillProcurementClass can legitimately be null (a plain, non-class
       // product), so the dedicated-pool class is only a fallback for mode
       // "dedicated" — not via `??`, which would also catch that null.
@@ -2765,12 +2769,14 @@ export async function handleShiireMainBridge(
     const [invite,giveaway,products]=await Promise.all([
       getInviteCampaignDashboard(env),
       freeGiveawayOverview(env),
-      listRewardCandidateProducts(env,guildId)
+      // Candidates are Xaccount-Bot products; the rest of the page still loads if that bridge is down.
+      listRewardCandidateProducts(env,guildId).catch(()=>null)
     ]);
     return responseJson({
       invite:{...invite,currentGuildId:guildId,currentGuildSelected:invite.settings.guild_id===guildId},
       giveaway,
-      products
+      products:products??[],
+      productsError:products?null:"Xaccount-Botの商品一覧を取得できませんでした"
     });
   }
 

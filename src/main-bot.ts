@@ -124,6 +124,23 @@ export async function deliverToMain(
   }>(response);
 }
 
+/**
+ * Take stock out of an Xaccount-Bot product (rewards). The same key always
+ * returns the same items, so a retry after a lost response does not take more.
+ */
+export async function withdrawFromMain(
+  env:Env,
+  input:{mainProductId:string;quantity:number;idempotencyKey:string}
+){
+  const body=JSON.stringify({
+    productId:input.mainProductId,
+    quantity:input.quantity,
+    idempotencyKey:input.idempotencyKey
+  });
+  const response=await signedFetch(env,"/api/vending/supply/withdraw",{method:"POST",body},"xaccount");
+  return responseJson<{ok:boolean;productId:string;items:string[];duplicateRequest?:boolean}>(response);
+}
+
 export async function getMainCatalog(env:Env){
   const response=await signedFetch(env,"/api/vending/supply/catalog",{},"xaccount");
   return responseJson<{
