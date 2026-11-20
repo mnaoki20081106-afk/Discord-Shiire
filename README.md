@@ -2,6 +2,14 @@
 
 Main Bot の有限在庫を自動補充する、仕入れ専用 Cloudflare Worker / Discord Bot です。
 
+## 仕入れ専用化（保留中）
+
+仕入れ専用への再設計は段階5まで実装した状態で**保留**しています（ブランチ `claude/keen-edison-m9yjbs`、main 未反映・未デプロイ）。計画と進捗は Xaccount-Bot の `docs/procurement-redesign.md`。
+
+- 実装済み: 仕入れ品 / 仕入れ先テンプレート（`src/procurement.ts`, `/procurement/*`）、HSTORA の仕入れ品ごとの金額上限、招待報酬・無料配布の在庫を Xaccount-Bot の商品から払い出し（`src/reward-stock.ts`）
+- 未着手: 自前ウォレット（HStora の入金アドレスが固定か未確認）、無在庫販売、旧自販機コードの整理、全体テスト
+- デプロイは Xaccount-Bot（supply bridge の `withdraw`）が先
+
 ## Architecture
 
 ```text
